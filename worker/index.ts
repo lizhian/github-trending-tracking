@@ -10,6 +10,11 @@ export interface Env {
   ALLOWED_ORIGIN: string;
 }
 
+interface PendingDiscovery {
+  name: string;
+  listedAt: number;
+}
+
 async function collect(env: Env, now: number) {
   const prior = await state<RunState>(env.DB, "collection");
   const result: RunState = {
@@ -29,7 +34,7 @@ async function collect(env: Env, now: number) {
     failed: 0,
     error: null,
   };
-  let pending = (await state<string[]>(env.DB, "pending")) ?? [];
+  let pending = (await state<PendingDiscovery[]>(env.DB, "pending")) ?? [];
   try {
     const names = await discover();
     const known = new Set(rows.map((r) => r.name.toLowerCase()));
@@ -42,8 +47,13 @@ async function collect(env: Env, now: number) {
         ).bind(now, r.id, r.cycle),
       );
     if (updates.length) await env.DB.batch(updates);
-    pending = [...new Set([...pending, ...names])].filter(
-      (name) => !known.has(name.toLowerCase()),
+    const discoveries = new Map(
+      pending.map((entry) => [entry.name.toLowerCase(), entry]),
+    );
+    for (const name of names)
+      discoveries.set(name.toLowerCase(), { name, listedAt: now });
+    pending = [...discoveries.values()].filter(
+      (entry) => !known.has(entry.name.toLowerCase()),
     );
     rssState.succeededAt = now;
     rssState.succeeded = names.length;
@@ -54,14 +64,18 @@ async function collect(env: Env, now: number) {
   const targets = pending.slice(0, 20);
   if (targets.length) {
     try {
-      const nodes = await repositories(env.GITHUB_TOKEN, targets, false);
-      const successful = nodes.flatMap((repo) =>
+      const nodes = await repositories(
+        env.GITHUB_TOKEN,
+        targets.map((entry) => entry.name),
+        false,
+      );
+      const successful = nodes.flatMap((repo, i) =>
         repo
           ? [
               {
                 repo,
                 previous: rows.find((r) => r.id === repo.id),
-                listed: true,
+                listedAt: targets[i].listedAt,
               },
             ]
           : [],
@@ -69,7 +83,16 @@ async function collect(env: Env, now: number) {
       // Redirects / duplicate RSS names can resolve to the same stable id.
       await saveObservations(
         env.DB,
-        [...new Map(successful.map((o) => [o.repo.id, o])).values()],
+        [
+          ...successful
+            .reduce((unique, observation) => {
+              const prior = unique.get(observation.repo.id);
+              if (!prior || prior.listedAt < observation.listedAt)
+                unique.set(observation.repo.id, observation);
+              return unique;
+            }, new Map<string, (typeof successful)[number]>())
+            .values(),
+        ],
         now,
       );
       pending = [
@@ -77,7 +100,9 @@ async function collect(env: Env, now: number) {
         ...targets.filter((_, i) => !nodes[i]),
       ];
       result.succeeded += successful.length;
-      result.failed += nodes.filter((node) => !node).length;
+      const failed = nodes.filter((node) => !node).length;
+      result.failed += failed;
+      if (failed) result.error = "GitHub repository unavailable";
     } catch (error) {
       result.failed += targets.length;
       result.error = safeError(error);
@@ -113,7 +138,7 @@ async function collect(env: Env, now: number) {
       env.DB,
       group.flatMap((previous) => {
         const repo = byId.get(previous.id);
-        return repo ? [{ repo, previous, listed: false }] : [];
+        return repo ? [{ repo, previous, listedAt: null }] : [];
       }),
       now,
     );

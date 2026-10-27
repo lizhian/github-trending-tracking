@@ -25,7 +25,7 @@ const external = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     return new Response("test-secret", { status: 503 });
   if (String(input).includes("rsshub"))
     return new Response(
-      `<rss><channel>${(rssNames ?? names).map((name) => `<item><link>https://github.com/${name}</link></item>`).join("")}</channel></rss>`,
+      `<rss><channel>${(rssNames ?? names).map((name) => `<item><link>https://github.com/${name}</link><description>See https://github.com/unrelated/linked</description></item>`).join("")}</channel></rss>`,
     );
   const query = JSON.parse(String(init?.body)).query as string;
   const nodes = names.map((name, i) => ({
@@ -184,6 +184,16 @@ test("uses actual rolling observations, expiry, tolerance and partial periods co
   expect(history.trend.delta).toBe(40);
   expect(history.points).toHaveLength(3);
   stars = [130, 170];
+  await run(start + 30 * 24 * 3_600_000);
+  now += 60_000;
+  vi.spyOn(Date, "now").mockReturnValue(now);
+  expect(
+    (await list()).items.find((p: any) => p.id === "R_0").trends["720"].delta,
+  ).toBe(-20);
+  expect(
+    ((await (await api("/api/projects/R_0/history?window=720")).json()) as any)
+      .trend.delta,
+  ).toBe(-20);
   await run(start + 31 * 24 * 3_600_000);
   result = await list();
   expect(result.items[0].trends["720"]).toMatchObject({
@@ -193,8 +203,8 @@ test("uses actual rolling observations, expiry, tolerance and partial periods co
   const retained = (await (
     await api("/api/projects/R_0/history?window=720")
   ).json()) as any;
-  expect(retained.points).toHaveLength(2);
-  now = start + 32 * 24 * 3_600_000;
+  expect(retained.points).toHaveLength(3);
+  now = start + 61 * 24 * 3_600_000;
   vi.spyOn(Date, "now").mockReturnValue(now);
   expect((await list()).items[0].trends["720"]).toMatchObject({
     delta: null,
@@ -298,10 +308,20 @@ test("rotates failed discoveries so other new projects can still enter tracking"
   names = Array.from({ length: 21 }, (_, i) => `acme/new-${i}`);
   stars = names.map(() => 100);
   failedIds = new Set(names.slice(0, 20).map((_, i) => `R_${i}`));
+  const firstSeen = now;
   await run();
   expect((await list()).total).toBe(0);
+  expect((await list()).status.discovery.succeeded).toBe(21);
+  expect((await list()).status.collection.error).toBe(
+    "GitHub repository unavailable",
+  );
+  rssNames = [];
   await run(now + 600_000);
-  expect((await list()).items[0].name).toBe("acme/new-20");
+  expect((await list()).items[0]).toMatchObject({
+    name: "acme/new-20",
+    listedAt: firstSeen,
+    enteredAt: firstSeen + 600_000,
+  });
   failedIds.clear();
   await run(now + 600_000);
   expect((await list()).total).toBe(21);

@@ -7,6 +7,7 @@ export function windowTrend(
   points: Point[],
   hours: WindowHours,
   now: number,
+  observedGaps?: Trend["gaps"],
 ): Trend {
   const valid = points.filter(
     ([time]) => time >= now - RETENTION && time <= now,
@@ -27,13 +28,18 @@ export function windowTrend(
     start: first?.[0] ?? null,
     end: last?.[0] ?? null,
     points: selected,
-    gaps: selected
-      .slice(1)
-      .flatMap((point, i) =>
-        Math.floor(point[0] / HOUR) - Math.floor(selected[i][0] / HOUR) > 1
-          ? [[selected[i][0], point[0]] as [number, number]]
-          : [],
-      ),
+    gaps: observedGaps
+      ? observedGaps.filter(
+          ([from, to]) =>
+            from >= (first?.[0] ?? now) && to <= (last?.[0] ?? now),
+        )
+      : selected
+          .slice(1)
+          .flatMap((point, i) =>
+            Math.floor(point[0] / HOUR) - Math.floor(selected[i][0] / HOUR) > 1
+              ? [[selected[i][0], point[0]] as [number, number]]
+              : [],
+          ),
   };
 }
 

@@ -68,26 +68,7 @@ async function list(env: Env, url: URL, now: number): Promise<ListResult> {
       // cross at most two of those hours at the 30-day boundary.
       const trend = item.trends[720];
       if (trend.start !== null && trend.start < now - RETENTION) {
-        const points = trend.points.filter(([t]) => t >= now - RETENTION);
-        const start = points[0],
-          end = points.at(-1);
-        const comparable = start && end && end[0] > start[0];
-        item.trends[720] = {
-          ...trend,
-          points,
-          start: start?.[0] ?? null,
-          end: end?.[0] ?? null,
-          delta: comparable ? end[1] - start[1] : null,
-          state: !comparable
-            ? "accumulating"
-            : end[0] - start[0] >= 719 * HOUR
-              ? "complete"
-              : "partial",
-          gaps: trend.gaps.filter(
-            ([from, to]) =>
-              from >= (start?.[0] ?? now) && to <= (end?.[0] ?? now),
-          ),
-        };
+        item.trends[720] = windowTrend(trend.points, 720, now, trend.gaps);
       }
     }
     return item;

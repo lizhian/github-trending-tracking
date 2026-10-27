@@ -74,7 +74,11 @@ export function project(row: ProjectRow, now: number): Project {
 }
 export async function saveObservations(
   db: D1Database,
-  observations: { repo: Repository; previous?: ProjectRow; listed: boolean }[],
+  observations: {
+    repo: Repository;
+    previous?: ProjectRow;
+    listedAt: number | null;
+  }[],
   now: number,
 ) {
   const history = await histories(
@@ -83,7 +87,7 @@ export async function saveObservations(
     now,
   );
   const statements: D1PreparedStatement[] = [];
-  for (const { repo, previous, listed } of observations) {
+  for (const { repo, previous, listedAt } of observations) {
     const cycle = previous?.cycle ?? crypto.randomUUID();
     const hour = Math.floor(now / HOUR);
     const points = (history.get(cycle) ?? []).filter(
@@ -107,13 +111,7 @@ export async function saveObservations(
           .prepare(
             `UPDATE projects SET name=?,description=?,language=?,topics=?,observed_at=?,attempted_at=?,stars=?,trends=?,error=NULL,listed_at=MAX(listed_at,?) WHERE id=? AND cycle=? AND observed_at < ?`,
           )
-          .bind(
-            ...values,
-            listed ? now : previous.listed_at,
-            repo.id,
-            cycle,
-            now,
-          ),
+          .bind(...values, listedAt ?? previous.listed_at, repo.id, cycle, now),
       );
     } else {
       statements.push(
@@ -121,7 +119,7 @@ export async function saveObservations(
           .prepare(
             `INSERT INTO projects(id,cycle,name,description,language,topics,observed_at,attempted_at,stars,trends,entered_at,listed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
           )
-          .bind(repo.id, cycle, ...values, now, now),
+          .bind(repo.id, cycle, ...values, now, listedAt ?? now),
       );
     }
     const path = `$."${hour}"`;

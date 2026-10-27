@@ -48,18 +48,17 @@ export async function discover(): Promise<string[]> {
   const items = parsed.rss.channel.item ?? [];
   const names = new Set<string>();
   for (const item of Array.isArray(items) ? items : [items]) {
-    const text = [
-      item.link,
-      item.guid,
-      item.description,
-      item["content:encoded"],
-    ]
-      .filter((v) => typeof v === "string")
-      .join(" ");
-    for (const match of text.matchAll(
-      /https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)(?=[\s<"'?/#&]|$)/g,
-    )) {
+    const link = typeof item.link === "string" ? item.link : "";
+    const guid =
+      typeof item.guid === "string" ? item.guid : item.guid?.["#text"];
+    // RSS entry identity is authoritative; arbitrary links in its prose are not discoveries.
+    for (const candidate of [link, guid]) {
+      if (typeof candidate !== "string") continue;
+      const match = candidate
+        .trim()
+        .match(/^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/?(?:[?#].*)?$/);
       if (
+        match &&
         ![
           "trending",
           "topics",
@@ -68,8 +67,10 @@ export async function discover(): Promise<string[]> {
           "features",
           "marketplace",
         ].includes(match[1])
-      )
+      ) {
         names.add(`${match[1]}/${match[2]}`.replace(/\.git$/, ""));
+        break;
+      }
     }
   }
   return [...names];
