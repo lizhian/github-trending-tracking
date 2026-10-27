@@ -1,8 +1,33 @@
 {
-  "name": "github-trending-tracking-prototype",
+  "name": "github-trending-tracking",
   "private": true,
   "type": "module",
   "scripts": {
-    "prototype": "node prototype/server.mjs"
+    "prototype": "node prototype/server.mjs",
+    "dev": "vite",
+    "dev:worker": "wrangler dev --test-scheduled",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "vite build",
+    "build:worker": "wrangler deploy --dry-run --outdir .wrangler/build",
+    "db:migrate": "wrangler d1 migrations apply DB --local",
+    "configure:deploy": "node scripts/configure-deploy.mjs"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.11.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261027.1",
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "miniflare": "^5.20261019.2-beta",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5",
+    "wrangler": "^4.152.0"
   }
 }
