@@ -66,9 +66,21 @@ npx wrangler deploy --config .wrangler/deploy.json
 ```bash
 export VITE_API_URL='https://github-trending-tracking.你的子域.workers.dev'
 npm run build
-npx wrangler pages project create github-trending-tracking --production-branch main
+# 首次创建时保持前端为独立 Pages 项目；避免新版 CLI 自动改走 Worker。
+npx wrangler pages project create github-trending-tracking --production-branch main --force
 npx wrangler pages deploy dist --project-name github-trending-tracking --branch main
 ```
+
+如使用自定义域名承载页面和 API，可为 Worker 添加 `站点域名/api/*` 路由（区域选择该域名所属的 Cloudflare Zone），Pages 绑定同一个站点域名，并以空的 `VITE_API_URL` 构建前端。同域部署时生成配置需同时设置 `CLOUDFLARE_ZONE_NAME`，使后续 Worker 发布保留这条路由：
+
+```bash
+export ALLOWED_ORIGIN='https://你的站点域名'
+export CLOUDFLARE_ZONE_NAME='你的 Cloudflare Zone 域名'
+npm run configure:deploy
+VITE_API_URL= npm run build
+```
+
+设置路由需要 Workers Routes 编辑权限；Wrangler 标准登录包含该权限。浏览器中已配置的路由也应同步到生成配置，避免后续发布丢失。同域方案的 `pages.dev` 默认域名仅提供静态页面，数据访问通过绑定的自定义域名进行。
 
 Worker 仅接受 GET / OPTIONS，CORS 只允许配置的 Pages 来源（预览域名须另行配置，不使用 `*`）；没有公开采集或管理入口。CORS 是浏览器来源限制，公开数据仍可由非浏览器客户端读取。
 
