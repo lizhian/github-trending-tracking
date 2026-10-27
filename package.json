@@ -1,0 +1,8 @@
+{
+  "name": "github-trending-tracking-prototype",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prototype": "node prototype/server.mjs"
+  }
+}
