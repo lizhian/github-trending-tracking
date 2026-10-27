@@ -1,5 +1,7 @@
 # GitHub 趋势追踪
 
+[线上站点](https://github.lizhian.cc.cd/) · 页面和 API 共用该域名。
+
 无需登录的中文只读趋势站。React / TypeScript / Vite 前端部署到 Cloudflare Pages；Worker 定时从唯一 RSS 趋势源发现项目、使用 GitHub GraphQL 批量获取 Star，D1 保存共享观测。
 
 规格：[Issue #1](https://github.com/lizhian/github-trending-tracking/issues/1)。`prototype/` 是设计探索记录，正式页面位于 `src/`。
@@ -118,3 +120,9 @@ UTC 每 10 分钟运行一次。RSS 仅用于发现及上榜时间，不作为 S
 以上未把所有 SQLite 虚拟表扫描、JSON 处理 CPU、索引维护及重试折算成确定账单，不能视为免费运行承诺。尤其需要观察 D1 的 `rows_read` / `rows_written`、存储量，以及每次定时任务的 CPU / wall time。Cloudflare 当前免费 D1 每日额度为 500 万读行、10 万写行，单库 500 MB；Workers Free CPU 预算也需实测。已使用批量 D1 语句（一个 batch 计一次调用），单次正常采集的数据库调用数控制在 50 次以下，外部请求通常不超过 4 次。高流量、持续大量上榜、长期容量超额或冷数据查询可能超出免费额度。
 
 参考：[D1 计费](https://developers.cloudflare.com/d1/platform/pricing/)、[D1 限制](https://developers.cloudflare.com/d1/platform/limits/)、[Workers 限制](https://developers.cloudflare.com/workers/platform/limits/)、[GitHub GraphQL 限流](https://docs.github.com/en/graphql/overview/rate-limits-and-query-limits-for-the-graphql-api)。实际部署后的 CPU、读写和首轮采集仍需部署环境验证。
+
+## 首次生产验证
+
+2026-10-28 已部署 Pages、Worker 和 D1，并绑定 `github.lizhian.cc.cd`。HTTPS 页面、同域列表查询及详情历史查询均已验证。北京时间 02:00 的首轮自动调度发现并成功采集 10 个真实项目，失败 0；本批次 CPU 17 ms、总耗时约 3.7 秒，D1 数据库约 64 KiB。
+
+这是冷启动小批次的实测记录，不代表 1000 项或完整 30 天历史的资源用量。新项目从真实首个快照开始积累，页面初期显示“积累中”。D1 日读写统计有聚合延迟，稳定运行后再与上述预算比较。
