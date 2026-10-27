@@ -1,5 +1,6 @@
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { parse } from "jsonc-parser";
 const databaseId = process.env.CLOUDFLARE_D1_DATABASE_ID;
 const origin = process.env.ALLOWED_ORIGIN;
 if (
@@ -15,7 +16,7 @@ if (
   throw new Error(
     "Set ALLOWED_ORIGIN to the exact HTTPS Pages origin, without a trailing slash",
   );
-const config = JSON.parse(readFileSync("wrangler.jsonc", "utf8"));
+const config = parse(readFileSync("wrangler.jsonc", "utf8"));
 config.main = resolve("worker/index.ts");
 config.d1_databases[0].database_id = databaseId;
 config.d1_databases[0].migrations_dir = resolve("migrations");
