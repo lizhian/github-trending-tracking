@@ -11,6 +11,7 @@ export interface Env {
   DB: D1Database;
   GITHUB_TOKEN: string;
   ALLOWED_ORIGIN: string;
+  LINUXDO_RSS_FALLBACK_URL?: string;
 }
 
 interface PendingDiscovery {
@@ -38,7 +39,7 @@ async function collect(env: Env, now: number, upstream: Upstream, policy: Sampli
   ])));
   const discovery = await discover(
     upstream, (await state<DiscoveryState>(env.DB, "discoverySources")) ?? emptyDiscovery(),
-    now, priorDiscovery, policy, priorByType,
+    now, priorDiscovery, policy, { priorByType, linuxdoFallbackUrl: env.LINUXDO_RSS_FALLBACK_URL },
   );
   const priorPending = (await state<PendingDiscovery[]>(env.DB, "pending")) ?? [];
   const discoveries = new Map(priorPending.map((entry) => {

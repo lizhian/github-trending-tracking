@@ -1,1 +1,3 @@
 GITHUB_TOKEN=replace-with-local-test-token
+# Optional: same RSS body format as Linux.do; blank disables fallback.
+LINUXDO_RSS_FALLBACK_URL=

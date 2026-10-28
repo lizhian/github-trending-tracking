@@ -285,3 +285,136 @@ test("discovers the same repository in independent types and isolates Linux.do c
   expect(result.byType["linux.do"].failed).toBe(0);
   expect(h.count(h.source("github-daily"))).toBe(3);
 });
+
+test("falls back within the same Linux.do source, then prefers the primary on the next round", async () => {
+  const h = harness();
+  const start = h.upstream.clock.now();
+  const primary = h.source("linuxdo");
+  const fallback = "https://relay.example.com/linuxdo.rss?token=private";
+  h.responses.set(primary, () => new Response("forbidden", { status: 403 }));
+  h.responses.set(fallback, () => new Response('<rss><channel><item><description>https://github.com/acme/relay</description></item></channel></rss>'));
+  let result = await discover(h.upstream, emptyDiscovery(), start, null, policy, { linuxdoFallbackUrl: fallback });
+  expect(result.entries).toEqual([{ type: "linux.do", name: "acme/relay", listedAt: start }]);
+  expect(result.byType["linux.do"]).toMatchObject({ succeededAt: start, succeeded: 1, failed: 0, error: null });
+  expect(h.calls.filter((call) => [primary, fallback].includes(call.url)).map((call) => call.url)).toEqual([primary, fallback]);
+  expect(JSON.stringify(result)).not.toContain("private");
+  h.responses.set(primary, () => new Response('<rss><channel><item><description>https://github.com/acme/original</description></item></channel></rss>'));
+  h.setTime(start + 2 * HOUR);
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy, { linuxdoFallbackUrl: fallback });
+  expect(result.entries).toEqual([{ type: "linux.do", name: "acme/original", listedAt: start + 2 * HOUR }]);
+  expect(h.count(fallback)).toBe(1);
+});
+
+test.each([
+  ["empty feed", "<rss><channel/></rss>"],
+  ["no repositories", "<rss><channel><item><description>No GitHub links</description></item></channel></rss>"],
+])("treats a valid primary %s as success without calling the fallback", async (_name, xml) => {
+  const h = harness();
+  const fallback = "https://relay.example.com/linuxdo.rss";
+  h.responses.set(h.source("linuxdo"), () => new Response(xml));
+  const result = await discover(h.upstream, emptyDiscovery(), h.upstream.clock.now(), null, policy, { linuxdoFallbackUrl: fallback });
+  expect(result.byType["linux.do"]).toMatchObject({ succeeded: 0, failed: 0, error: null });
+  expect(h.count(fallback)).toBe(0);
+});
+
+test.each([
+  { name: "invalid RSS", respond: () => new Response("<rss>") },
+  { name: "network error", respond: () => { throw new Error("private endpoint or credentials"); } },
+  { name: "timeout", respond: () => { throw new DOMException("private endpoint timeout", "TimeoutError"); } },
+])("falls back when the primary has $name", async ({ respond }) => {
+  const h = harness();
+  const fallback = "https://relay.example.com/linuxdo.rss";
+  h.responses.set(h.source("linuxdo"), respond);
+  h.responses.set(fallback, () => new Response('<rss><channel><item><description>https://github.com/acme/recovered</description></item></channel></rss>'));
+  const result = await discover(h.upstream, emptyDiscovery(), h.upstream.clock.now(), null, policy, { linuxdoFallbackUrl: fallback });
+  expect(result.entries.map((entry) => entry.name)).toEqual(["acme/recovered"]);
+  expect(result.byType["linux.do"].failed).toBe(0);
+  expect(h.count(fallback)).toBe(1);
+  expect(JSON.stringify(result)).not.toContain("private");
+});
+
+test("reports both failures safely, retries the available fallback after 30 minutes, and restores primary preference", async () => {
+  const h = harness();
+  const start = h.upstream.clock.now();
+  const primary = h.source("linuxdo");
+  const fallback = "https://relay.example.com/linuxdo.rss?token=private";
+  h.responses.set(primary, () => new Response("limited", { status: 429, headers: { "Retry-After": "7200" } }));
+  h.responses.set(fallback, () => new Response("private response", { status: 503 }));
+  let result = await discover(h.upstream, emptyDiscovery(), start, null, policy, { linuxdoFallbackUrl: fallback });
+  expect(result.byType["linux.do"]).toMatchObject({ failed: 1, error: "linuxdo: primary: RSS HTTP 429; fallback: RSS HTTP 503" });
+  expect(result.byType.github.failed).toBe(0);
+  expect(JSON.stringify(result)).not.toMatch(/relay\.example|private/);
+  const retry = result.state.sources.linuxdo.nextAt;
+  expect(retry - start).toBeGreaterThanOrEqual(30 * 60_000);
+  expect(retry - start).toBeLessThan(31 * 60_000);
+  h.setTime(retry - 1);
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy, { linuxdoFallbackUrl: fallback });
+  expect(h.count(fallback)).toBe(1);
+  h.responses.set(fallback, () => new Response("<rss><channel/></rss>"));
+  h.setTime(retry);
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy, { linuxdoFallbackUrl: fallback });
+  expect(h.count(primary)).toBe(1); // Its longer host cooldown does not block the fallback.
+  expect(h.count(fallback)).toBe(2);
+  expect(result.byType["linux.do"]).toMatchObject({ failed: 0, error: null });
+  h.responses.set(primary, () => new Response("<rss><channel/></rss>"));
+  h.setTime(start + 2 * HOUR + 60_000);
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy, { linuxdoFallbackUrl: fallback });
+  expect(h.count(primary)).toBe(2);
+  expect(h.count(fallback)).toBe(2);
+});
+
+test("can enable fallback during a persisted single-endpoint host cooldown", async () => {
+  const h = harness();
+  const start = h.upstream.clock.now();
+  const primary = h.source("linuxdo");
+  const fallback = "https://relay.example.com/linuxdo.rss";
+  h.responses.set(primary, () => new Response("limited", { status: 429, headers: { "Retry-After": "7200" } }));
+  let result = await discover(h.upstream, emptyDiscovery(), start, null, policy);
+  expect(result.state.sources.linuxdo.nextAt).toBeGreaterThan(start + HOUR);
+  delete result.state.sources.linuxdo.retryAfter; // Production state from the old single-endpoint version.
+  h.setTime(start + 34 * 60_000);
+  result = await discover(h.upstream, JSON.parse(JSON.stringify(result.state)), h.upstream.clock.now(), result.status, policy, { linuxdoFallbackUrl: fallback });
+  expect(h.count(primary)).toBe(1);
+  expect(h.count(fallback)).toBe(1);
+  expect(result.byType["linux.do"]).toMatchObject({ failed: 0, succeededAt: start + 34 * 60_000 });
+});
+
+test.each([160_000, 145_000])("defers the Linux.do chain at its shared discovery budget (prior work: %s ms)", async (priorWork) => {
+  const h = harness();
+  const start = h.upstream.clock.now();
+  const fallback = "https://relay.example.com/linuxdo.rss";
+  h.responses.set(h.source("opengithubs-monthly"), async () => {
+    await h.upstream.clock.sleep(priorWork);
+    return new Response("");
+  });
+  h.responses.set(h.source("linuxdo"), async () => {
+    await h.upstream.clock.sleep(14_000);
+    return new Response("forbidden", { status: 403 });
+  });
+  let result = await discover(h.upstream, emptyDiscovery(), start, null, policy, { linuxdoFallbackUrl: fallback });
+  expect(h.count(h.source("linuxdo"))).toBe(priorWork === 160_000 ? 0 : 1);
+  expect(h.count(fallback)).toBe(0);
+  expect(result.state.sources.linuxdo).toBeUndefined();
+  expect(h.upstream.clock.now() - start).toBeLessThanOrEqual(3 * 60_000);
+  h.responses.set(h.source("linuxdo"), () => new Response("forbidden", { status: 403 }));
+  h.setTime(start + 4 * 60_000);
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy, { linuxdoFallbackUrl: fallback });
+  expect(h.count(fallback)).toBe(1);
+  expect(result.byType["linux.do"].failed).toBe(0);
+});
+
+
+test("respects fallback host cooldown while allowing a recovered primary to succeed", async () => {
+  const h = harness();
+  const fallback = "https://relay.example.com/linuxdo.rss";
+  h.upstream.cooldown(fallback);
+  h.responses.set(h.source("linuxdo"), () => new Response("forbidden", { status: 403 }));
+  let result = await discover(h.upstream, emptyDiscovery(), h.upstream.clock.now(), null, policy, { linuxdoFallbackUrl: fallback });
+  expect(result.byType["linux.do"].error).toBe("linuxdo: primary: RSS HTTP 403; fallback: Upstream cooling down");
+  expect(h.count(fallback)).toBe(0);
+  h.responses.set(h.source("linuxdo"), () => new Response("<rss><channel/></rss>"));
+  h.setTime(result.state.sources.linuxdo.nextAt);
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy, { linuxdoFallbackUrl: fallback });
+  expect(result.byType["linux.do"].failed).toBe(0);
+  expect(h.count(fallback)).toBe(0);
+});

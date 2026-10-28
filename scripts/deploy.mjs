@@ -30,7 +30,7 @@ const wrangler = fileURLToPath(
 );
 const configPath = ".wrangler/deploy.json";
 
-function run(command, args, capture = false) {
+function run(command, args, capture = false, input) {
   console.log(
     `> ${command === process.execPath ? "node" : command} ${args.join(" ")}`,
   );
@@ -38,15 +38,17 @@ function run(command, args, capture = false) {
     cwd: root,
     env: process.env,
     encoding: "utf8",
-    stdio: capture ? ["ignore", "pipe", "inherit"] : "inherit",
+    input,
+    stdio: input !== undefined ? ["pipe", "inherit", "inherit"]
+      : capture ? ["ignore", "pipe", "inherit"] : "inherit",
   });
   if (result.error) throw result.error;
   if (result.status !== 0)
     throw new Error(`Command failed (${result.status}): ${args.join(" ")}`);
   return result.stdout;
 }
-const cf = (args, capture = false) =>
-  run(process.execPath, [wrangler, ...args], capture);
+const cf = (args, capture = false, input) =>
+  run(process.execPath, [wrangler, ...args], capture, input);
 
 async function verify(origin, expectedAssets = []) {
   const expectedTitle = readFileSync("index.html", "utf8").match(
@@ -210,6 +212,8 @@ async function main() {
   }
   if (publishWorker) {
     cf(["d1", "migrations", "apply", "DB", "--remote", "--config", configPath]);
+    const fallbackUrl = process.env.LINUXDO_RSS_FALLBACK_URL?.trim();
+    if (fallbackUrl) cf(["secret", "put", "LINUXDO_RSS_FALLBACK_URL", "--config", configPath], false, `${fallbackUrl}\n`);
     cf(["deploy", "--config", configPath, "--minify"]);
   }
   let assets = [];

@@ -5,6 +5,8 @@ import { DeferredRequest, safeError, type Upstream } from "./upstream";
 import { latestSlot, nextSlot as nextSamplingSlot, type SamplingPolicy } from "./schedule";
 
 const RSS = "https://rsshub-balancer.virworks.moe";
+const DISCOVERY_BUDGET = 3 * 60_000;
+const RETRY_DELAY = 30 * 60_000;
 export const SOURCES = [
   {
     id: "github-daily", kind: "github",
@@ -39,6 +41,7 @@ export const SOURCES = [
 
 interface SourceState extends RunState {
   nextAt: number;
+  retryAfter?: number;
 }
 export interface Discovery {
   type: ProjectType;
@@ -144,15 +147,44 @@ export function parseMarkdown(text: string): string[] {
   return repositoryLinks(text).filter((name) => name.split("/")[0].toLowerCase() !== "opengithubs");
 }
 
+class LinuxRSSFailure extends Error {
+  constructor(message: string, readonly retryAt: number) { super(message); }
+}
+async function linuxRepositories(upstream: Upstream, primary: string, fallback: string | undefined, deadline: number) {
+  if (!fallback) return parseLinuxRSS(await upstream.text(primary, "RSS", {}, deadline));
+  const errors: string[] = [];
+  const readyAt: number[] = [];
+  let attempted = false;
+  for (const [role, url] of [["primary", primary], ["fallback", fallback]]) {
+    try {
+      // Reject a bad optional setting only when it is needed; never expose its value.
+      if (!/^https?:$/.test(new URL(url).protocol)) throw new Error("Invalid RSS URL");
+      return parseLinuxRSS(await upstream.text(url, "RSS", {}, deadline));
+    } catch (error) {
+      if (error instanceof DeferredRequest) {
+        if (error.retryAt === null) throw error; // Shared discovery budget, not endpoint failure.
+        readyAt.push(error.retryAt);
+      } else {
+        attempted = true;
+        // Invalid configuration must not escape the source and break the scheduler.
+        try { readyAt.push(upstream.blockedUntil(url)); } catch { readyAt.push(0); }
+      }
+      errors.push(`${role}: ${safeError(error)}`);
+    }
+  }
+  if (!attempted) throw new DeferredRequest(Math.min(...readyAt));
+  throw new LinuxRSSFailure(errors.join("; "), Math.max(upstream.clock.now() + RETRY_DELAY, Math.min(...readyAt)));
+}
+
 export async function discover(
   upstream: Upstream,
   state: DiscoveryState,
   now: number,
   prior: RunState | null,
   policy?: SamplingPolicy,
-  priorByType: Partial<Record<ProjectType, RunState>> = {},
+  options: { priorByType?: Partial<Record<ProjectType, RunState>>; linuxdoFallbackUrl?: string } = {},
 ): Promise<{ entries: Discovery[]; status: RunState; byType: Record<ProjectType, RunState>; state: DiscoveryState; changed: boolean }> {
-  const deadline = upstream.clock.now() + 3 * 60_000;
+  const deadline = upstream.clock.now() + DISCOVERY_BUDGET;
   const day = beijingDay(now);
   let changed = false;
   if (policy && now >= policy.effectiveAt && state.scheduleVersion !== policy.version) {
@@ -178,18 +210,24 @@ export async function discover(
   let succeeded = false;
   const attemptedTypes = new Set<ProjectType>();
   const succeededTypes = new Set<ProjectType>();
+  const fallback = options.linuxdoFallbackUrl?.trim() || undefined;
   for (const source of SOURCES) {
     const previous = state.sources[source.id];
-    if ((previous?.nextAt ?? 0) > now) continue;
+    // Separate source backoff from the primary's longer host cooldown. For legacy
+    // states allow the full three-minute discovery budget before the 30-minute wait.
+    const nextAt = source.kind === "linuxdo" && fallback && previous?.failed
+      ? Math.min(previous.nextAt, previous.retryAfter ?? previous.attemptedAt + DISCOVERY_BUDGET + RETRY_DELAY) : previous?.nextAt ?? 0;
+    if (nextAt > now) continue;
     try {
-      const text = await upstream.text(
-        source.url, source.kind === "markdown" ? "OpenGithubs" : "RSS", {}, deadline,
-      );
+      let values: string[];
+      if (source.kind === "linuxdo") values = await linuxRepositories(upstream, source.url, fallback, deadline);
+      else {
+        const text = await upstream.text(source.url, source.kind === "markdown" ? "OpenGithubs" : "RSS", {}, deadline);
+        values = source.kind === "markdown" ? parseMarkdown(text)
+          : source.kind === "github" ? parseGithubRSS(text) : parseHelloRSS(text);
+      }
       attempted = true;
       attemptedTypes.add(source.type);
-      const values = source.kind === "markdown" ? parseMarkdown(text)
-        : source.kind === "github" ? parseGithubRSS(text)
-        : source.kind === "linuxdo" ? parseLinuxRSS(text) : parseHelloRSS(text);
       if (source.kind === "hellogithub") {
         for (const url of new Set(values)) {
           const cached = state.resolved[url];
@@ -213,8 +251,10 @@ export async function discover(
       attemptedTypes.add(source.type);
       state.sources[source.id] = {
         attemptedAt: now, succeededAt: previous?.succeededAt ?? null,
-        succeeded: 0, failed: 1, error: safeError(error),
-        nextAt: Math.max(upstream.clock.now() + 30 * 60_000, upstream.blockedUntil(source.url)),
+        succeeded: 0, failed: 1, error: error instanceof LinuxRSSFailure ? error.message : safeError(error),
+        retryAfter: upstream.clock.now() + RETRY_DELAY,
+        nextAt: error instanceof LinuxRSSFailure ? error.retryAt
+          : Math.max(upstream.clock.now() + RETRY_DELAY, upstream.blockedUntil(source.url)),
       };
     }
   }
@@ -243,7 +283,7 @@ export async function discover(
       attempted = true;
       attemptedTypes.add("github");
       task.error = safeError(error);
-      task.nextAt = Math.max(upstream.clock.now() + 30 * 60_000, upstream.blockedUntil(task.url));
+      task.nextAt = Math.max(upstream.clock.now() + RETRY_DELAY, upstream.blockedUntil(task.url));
     }
   }
   const errors = [
@@ -259,7 +299,7 @@ export async function discover(
         ...sources.flatMap(([id, value]) => value.failed ? [`${id}: ${value.error}`] : []),
         ...(type === "github" ? state.details.flatMap((task) => task.error ? [`hellogithub-detail: ${task.error}`] : []) : []),
       ];
-      const previous = priorByType[type];
+      const previous = options.priorByType?.[type];
       return [type, {
         attemptedAt: attemptedTypes.has(type) ? now : previous?.attemptedAt ?? Math.max(0, ...sources.map(([, value]) => value.attemptedAt)),
         succeededAt: succeededTypes.has(type) ? now : previous?.succeededAt ?? (Math.max(0, ...sources.map(([, value]) => value.succeededAt ?? 0)) || null),

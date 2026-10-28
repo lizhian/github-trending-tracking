@@ -120,6 +120,7 @@ beforeAll(async () => {
   }
 });
 beforeEach(async () => {
+  delete env.LINUXDO_RSS_FALLBACK_URL;
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.stubGlobal("fetch", external);
@@ -773,4 +774,21 @@ test("shares admission retry cooldown across types before a repository has any t
     expect(result.total).toBe(1);
     expect(result.items[0]).toMatchObject({ stars: 150, enteredAt: now, observedAt: now });
   }
+});
+
+
+test("uses the optional Worker fallback RSS configuration for Linux.do admission", async () => {
+  const fallback = "https://relay.example.com/linuxdo.rss?token=private";
+  env.LINUXDO_RSS_FALLBACK_URL = fallback;
+  rssNames = [];
+  const primary = SOURCES.find((source) => source.id === "linuxdo")!.url;
+  sourceResponses.set(primary, () => new Response("forbidden", { status: 403 }));
+  sourceResponses.set(fallback, () => new Response('<rss><channel><item><description>https://github.com/acme/alpha</description></item></channel></rss>'));
+  await run();
+  const result = await list("?type=linux.do");
+  expect(result).toMatchObject({ total: 1, status: { discovery: { failed: 0 }, collection: { succeeded: 1, failed: 0 } } });
+  expect(result.items[0]).toMatchObject({ id: "linux.do:R_0", name: "acme/alpha", stars: 100 });
+  expect((await list()).total).toBe(0);
+  expect(JSON.stringify(result)).not.toMatch(/relay\.example|private/);
+  expect((await api("/api/projects/linux.do:R_0/history?window=24")).status).toBe(200);
 });
