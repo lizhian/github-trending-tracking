@@ -1,13 +1,15 @@
 export const WINDOWS = [24, 72, 168, 720] as const;
 export type WindowHours = (typeof WINDOWS)[number];
 export type Point = [time: number, stars: number];
-export interface Trend {
+export interface TrendSummary {
   delta: number | null;
   state: "accumulating" | "partial" | "complete";
   start: number | null;
   end: number | null;
-  points: Point[];
   gaps: [number, number][];
+}
+export interface Trend extends TrendSummary {
+  points: Point[];
 }
 export interface Project {
   id: string;
@@ -22,7 +24,7 @@ export interface Project {
   attemptedAt: number;
   error: string | null;
   stale: boolean;
-  trends: Record<WindowHours, Trend>;
+  trends: Record<WindowHours, TrendSummary>;
 }
 export interface RunState {
   attemptedAt: number;
@@ -39,7 +41,13 @@ export interface ListResult {
   pages: number;
   languages: string[];
   topics: string[];
-  summary: { tracked: number; fresh: number; accumulating: number };
+  summary: {
+    tracked: number;
+    fresh: number;
+    accumulating: number;
+    net24: number | null;
+    comparable24: number;
+  };
   status: Record<string, RunState | CleanupResult>;
   asOf: number;
 }

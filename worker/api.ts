@@ -1,6 +1,11 @@
-import { WINDOWS, type ListResult, type WindowHours } from "./contracts";
-import { histories, project, type ProjectRow } from "./store";
-import { allTrends, HOUR, RETENTION, windowTrend } from "./trends";
+import {
+  WINDOWS,
+  type ListResult,
+  type Project,
+  type WindowHours,
+} from "./contracts";
+import { histories, projects as projectViews, type ProjectRow } from "./store";
+import { HOUR, windowTrend } from "./trends";
 import type { Env } from "./index";
 
 class ParameterError extends Error {}
@@ -33,7 +38,14 @@ function parameters(url: URL) {
     !/^[1-9]\d{0,5}$/.test(pageText)
   )
     throw new ParameterError("排序或页码无效");
-  return { q, language, topic, sort, direction, page: Number(pageText) };
+  return {
+    q,
+    language,
+    topic,
+    sort,
+    direction,
+    page: Number(pageText),
+  };
 }
 async function list(env: Env, url: URL, now: number): Promise<ListResult> {
   const {
@@ -47,36 +59,12 @@ async function list(env: Env, url: URL, now: number): Promise<ListResult> {
   const rows = (
     await env.DB.prepare("SELECT * FROM projects").all<ProjectRow>()
   ).results;
-  // Only summaries are scanned; full hourly histories use the cycle/day primary key.
-  // Load exact history only when the rolling retention boundary invalidates a summary.
-  const expired = rows.filter((row) => {
-    const trend = JSON.parse(row.trends)["720"];
-    return (
-      trend.start !== null &&
-      trend.start < now - RETENTION &&
-      now - row.observed_at > 2 * HOUR
-    );
-  });
-  const expiredCycles = new Set(expired.map((row) => row.cycle));
-  const actual = await histories(env.DB, [...expiredCycles], now);
-  const projects = rows.map((row) => {
-    const item = project(row, now);
-    if (expiredCycles.has(row.cycle))
-      item.trends = allTrends(actual.get(row.cycle) ?? [], now);
-    else {
-      // Summaries keep the first four actual hours. A fresh (<=2h) summary can
-      // cross at most two of those hours at the 30-day boundary.
-      const trend = item.trends[720];
-      if (trend.start !== null && trend.start < now - RETENTION) {
-        item.trends[720] = windowTrend(trend.points, 720, now, trend.gaps);
-      }
-    }
-    return item;
-  });
+  const projects = await projectViews(env.DB, rows, now);
   const languages = [
     ...new Set(projects.flatMap((p) => (p.language ? [p.language] : []))),
   ].sort();
   const topics = [...new Set(projects.flatMap((p) => p.topics))].sort();
+  const comparable = projects.filter((p) => p.trends[24].delta !== null);
   const filtered = projects.filter(
     (p) =>
       (!q || `${p.name} ${p.description ?? ""}`.toLowerCase().includes(q)) &&
@@ -130,6 +118,10 @@ async function list(env: Env, url: URL, now: number): Promise<ListResult> {
       tracked: projects.length,
       fresh: projects.filter((p) => !p.stale).length,
       accumulating: projects.filter((p) => p.trends[24].delta === null).length,
+      net24: comparable.length
+        ? comparable.reduce((sum, p) => sum + p.trends[24].delta!, 0)
+        : null,
+      comparable24: comparable.length,
     },
     status: Object.fromEntries(
       states.map((row) => [row.key, JSON.parse(row.value)]),
@@ -165,7 +157,9 @@ export async function query(request: Request, env: Env): Promise<Response> {
         typeof caches !== "undefined"
           ? (caches as CacheStorage & { default: Cache }).default
           : undefined;
-      const cacheKey = new Request(url.toString());
+      const cacheUrl = new URL(url);
+      cacheUrl.searchParams.set("_schema", "source-tabs-v1");
+      const cacheKey = new Request(cacheUrl.toString());
       const cached = await cache?.match(cacheKey);
       if (cached) {
         const response = new Response(cached.body, cached);
@@ -173,7 +167,7 @@ export async function query(request: Request, env: Env): Promise<Response> {
         if (origin) response.headers.set("Access-Control-Allow-Origin", origin);
         return response;
       }
-      headers.set("Cache-Control", "public, max-age=60");
+      headers.set("Cache-Control", "public, max-age=600");
       const response = json(await list(env, url, now));
       if (cache) await cache.put(cacheKey, response.clone());
       return response;

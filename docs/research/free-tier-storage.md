@@ -1,0 +1,109 @@
+# 免费运行：D1、Workers KV 与 R2 研究
+
+日期：2026-10-28。状态：已完成 Workers + D1 第一阶段本地优化与验证，未发布；免费与数据精度约束见 [ADR 0002](../adr/0002-zero-charge-runtime.md)，本地结果见文末。
+
+范围：约 1000 个追踪项目、每小时一次 Star 快照、保留 30 天。以下数量预算假设稳定在 1000 项、无失败重试，不代表生产实测；保护期允许容量临时超额，见 [ADR 0001](../adr/0001-protect-new-projects-during-retention.md)。
+
+## 结论
+
+用户已确定禁止任何自动扣费可能，保留 1000 项目标、每小时真实 Star 快照、30 天查询和四窗口计算精度；面向个人或小范围分享，列表允许延迟 10 分钟，接受访问容量上限。
+
+第一阶段沿用 Workers + D1。KV 可承载低频发布的公共查询数据，不能直接替代每项目每小时写入的历史库；只有实测证明有必要时才引入。R2 的免费包含量不构成禁止超额扣费的保证，因此已排除当前方案；原因是计费约束，不是存储容量不足。
+
+## 官方事实
+
+| 服务 | 免费额度 | 对本项目的约束 |
+| --- | --- | --- |
+| D1 Free | 每日 500 万读行、10 万写行；账户共 5 GB，单库 500 MB | 插入、更新、删除均计写行，索引也可能增加写行；达到每日读写额度后查询失败。 |
+| Workers KV Free | 每日 10 万 key 读取、1000 key 写入、1000 删除、1000 次 list；1 GB 存储 | 按 key 计数，批量调用不能把多个 key 算一次；额度用尽对应操作失败。 |
+| R2 Standard | 每月 10 GB-month、100 万 Class A、1000 万 Class B；免出口流量费 | PUT/list 属 A，GET/HEAD 属 B；普通删除免费。超额按量收费，Infrequent Access 不适用这些免费量。 |
+
+来源：[D1 计费](https://developers.cloudflare.com/d1/platform/pricing/)、[D1 限制](https://developers.cloudflare.com/d1/platform/limits/)、[KV 计费](https://developers.cloudflare.com/kv/platform/pricing/)、[R2 计费](https://developers.cloudflare.com/r2/pricing/)。这些额度还会与同账号其他使用共享，不能全部视为本站独占预算。
+
+Workers Free 的 HTTP 请求和 Cron 均为每次 10 ms CPU；等待上游或数据库不计入 CPU，但 JSON 解析、排序和趋势计算会消耗 CPU。更换存储不会改变这项限制。[Workers 限制](https://developers.cloudflare.com/workers/platform/limits/#cpu-time)
+
+KV 是最终一致的，其他地区可在 60 秒甚至更久后才看到更新；同地区立即可见也没有保证，不能拿来替换调度租约或并发协调。KV 单 value 最大 25 MiB；官方指出大 value 的返回类型会影响 CPU，流式最快，JSON 解码最慢。[KV 一致性](https://developers.cloudflare.com/kv/concepts/how-kv-works/)、[KV 限制](https://developers.cloudflare.com/kv/platform/limits/)、[KV 读取](https://developers.cloudflare.com/kv/api/read-key-value-pairs/)
+
+R2 对对象操作提供强一致性，但放在 CDN 后仍要单独处理缓存新鲜度。生产公共访问应使用自定义域名；`r2.dev` 有限速，仅面向开发。[R2 一致性](https://developers.cloudflare.com/r2/reference/consistency/)、[公共 bucket](https://developers.cloudflare.com/r2/buckets/public-buckets/)
+
+R2 开始使用需要 subscription 并完成 checkout；它属于用量超额可计费的服务。官方账单文档说明付款方式与此类订阅关联，可能发生预授权；不应把免费包含量理解为无需付款资料的硬封顶套餐。具体账户可用付款方式需在实际启用时确认。[R2 开始使用](https://developers.cloudflare.com/r2/get-started/)、[用量计费](https://developers.cloudflare.com/billing/understand/usage-based-billing/)、[付款方式](https://developers.cloudflare.com/billing/troubleshoot/resolve-cannot-remove-payment-method/)、[账单政策](https://developers.cloudflare.com/billing/understand/billing-policy/)
+
+官方预算告警仅通知，不暂停服务、不封顶用量。本次未找到 R2 可配置为 $0 自动停用的官方保证，因此严格排除任何超额扣费风险时，应暂不选 R2。[预算告警](https://developers.cloudflare.com/billing/manage/budget-alerts/)
+
+## 优化前的数量预算
+
+优化前，每次成功采样读取该项目最多 31 个日记录，解析小时点，并重新计算四个窗口，再更新一行项目和一行当日日记录。因此原预算为：
+
+- 每日 24,000 次采样，基础写入约 48,000 行；采样历史读取最多约 744,000 日记录行。
+- 30 天共有约 720,000 个小时点，按日约 31,000 行。存储预计不是当前主要瓶颈，实际字节数仍须实测。
+- 原清理每十分钟检查边界日，重写含过期小时点的 JSON。满 30 天后，逐小时移除过期点可再增加约 24,000 次日记录更新/天，还未包括索引、删除、状态、新项目与重试。
+- 原列表缓存未命中扫描约 1000 项，并在 Worker 中筛选、排序；按完整查询 URL 缓存 60 秒。陈旧摘要在 30 天边界失效时还会读历史。详情无缓存。
+
+上述为业务层行数预算。SQL 虚拟表扫描、索引维护和具体执行计划需以 D1 `meta.rows_read` / `meta.rows_written` 校准，不能仅凭返回行数推算账单。
+
+已确定并实现按整日物理清理：查询继续严格过滤 30 天外的小时点，只删除已完全过期的日记录，不逐小时重写边界日。底层可多留约一天，正常清理失败时删除也可能延迟；不改变查询窗口，估计可省约 24,000 行更新/天。
+
+## 三种方向
+
+| 方向 | 收益 | 代价与判断 |
+| --- | --- | --- |
+| D1 保留事实数据，优化计算和查询 | 沿用事务、追踪周期、级联删除与已有结构；避免新增系统 | 已选并完成首阶段本地实现，生产 CPU 尚待验证。 |
+| D1 + KV 发布公共查询数据 | 将已序列化的少量固定数据包直接流式返回，可减少列表 D1 扫描与 Worker 重复计算 | 需接受发布延迟与最终一致性；不能继续每次拿全站 JSON 在 Worker 中解析筛选，否则 CPU 收益有限。 |
+| D1 + R2 历史或公共 JSON | 适合较大只读对象、不可变历史和通过 CDN 直接分发的数据 | 按量订阅不符合已确定的禁止自动扣费约束，排除当前方案。 |
+
+### KV 的打包预算
+
+每项目每小时一个 key 更新：`1000 × 24 = 24,000` 写/天，超过免费 1000 写/天。换成 bulk PUT 仍然如此。
+
+如果发布一个全站查询包，每小时一次仅 24 写/天，每十分钟一次是 144 写/天。也可以用固定分片，预算公式为“每轮更新 key 数 × 每日发布轮数”，版本指针也单独计写。不要为任意搜索词、筛选组合逐个生成 key；即使仅 20 页 × 每小时一次，已是 480 写/天，增加多套排序会很快超限。
+
+真正减少请求 CPU 的方式是预序列化后流式返回，或由浏览器筛选排序；后者会改变数据传输与前端职责，需要用户确认。发布端本身也必须满足 CPU 预算，不能假设“只执行一次的全站计算”一定能放进 10 ms。
+
+KV 只存可重建的公共结果；D1 继续负责采集进度、租约和事实数据。多 key 发布还需处理读者混用版本的问题，版本指针的最终一致性不能视作跨 key 原子事务。
+
+## 第一阶段改动与后续候选
+
+以下说明哪些已落地，哪些仍是后续候选；均未证明生产全链路能满足 10 ms：
+
+1. 已拆开列表摘要和详情历史。[main.tsx](../../src/main.tsx) 的列表只使用净增量、观测状态、起止时间和缺测信息，图表仅在详情展示；[trends.ts](../../worker/trends.ts) 不再为采样生成四套压缩点。旧摘要中的图点在读取时剔除，项目下次采样自然更新。
+2. [github.ts](../../worker/github.ts) 平时只查稳定标识与 Star；新项目完整查询，名称、简介、语言、Topics 随小时采样每 24 小时刷新。元数据变更可能稍后显示，Star 精度不变。
+3. [store.ts](../../worker/store.ts) 在 D1 中先直接读取边界小时及下一小时的 JSON key，遇到真实缺测才按日查找最早有效点；Worker 不再解析整段历史。真实缺测区间随成功观测维护，同小时替换修正端点；陈旧摘要只修正已越过保留边界的窗口。
+4. [retention.ts](../../worker/retention.ts) 复用准确摘要评分，保留保护期、失败暂缓淘汰与追踪周期隔离。物理过期按整日清理。
+5. 列表保持现有服务端筛选排序，缓存延长至 10 分钟。统一公开快照、浏览器筛选或 KV 发布仍是后续候选；本次没有增加 KV 或全站数据复制。
+6. [index.ts](../../worker/index.ts) 改为每分钟最多采样 30 项，理想吞吐 1800 项/小时；通过新到期索引只返回本批项目，没有保留每分钟两次全表读取。发现无新尝试、队列无变化、主机状态无变化时减少重复写回。新索引约增加 24,000 写行/天，已包含在本地采样预算中。
+
+优化前稳态反复处理的小时点约为 `1000 × 24 × 720 = 1728 万/天`，还没计入四窗口重复扫描；这是处理量估计，不是 D1 计费读行。原有发现流程仍可能在一轮读取多个 RSS 和详情，单次大型 XML/RSS 解析、冷列表及大规模缺测摘要仍可能超出 CPU 额度。缩小采样批次没有自动解决这些风险。
+
+### R2 的迁移陷阱
+
+每项目每小时更新一个对象是约 720,000 PUT/30 天，约占免费 A 操作 72%，还没算其他写入、list 和重试。31 天月份则约 744,000 次。
+
+如果直接将当前“每项目每天一个历史记录”搬成 R2 对象，而采样仍每次读取 31 天，采集本身最多约 `1000 × 24 × 31 × 30 = 22,320,000` GET/月，已经超过免费 1000 万 B 操作。把 30 天打包成单对象能减少 GET 数，却让每次采样都下载并解析全历史，继续承受 CPU 开销。
+
+如果只归档已结束的日记录，约 30,000 PUT/月，但必须先让正常采集不再回读全部历史，否则读取成本仍在。公共数据直接从 R2/CDN 提供能减少 Worker 动态查询；单纯把 D1 数据复制过去并继续动态计算，没有这个效果。
+
+## 可选免费计算后备
+
+如果 Workers 优化后仍不能满足 10 ms，可评估把采集与计算移到 GitHub Actions，让 Worker 仅查询或流式分发。公开仓库的标准 GitHub 托管 runner 可免费使用；本次已用 `gh repo view` 核实仓库为 PUBLIC、默认分支为 main。scheduled workflow 可能延迟或丢任务、只在默认分支运行，公开库 60 天无活动会自动停用。因此它需要用户接受调度和托管方式的变化，不能承诺每小时必有快照。这只是后备，不意味着采用频繁提交数据到 Git 或每小时部署 Pages 的方式。[Actions 计费](https://docs.github.com/en/billing/concepts/product-billing/github-actions)、[schedule 事件](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
+
+## 本地验证与剩余限制
+
+用户已确认：物理按日清理、查询严格 30 天；真实缺测、过期与必要时暂停服务可接受；API 仅供本站，可调整内部结构；先沿用 Workers + D1，KV 和 Actions 都没有启用。约束以 ADR 0002 为准。
+
+[free-tier.test.ts](../../tests/free-tier.test.ts) 在独立本地 Miniflare D1 中生成 1000 项、720 个小时点/项，读取实际 `meta.rows_read` / `rows_written`，包含 JSON 虚拟表和索引。2026-10-28 结果：
+
+| 操作 | 本地结果 |
+| --- | --- |
+| 30 项采样 | 300 读行、90 写行、2 次 D1 调用 |
+| 24,000 次采样的每日折算 | 240,000 读行、72,000 写行；不含调度、发现与用户请求 |
+| 一轮 30 项稳态调度 | 2253 读行、96 写行、15 次 D1 调用；不含当日新发现与淘汰 |
+| 全站摘要刚跨 30 天边界的冷列表 | 4000 读行、24 次 D1 调用 |
+| 约一天物理过期清理 | 1000 写行；边界日内推进一分钟无改写 |
+| 此测试数据库 | 26,914,816 bytes，约 27 MB |
+| 30 项纯趋势函数的本地 Node CPU 对比 | 四窗口历史扫描约 2.43 ms；基准点摘要约 0.044 ms；不含 D1 和 Worker 运行时 |
+
+可复跑：`FREE_TIER_BUDGET_REPORT=/tmp/github-trending-free-tier-budget.json npx vitest run tests/free-tier.test.ts`。本地 CPU 测量无硬阈值，不能作为生产 CPU 通过证明；SQLite 额度测试保留读写余量断言。
+
+调度读取还包括到期索引范围与排序；每天要累加所有轮次，不能只按一轮的最大值相乘。每日写入还要加上租约、状态、日记录索引、新发现、删除与重试。缺测较多时 SQL 回退路径与缺测区间会更大；高频筛选和不同边缘节点会增加缓存未命中次数。
+
+集成测试保留缺测、负净增量、30 天边界、保护期超额及重新收录的周期隔离，并补充轻量 Star 请求、每日元数据刷新、同小时缺测端点替换与旧结果写回。生产还需验证完整调度（尤其发现阶段）、冷查询的 CPU，以及稳定日读写和小时覆盖率；当前未迁移生产数据、启用新资源或发布。若生产 CPU 仍超限，按已确认范围再讨论 Actions 后备。

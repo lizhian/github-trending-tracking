@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, beforeEach, expect, test, vi } from "vitest";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import worker, { type Env } from "../worker/index";
 import { upstreamClock } from "../worker/upstream";
 import { SOURCES } from "../worker/discovery";
+import { saveObservations, type ProjectRow } from "../worker/store";
 
 const mf = new Miniflare(
   convertV4MiniflareOptions({
@@ -26,8 +27,12 @@ let sourceResponses = new Map<string, () => Response>();
 const external = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
   const custom = sourceResponses.get(String(input));
   if (custom) return custom();
-  if (String(input).includes("raw.githubusercontent.com")) return new Response("");
-  if (String(input).includes("rsshub") && !String(input).includes("/github/trending/daily/"))
+  if (String(input).includes("raw.githubusercontent.com"))
+    return new Response("");
+  if (
+    String(input).includes("rsshub") &&
+    !String(input).includes("/github/trending/daily/")
+  )
     return new Response("<rss><channel></channel></rss>");
   if (String(input).includes("rsshub") && rssFailure)
     return new Response("test-secret", { status: 503 });
@@ -91,11 +96,15 @@ beforeAll(async () => {
     GITHUB_TOKEN: "test-secret",
     ALLOWED_ORIGIN: "https://site.test",
   };
-  await env.DB.exec(
-    readFileSync("migrations/0001_tracking.sql", "utf8")
-      .replace(/--[^\n]*/g, "")
-      .replace(/\n/g, " "),
-  );
+  for (const file of readdirSync("migrations")
+    .filter((file) => file.endsWith(".sql"))
+    .sort()) {
+    await env.DB.exec(
+      readFileSync(`migrations/${file}`, "utf8")
+        .replace(/--[^\n]*/g, "")
+        .replace(/\n/g, " "),
+    );
+  }
 });
 beforeEach(async () => {
   vi.restoreAllMocks();
@@ -222,6 +231,106 @@ test("uses actual rolling observations, expiry, tolerance and partial periods co
   });
 });
 
+test("samples only stars between daily metadata refreshes and keeps same-hour gap replacements exact", async () => {
+  const start = now;
+  await run();
+  rssNames = [];
+  external.mockClear();
+  stars[0] = 140;
+  await run(start + 3 * 3_600_000);
+  const hourly = external.mock.calls.filter(([input]) =>
+    String(input).includes("api.github.com"),
+  );
+  expect(hourly).toHaveLength(1);
+  expect(JSON.parse(String(hourly[0][1]?.body)).query).not.toContain(
+    "repositoryTopics",
+  );
+  const previous = await env.DB.prepare(
+    "SELECT * FROM projects WHERE id='R_0'",
+  ).first<ProjectRow>();
+  now += 600_000;
+  await saveObservations(
+    env.DB,
+    [
+      {
+        repo: { id: "R_0", stargazerCount: 135 },
+        previous: previous!,
+        listedAt: null,
+      },
+    ],
+    now,
+  );
+  const replacement = await env.DB.prepare(
+    "SELECT * FROM projects WHERE id='R_0'",
+  ).first<ProjectRow>();
+  // An older result cannot replace a newer point in the same tracking cycle.
+  await saveObservations(
+    env.DB,
+    [
+      {
+        repo: { id: "R_0", stargazerCount: 999 },
+        previous: previous!,
+        listedAt: null,
+      },
+    ],
+    now - 60_000,
+  );
+  expect(
+    await env.DB.prepare(
+      "SELECT observed_at FROM projects WHERE id='R_0'",
+    ).first(),
+  ).toEqual({ observed_at: now });
+  vi.spyOn(Date, "now").mockReturnValue(now);
+  const item = (await list()).items.find((item: any) => item.id === "R_0");
+  const history = (await (
+    await api("/api/projects/R_0/history?window=720")
+  ).json()) as any;
+  expect(item.trends[720]).toMatchObject({ delta: 35, gaps: [[start, now]] });
+  expect(item.trends[720]).not.toHaveProperty("points");
+  expect(item.trends[720].gaps).toEqual(history.gaps);
+  expect(JSON.parse(replacement!.trends)[720].gaps).toEqual(history.gaps);
+  external.mockClear();
+  names[0] = "acme/renamed-without-listing";
+  await run(start + 25 * 3_600_000);
+  const daily = external.mock.calls.filter(([input]) =>
+    String(input).includes("api.github.com"),
+  );
+  expect(JSON.parse(String(daily[0][1]?.body)).query).toContain(
+    "repositoryTopics",
+  );
+  expect((await list()).items.find((item: any) => item.id === "R_0").name).toBe(
+    names[0],
+  );
+});
+
+test("aggregates known partial deltas and negative values across all tracked projects", async () => {
+  const start = now;
+  await run(start);
+  expect((await list()).summary).toMatchObject({
+    net24: null,
+    comparable24: 0,
+  });
+  expect(await list()).not.toHaveProperty("views");
+  stars = [400, 150];
+  await run(start + 3_600_000);
+  expect((await list()).items[0].trends[24]).toMatchObject({
+    delta: 300,
+    state: "partial",
+  });
+  expect(
+    (await list("?q=useful&language=TypeScript&topic=tools")).summary,
+  ).toMatchObject({ net24: 250, comparable24: 2 });
+  stars[0] = 399;
+  names.push("acme/gamma");
+  stars.push(900);
+  await run(start + 2 * 3_600_000);
+  expect((await list()).summary).toMatchObject({
+    net24: 249,
+    comparable24: 2,
+    accumulating: 1,
+  });
+});
+
 test("combines filters, stable sorting, nulls-last and 50-item pagination; rejects invalid and write requests", async () => {
   names = Array.from(
     { length: 53 },
@@ -251,8 +360,14 @@ test("combines filters, stable sorting, nulls-last and 50-item pagination; rejec
   expect((await list("?sort=24&direction=desc&page=2")).items.at(-1).name).toBe(
     "acme/zz-new",
   );
+  expect((await list("?page=2")).summary).toMatchObject({
+    net24: -10,
+    comparable24: 53,
+  });
   expect((await api("/api/projects?sort=invalid")).status).toBe(400);
   expect((await api("/api/projects?page=0")).status).toBe(400);
+  for (const removed of ["all", "hot", "new", "invalid"])
+    expect((await api(`/api/projects?view=${removed}`)).status).toBe(400);
   expect((await api("/api/projects/R_0/history?window=25")).status).toBe(400);
   expect(
     (
@@ -289,7 +404,7 @@ test("keeps protected overflow, removes lowest reliable growth at 04:00 Beijing,
   stars[0] = 600;
   stars[1] = 200;
   // All projects get a second observation, but still lack 24h of history.
-  for (let i = 0; i < 6; i++) await run(start + 23 * 3_600_000 + i * 1000);
+  for (let i = 0; i < 34; i++) await run(start + 23 * 3_600_000 + i * 1000);
   expect((await list()).total).toBe(1004);
   await run(start + 24 * 3_600_000);
   const cleaned = await list();
@@ -365,24 +480,47 @@ test("the worked retention scores favor recent acceleration over historical popu
     expect((await api(`/api/projects/${id}/history`)).status).toBe(404);
 }, 60_000);
 
-
 test("persists independent source and detail progress, keeps original listing times and deduplicates across sources", async () => {
   const page = "https://hellogithub.com/repository/abc123";
   const hello = SOURCES.find((source) => source.id === "hellogithub-all")!.url;
   const weekly = SOURCES.find((source) => source.id === "github-weekly")!.url;
-  const markdown = SOURCES.find((source) => source.id === "opengithubs-daily")!.url;
-  sourceResponses.set(hello, () => new Response(`<rss><channel><item><link>${page}</link></item></channel></rss>`));
-  sourceResponses.set(weekly, () => new Response("private response must not escape", { status: 503 }));
-  sourceResponses.set(markdown, () => new Response("https://github.com/ACME/alpha/tree/main https://github.com/OpenGithubs/weekly"));
+  const markdown = SOURCES.find(
+    (source) => source.id === "opengithubs-daily",
+  )!.url;
+  sourceResponses.set(
+    hello,
+    () =>
+      new Response(
+        `<rss><channel><item><link>${page}</link></item></channel></rss>`,
+      ),
+  );
+  sourceResponses.set(
+    weekly,
+    () => new Response("private response must not escape", { status: 503 }),
+  );
+  sourceResponses.set(
+    markdown,
+    () =>
+      new Response(
+        "https://github.com/ACME/alpha/tree/main https://github.com/OpenGithubs/weekly",
+      ),
+  );
   sourceResponses.set(page, () => new Response("not embedded project data"));
   const firstSeen = now;
   await run();
   expect((await list()).total).toBe(2);
   expect((await list()).status.discovery.failed).toBe(2);
-  const calls = (url: string) => external.mock.calls.filter(([input]) => String(input) === url).length;
+  const calls = (url: string) =>
+    external.mock.calls.filter(([input]) => String(input) === url).length;
   const sourceCalls = calls(hello);
   sourceResponses.set(weekly, () => new Response("<rss><channel/></rss>"));
-  sourceResponses.set(page, () => new Response(`<script id="__NEXT_DATA__">${JSON.stringify({ props: { pageProps: { repo: { url: "https://github.com/acme/new" } } } })}</script>`));
+  sourceResponses.set(
+    page,
+    () =>
+      new Response(
+        `<script id="__NEXT_DATA__">${JSON.stringify({ props: { pageProps: { repo: { url: "https://github.com/acme/new" } } } })}</script>`,
+      ),
+  );
   names.push("acme/new");
   stars.push(300);
   await run(firstSeen + 10 * 60_000);
@@ -392,8 +530,11 @@ test("persists independent source and detail progress, keeps original listing ti
   const result = await list();
   expect(result.total).toBe(3);
   expect(result.status.discovery.failed).toBe(0);
-  expect(result.items.find((item: any) => item.name === "acme/new")).toMatchObject({
-    listedAt: firstSeen, enteredAt: firstSeen + 30 * 60_000,
+  expect(
+    result.items.find((item: any) => item.name === "acme/new"),
+  ).toMatchObject({
+    listedAt: firstSeen,
+    enteredAt: firstSeen + 30 * 60_000,
   });
   expect(calls(hello)).toBe(sourceCalls);
   expect(JSON.stringify(result)).not.toContain("private response");

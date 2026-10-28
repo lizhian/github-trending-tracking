@@ -1,4 +1,10 @@
-import React, { Fragment, useEffect, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { createRoot } from "react-dom/client";
 import {
   WINDOWS,
@@ -8,8 +14,10 @@ import {
   type Project,
   type RunState,
   type Trend,
+  type TrendSummary,
   type WindowHours,
 } from "../worker/contracts";
+import { SearchSelect } from "./SearchSelect";
 import "./style.css";
 
 const labels: Record<WindowHours, string> = {
@@ -20,51 +28,168 @@ const labels: Record<WindowHours, string> = {
 };
 const number = (value: number) => new Intl.NumberFormat("zh-CN").format(value);
 const signed = (value: number | null) =>
-  value === null ? "—" : `${value >= 0 ? "+" : "−"}${number(Math.abs(value))}`;
+  value === null
+    ? "积累中"
+    : `${value < 0 ? "−" : "+"}${number(Math.abs(value))}`;
+const compact = (value: number) =>
+  Math.abs(value) > 1000 ? `${(value / 1000).toFixed(1)}k` : number(value);
+const compactSigned = (value: number | null) =>
+  value === null
+    ? "积累中"
+    : `${value < 0 ? "−" : "+"}${compact(Math.abs(value))}`;
 const time = (value: number | null | undefined) =>
   value
     ? new Date(value).toLocaleString("zh-CN", { hour12: false })
     : "尚无成功记录";
-const interval = (trend: Trend) =>
-  trend.start && trend.end
-    ? `${time(trend.start)} — ${time(trend.end)}`
-    : "尚无有效观测";
-const stateLabel = (trend: Trend) =>
+const stateLabel = (trend: TrendSummary) =>
   trend.state === "accumulating"
     ? "积累中"
     : trend.state === "partial"
       ? "部分观测"
       : "完整观测";
 const apiBase = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
-async function get<T>(path: string, signal: AbortSignal): Promise<T> {
-  const response = await fetch(`${apiBase}${path}`, { signal });
-  if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as {
-      error?: string;
-    } | null;
-    throw new Error(body?.error ?? "请求失败，请稍后重试");
+const sorts = ["name", "stars", ...WINDOWS.map(String)];
+interface QueryState {
+  q: string;
+  language: string;
+  topic: string;
+  tab: "github" | "linuxdo";
+  sort: string;
+  direction: "asc" | "desc";
+  page: number;
+  project: string;
+  window: WindowHours;
+}
+function readLocation(): QueryState {
+  const params = new URLSearchParams(location.search);
+  const text = (key: string) => (params.get(key) ?? "").slice(0, 200);
+  const page = text("page");
+  const hours = Number(text("window")) as WindowHours;
+  return {
+    q: text("q"),
+    language: text("language"),
+    topic: text("topic"),
+    tab: text("tab") === "linuxdo" ? "linuxdo" : "github",
+    sort: sorts.includes(text("sort")) ? text("sort") : "24",
+    direction: text("direction") === "asc" ? "asc" : "desc",
+    page: /^[1-9]\d{0,5}$/.test(page) ? Number(page) : 1,
+    project: text("project"),
+    window: WINDOWS.includes(hours) ? hours : 720,
+  };
+}
+function listParameters(query: QueryState) {
+  return new URLSearchParams({
+    q: query.q,
+    language: query.language,
+    topic: query.topic,
+    sort: query.sort,
+    direction: query.direction,
+    page: String(query.page),
+  });
+}
+function locationFor(query: QueryState) {
+  const params = listParameters(query);
+  for (const [key, value] of [...params]) {
+    if (
+      !value ||
+      (key === "sort" && value === "24") ||
+      (key === "direction" && value === "desc") ||
+      (key === "page" && value === "1")
+    )
+      params.delete(key);
   }
-  return response.json();
+  if (query.tab === "linuxdo") params.set("tab", "linuxdo");
+  if (query.project) params.set("project", query.project);
+  if (query.window !== 720) params.set("window", String(query.window));
+  return `${location.pathname}${params.size ? `?${params}` : ""}${location.hash}`;
+}
+interface Resource<T> {
+  path: string;
+  value: T | null;
+  loading: boolean;
+  error: string;
+}
+function useApi<T>(
+  path: string,
+  revision: string | number = 0,
+  enabled = true,
+): Resource<T> {
+  const [resource, setResource] = useState<Resource<T>>({
+    path: "",
+    value: null,
+    loading: true,
+    error: "",
+  });
+  useEffect(() => {
+    if (!enabled) return;
+    const controller = new AbortController();
+    setResource((previous) => ({
+      path,
+      value: previous.path === path ? previous.value : null,
+      loading: true,
+      error: "",
+    }));
+    async function read() {
+      try {
+        const response = await fetch(`${apiBase}${path}`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          const body = (await response.json().catch(() => null)) as {
+            error?: string;
+          } | null;
+          throw new Error(body?.error || "请求失败，请稍后重试");
+        }
+        const value = (await response.json()) as T;
+        if (!controller.signal.aborted)
+          setResource({ path, value, loading: false, error: "" });
+      } catch (error) {
+        if (!controller.signal.aborted)
+          setResource((previous) => ({
+            path,
+            value: previous.path === path ? previous.value : null,
+            loading: false,
+            error:
+              error instanceof Error ? error.message : "请求失败，请稍后重试",
+          }));
+      }
+    }
+    void read();
+    return () => controller.abort();
+  }, [path, revision, enabled]);
+  if (!enabled) return { ...resource, loading: false, error: "" };
+  return resource.path === path
+    ? resource
+    : { path, value: null, loading: true, error: "" };
 }
 function Icon({
   name,
-  size = 18,
+  size = 16,
 }: {
-  name: "radar" | "search" | "refresh" | "sun" | "moon" | "info" | "chevron";
+  name:
+    | "mark"
+    | "search"
+    | "refresh"
+    | "reset"
+    | "github"
+    | "external"
+    | "previous"
+    | "next"
+    | "sun"
+    | "moon";
   size?: number;
 }) {
   const paths = {
-    radar: (
+    mark: (
       <>
-        <circle cx="12" cy="12" r="8" />
-        <circle cx="12" cy="12" r="3" />
-        <path d="m12 12 7-7" />
+        <path d="M3 21V3h6v18M15 21V3h6v18M3 12h18" />
+        <path className="mark-signal" d="m6 18 6-6 6-6" />
       </>
     ),
     search: (
       <>
         <circle cx="10.5" cy="10.5" r="6.5" />
-        <path d="m16 16 4.5 4.5" />
+        <path d="m16 16 5 5" />
       </>
     ),
     refresh: (
@@ -73,6 +198,17 @@ function Icon({
         <path d="M6 6a8 8 0 0 1 14 6M4 12a8 8 0 0 0 14 6" />
       </>
     ),
+    reset: (
+      <>
+        <path d="M4 10a8 8 0 1 1 1 8M4 4v6h6" />
+      </>
+    ),
+    github: (
+      <path d="M9 21v-4c-4 1-4-2-6-2m12 6v-4a3.5 3.5 0 0 0-1-3c3-.4 6-1.5 6-6a4.7 4.7 0 0 0-1-3c.1-1 .1-2-1-3-2 0-3 1-3 1a12 12 0 0 0-6 0s-1-1-3-1c-1 1-1 2-1 3a4.7 4.7 0 0 0-1 3c0 4.5 3 5.6 6 6a3.5 3.5 0 0 0-1 3" />
+    ),
+    external: <path d="M14 3h7v7M21 3 10 14M10 3H3v18h18v-7" />,
+    previous: <path d="m15 5-7 7 7 7" />,
+    next: <path d="m9 5 7 7-7 7" />,
     sun: (
       <>
         <circle cx="12" cy="12" r="4" />
@@ -80,13 +216,6 @@ function Icon({
       </>
     ),
     moon: <path d="M20.5 13.5A9 9 0 0 1 10.5 3a9 9 0 1 0 10 10.5Z" />,
-    info: (
-      <>
-        <circle cx="12" cy="12" r="9" />
-        <path d="M12 11v6m0-10v.2" />
-      </>
-    ),
-    chevron: <path d="m9 5 7 7-7 7" />,
   };
   return (
     <svg
@@ -95,7 +224,7 @@ function Icon({
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.7"
+      strokeWidth="1.5"
       strokeLinecap="round"
       strokeLinejoin="round"
       aria-hidden="true"
@@ -104,142 +233,279 @@ function Icon({
     </svg>
   );
 }
-function Chart({ trend, mini = false }: { trend: Trend; mini?: boolean }) {
+function Chart({ trend }: { trend: Trend }) {
   const points = trend.points;
-  const width = mini ? 100 : 620,
-    height = mini ? 30 : 210,
-    pad = mini ? 2 : 12;
-  const min = Math.min(...points.map((p) => p[1])),
-    max = Math.max(...points.map((p) => p[1]));
-  const begin = points[0]?.[0] ?? 0,
-    end = points.at(-1)?.[0] ?? 0;
-  const xy = ([t, stars]: Point) => [
-    pad + ((t - begin) / (end - begin || 1)) * (width - 2 * pad),
-    height - pad - ((stars - min) / (max - min || 1)) * (height - 2 * pad),
+  const min = Math.min(...points.map((point) => point[1]));
+  const max = Math.max(...points.map((point) => point[1]));
+  const first = points[0]?.[0] ?? 0;
+  const last = points.at(-1)?.[0] ?? first;
+  const range = max - min || 1;
+  const xy = ([at, stars]: Point) => [
+    first === last ? 232 : 4 + ((at - first) / (last - first)) * 228,
+    106 - ((stars - min) / range) * 77,
   ];
-  const paths: Point[][] = [];
+  const segments: Point[][] = [];
   for (const point of points) {
-    const previous = paths.at(-1)?.at(-1);
+    const previous = segments.at(-1)?.at(-1);
     if (
       !previous ||
       trend.gaps.some(([from, to]) => previous[0] <= from && point[0] >= to)
     )
-      paths.push([point]);
-    else paths.at(-1)!.push(point);
+      segments.push([point]);
+    else segments.at(-1)!.push(point);
   }
   return (
     <svg
-      className={mini ? "sparkline" : "chart"}
-      viewBox={`0 0 ${width} ${height}`}
-      preserveAspectRatio="none"
-      role={mini ? undefined : "img"}
-      aria-hidden={mini || undefined}
-      aria-label={
-        mini
-          ? undefined
-          : `Star 总数曲线，${stateLabel(trend)}，净增量 ${signed(trend.delta)}，${trend.gaps.length} 段缺测`
-      }
+      className="chart"
+      viewBox="0 0 270 145"
+      role="img"
+      aria-label={`Star 总数曲线，${stateLabel(trend)}，净增量 ${signed(trend.delta)}，${trend.gaps.length} 段缺测`}
     >
-      {!mini &&
-        [0.25, 0.5, 0.75].map((y) => (
-          <line
-            key={y}
-            x1={pad}
-            x2={width - pad}
-            y1={height * y}
-            y2={height * y}
-            className="chart-grid"
-          />
-        ))}
-      {paths.map((segment, i) => (
+      {[29, 67.5, 106].map((y, index) => (
+        <g key={y}>
+          <line className="chart-grid" x1="4" x2="232" y1={y} y2={y} />
+          <text x="240" y={y + 3}>
+            {new Intl.NumberFormat("zh-CN", {
+              notation: "compact",
+              maximumFractionDigits: 1,
+            }).format(max - ((max - min) * index) / 2)}
+          </text>
+        </g>
+      ))}
+      {segments.map((segment, index) => (
         <polyline
-          key={i}
-          points={segment.map((p) => xy(p).join(",")).join(" ")}
-          fill="none"
-          stroke="currentColor"
-          strokeWidth={mini ? 2 : 2.5}
-          vectorEffect="non-scaling-stroke"
+          key={index}
+          className="chart-line"
+          points={segment.map((point) => xy(point).join(",")).join(" ")}
         />
       ))}
-      {points.map((point, i) => {
+      {points.map((point, index) => {
         const [cx, cy] = xy(point);
         return (
           <circle
-            key={i}
+            key={index}
+            className="chart-point"
             cx={cx}
             cy={cy}
-            r={mini ? 1.3 : 2.4}
-            fill="currentColor"
+            r={points.length > 48 ? 1.5 : 2.5}
           >
             <title>
-              {time(point[0])} · {number(point[1])} Star
+              {time(point[0])}：{number(point[1])} Star
             </title>
           </circle>
         );
       })}
+      <text x="4" y="132">
+        {new Date(first).toLocaleDateString("zh-CN", {
+          month: "numeric",
+          day: "numeric",
+        })}
+      </text>
+      <text x="232" y="132" textAnchor="end">
+        最新快照
+      </text>
     </svg>
   );
 }
-function TrendCell({ trend }: { trend: Trend }) {
+function ProjectColumns() {
   return (
-    <div
-      className={`trend ${trend.delta !== null && trend.delta < 0 ? "negative" : ""}`}
-      title={interval(trend)}
-    >
-      <div>
-        <strong>{signed(trend.delta)}</strong>
-        <small>
-          {stateLabel(trend)}
-          {trend.gaps.length > 0 ? " · 缺测" : ""}
-        </small>
-      </div>
-      <Chart trend={trend} mini />
-      <span className="sr-only">{interval(trend)}</span>
-    </div>
+    <colgroup>
+      <col className="rank-column" />
+      <col className="name-column" />
+      <col className="language-column" />
+      {Array.from({ length: 5 }, (_, index) => (
+        <col className="number-column" key={index} />
+      ))}
+    </colgroup>
   );
 }
-function Details({ project }: { project: Project }) {
-  const [window, setWindow] = useState<WindowHours>(24);
-  const [history, setHistory] = useState<HistoryResult | null>(null);
-  const [error, setError] = useState("");
-  const [retry, setRetry] = useState(0);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true);
-    setError("");
-    setHistory(null);
-    get<HistoryResult>(
-      `/api/projects/${encodeURIComponent(project.id)}/history?window=${window}`,
-      controller.signal,
-    )
-      .then(setHistory)
-      .catch((e) => {
-        if (!controller.signal.aborted) setError(e.message);
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => controller.abort();
-  }, [project.id, project.observedAt, window, retry]);
+function TrendValue({ trend }: { trend: TrendSummary }) {
+  const hint = `${stateLabel(trend)}${trend.start && trend.end ? `，${time(trend.start)} 至 ${time(trend.end)}` : ""}${trend.gaps.length ? `，${trend.gaps.length} 段缺测` : ""}`;
   return (
-    <section
-      id={`details-${project.id}`}
-      className="details"
-      aria-label={`${project.name} 详情`}
+    <span
+      className={
+        trend.delta === null
+          ? "accumulating"
+          : `gain ${trend.delta < 0 ? "negative" : ""}`
+      }
+      title={`${signed(trend.delta)}，${hint}`}
+      aria-label={`${signed(trend.delta)}，${hint}`}
     >
-      <div className="description">
-        <span className="eyebrow">项目简介</span>
-        <h3>{project.name.split("/").at(-1)}</h3>
-        <p>{project.description || "仓库尚未提供简介。"}</p>
+      {compactSigned(trend.delta)}
+    </span>
+  );
+}
+function Details({
+  project,
+  window,
+  refresh,
+  asOf,
+  onWindow,
+  onTopic,
+  onRefresh,
+}: {
+  project: Project;
+  window: WindowHours;
+  refresh: number;
+  asOf: number;
+  onWindow: (hours: WindowHours) => void;
+  onTopic: (topic: string) => void;
+  onRefresh: () => void;
+}) {
+  const [retry, setRetry] = useState(0);
+  const history = useApi<HistoryResult>(
+    `/api/projects/${encodeURIComponent(project.id)}/history?window=${window}`,
+    `${project.observedAt}:${refresh}:${retry}`,
+  );
+  const current = history.value;
+  const trend = current?.trend;
+  const [owner, ...name] = project.name.split("/");
+  const protectedNow = asOf - project.enteredAt < 24 * 3_600_000;
+  const days =
+    trend?.start && trend.end ? (trend.end - trend.start) / 86_400_000 : null;
+  return (
+    <section className="detail-content" aria-label={`${project.name} 详情`}>
+      <h2 className="detail-title">
         <a
           href={`https://github.com/${project.name}`}
           target="_blank"
           rel="noreferrer"
         >
-          在 GitHub 查看 ↗
+          <span className="detail-owner">{owner} / </span>
+          <wbr />
+          <span className="detail-repo-name">{name.join("/")}</span>
         </a>
-        <dl>
+      </h2>
+      <p className="detail-description">
+        {project.description || "仓库尚未提供简介。"}
+      </p>
+      <div className="topics" aria-label="仓库 Topics">
+        {project.topics.length ? (
+          project.topics.map((topic) => (
+            <button
+              type="button"
+              className="topic-button"
+              key={topic}
+              onClick={() => onTopic(topic)}
+              aria-label={`筛选 Topic ${topic}`}
+            >
+              {topic}
+            </button>
+          ))
+        ) : (
+          <span className="detail-muted">仓库尚未提供 Topics</span>
+        )}
+      </div>
+      {(project.stale || project.error) && (
+        <p className="notice" role="status">
+          {project.stale ? "数据过期，已超过 2 小时未成功更新。" : ""}
+          {project.error ? "项目更新异常，继续显示有效观测。" : ""}
+        </p>
+      )}
+      <div className="detail-stat">
+        <span>Star 总数</span>
+        <div className="detail-star-line">
+          <strong>{number(project.stars)}</strong>
+          {trend && !history.loading && (
+            <span
+              className={`delta-badge ${trend.delta !== null && trend.delta < 0 ? "negative" : ""}`}
+            >
+              {signed(trend.delta)}
+            </span>
+          )}
+        </div>
+      </div>
+      <div className="history-region" aria-busy={history.loading}>
+        {history.loading ? (
+          <p className="chart-message" role="status">
+            加载中…
+          </p>
+        ) : history.error ? (
+          <div className="chart-message" role="alert">
+            <p>{history.error}</p>
+            <button
+              type="button"
+              onClick={() => setRetry((value) => value + 1)}
+            >
+              重试历史查询
+            </button>
+            <button type="button" onClick={onRefresh}>
+              刷新项目列表
+            </button>
+          </div>
+        ) : trend && current ? (
+          <>
+            <div className="chart-heading">
+              <span>Star 总数</span>
+              <span>局部纵轴</span>
+            </div>
+            {trend.points.length ? (
+              <Chart trend={trend} />
+            ) : (
+              <p className="chart-message">积累中</p>
+            )}
+            {(current.gaps.length > 0 || current.stale) && (
+              <p className="chart-note" role="status">
+                {current.gaps.length ? `缺测 ${current.gaps.length} 段` : ""}
+                {current.stale ? " 历史数据过期" : ""}
+              </p>
+            )}
+          </>
+        ) : null}
+      </div>
+      <div className="periods" aria-label="趋势窗口">
+        {WINDOWS.map((hours) => (
+          <button
+            type="button"
+            key={hours}
+            aria-pressed={window === hours}
+            onClick={() => onWindow(hours)}
+          >
+            {labels[hours]}
+          </button>
+        ))}
+      </div>
+      <dl className="observation">
+        <dt>编程语言</dt>
+        <dd>{project.language || "未提供"}</dd>
+        <dt>{labels[window]} Star 净增量</dt>
+        <dd>
+          {history.loading
+            ? "读取中"
+            : trend
+              ? signed(trend.delta)
+              : "暂不可用"}
+        </dd>
+        <dt>保护期</dt>
+        <dd>{protectedNow ? "保护中" : "已结束"}</dd>
+      </dl>
+      <details className="record-times">
+        <summary>观测详情</summary>
+        <dl className="observation">
+          <dt>观测状态</dt>
+          <dd>
+            {history.loading
+              ? "读取中"
+              : trend
+                ? stateLabel(trend)
+                : "查询失败"}
+          </dd>
+          <dt>实际观测跨度</dt>
+          <dd>
+            {days === null
+              ? "尚无有效观测"
+              : days < 1
+                ? `${Math.round(days * 24 * 10) / 10} 小时`
+                : `${Math.round(days * 10) / 10} 天`}
+          </dd>
+          <dt>实际观测次数</dt>
+          <dd>
+            {history.loading
+              ? "读取中"
+              : current
+                ? current.points.length
+                : "暂不可用"}
+          </dd>
           <dt>本次入库</dt>
           <dd>{time(project.enteredAt)}</dd>
           <dt>最近上榜</dt>
@@ -247,90 +513,28 @@ function Details({ project }: { project: Project }) {
           <dt>最后成功观测</dt>
           <dd>{time(project.observedAt)}</dd>
         </dl>
-      </div>
-      <div className="chart-panel">
-        <div className="chart-heading">
-          <h3>Star 总数</h3>
-          <div className="tabs" aria-label="图表趋势窗口">
-            {WINDOWS.map((hours) => (
-              <button
-                key={hours}
-                aria-pressed={window === hours}
-                onClick={() => setWindow(hours)}
-              >
-                {labels[hours]}
-              </button>
-            ))}
-          </div>
-        </div>
-        {loading && (
-          <p className="chart-message" role="status">
-            正在读取观测历史…
+        {trend?.start && trend.end && !history.loading ? (
+          <p className="actual-interval">
+            实际区间：{time(trend.start)} 至 {time(trend.end)}
           </p>
-        )}
-        {error && (
-          <div className="chart-message" role="alert">
-            {error} <button onClick={() => setRetry(retry + 1)}>重试</button>
-          </div>
-        )}
-        {history && (
-          <>
-            <div className="chart-values">
-              <strong>{signed(history.trend.delta)}</strong>
-              <span>
-                {stateLabel(history.trend)} · {history.points.length} 次实际观测
-              </span>
-            </div>
-            {history.points.length ? (
-              <Chart trend={history.trend} />
-            ) : (
-              <p className="chart-message">积累中，尚无保留期内的观测。</p>
-            )}
-            <div className="chart-axis">
-              <span>{time(history.trend.start)}</span>
-              <span>{time(history.trend.end)}</span>
-            </div>
-            <p className="chart-note">
-              {interval(history.trend)}
-              <br />
-              {history.points.length > 0 &&
-                `Star 总数 ${number(history.points[0][1])} → ${number(history.points.at(-1)![1])}。`}
-              {history.gaps.length > 0
-                ? ` ${history.gaps.length} 段采样缺口，曲线已断开。`
-                : ""}
-              {history.stale ? " 数据已超过 2 小时未成功更新。" : ""}
-            </p>
-          </>
-        )}
-      </div>
-      <div className="topics">
-        <span>仓库标签（Topics）</span>
-        {project.topics.length ? (
-          project.topics.map((topic) => (
-            <span className="topic" key={topic}>
-              {topic}
-            </span>
-          ))
-        ) : (
-          <span>仓库尚未提供 Topics</span>
-        )}
-      </div>
+        ) : null}
+      </details>
+      <a
+        className="repo-link"
+        href={`https://github.com/${project.name}`}
+        target="_blank"
+        rel="noreferrer"
+      >
+        <span>在 GitHub 查看项目</span>
+        <Icon name="external" size={14} />
+      </a>
     </section>
   );
 }
 function App() {
-  const [q, setQ] = useState(""),
-    [search, setSearch] = useState("");
-  const [language, setLanguage] = useState(""),
-    [topic, setTopic] = useState("");
-  const [sort, setSort] = useState("24"),
-    [direction, setDirection] = useState("desc"),
-    [page, setPage] = useState(1);
-  const [data, setData] = useState<ListResult | null>(null),
-    [loading, setLoading] = useState(true),
-    [error, setError] = useState("");
-  const [refresh, setRefresh] = useState(0),
-    [expanded, setExpanded] = useState<string | null>(null);
+  const [query, setQuery] = useState(readLocation);
+  const [draft, setDraft] = useState(query.q);
+  const [refresh, setRefresh] = useState(0);
   const [dark, setDark] = useState(() => {
     try {
       return localStorage.getItem("theme") === "dark";
@@ -338,7 +542,70 @@ function App() {
       return false;
     }
   });
-  const dialog = useRef<HTMLDialogElement>(null);
+  const pushNext = useRef(false);
+  const controls = useRef<HTMLDivElement>(null);
+  const tableScroll = useRef<HTMLDivElement>(null);
+  const headerScroll = useRef<HTMLDivElement>(null);
+  const inspector = useRef<HTMLElement>(null);
+  const masthead = useRef<HTMLElement>(null);
+  const viewTabs = useRef<HTMLDivElement>(null);
+  const [indicator, setIndicator] = useState({ x: 0, width: 0 });
+  const searchInput = useRef<HTMLInputElement>(null);
+  const commit = useCallback((patch: Partial<QueryState>, push = true) => {
+    pushNext.current = push;
+    setQuery((previous) => ({ ...previous, ...patch }));
+  }, []);
+  const listPath = `/api/projects?${listParameters(query)}`;
+  const previousListPath = useRef(listPath);
+  const resource = useApi<ListResult>(
+    listPath,
+    refresh,
+    query.tab === "github",
+  );
+  const data = resource.value;
+  const options = data;
+  const selected =
+    data?.items.find((project) => project.id === query.project) ??
+    data?.items[0];
+  useEffect(() => {
+    const next = locationFor(query);
+    if (next !== `${location.pathname}${location.search}${location.hash}`) {
+      if (pushNext.current) history.pushState(null, "", next);
+      else history.replaceState(null, "", next);
+    }
+    pushNext.current = false;
+  }, [query]);
+  useEffect(() => {
+    const restore = () => {
+      const next = readLocation();
+      pushNext.current = false;
+      setDraft(next.q);
+      setQuery(next);
+    };
+    addEventListener("popstate", restore);
+    return () => removeEventListener("popstate", restore);
+  }, []);
+  useEffect(() => {
+    if (draft === query.q) return;
+    const timer = setTimeout(() => commit({ q: draft, page: 1 }), 300);
+    return () => clearTimeout(timer);
+  }, [draft, query.q, commit]);
+  useEffect(() => {
+    if (query.tab !== "github" || !data || resource.loading || resource.error)
+      return;
+    const project = selected?.id ?? "";
+    if (query.page !== data.page || query.project !== project)
+      commit({ page: data.page, project }, false);
+  }, [
+    data,
+    resource.loading,
+    resource.error,
+    selected?.id,
+    query.page,
+    query.project,
+    query.tab,
+    commit,
+  ]);
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? "dark" : "light";
     try {
@@ -347,450 +614,593 @@ function App() {
       /* Preference storage is optional. */
     }
   }, [dark]);
+  useLayoutEffect(() => {
+    if (inspector.current) inspector.current.scrollTop = 0;
+  }, [selected?.id]);
+  useLayoutEffect(() => {
+    if (previousListPath.current === listPath) return;
+    previousListPath.current = listPath;
+    if (tableScroll.current) tableScroll.current.scrollTop = 0;
+    if (matchMedia("(max-width:760px)").matches)
+      controls.current?.scrollIntoView({ block: "start", behavior: "instant" });
+  }, [listPath]);
+  useLayoutEffect(() => {
+    const alignHeader = () => {
+      if (tableScroll.current && headerScroll.current)
+        headerScroll.current.style.width = `${tableScroll.current.clientWidth}px`;
+    };
+    const observer = new ResizeObserver(alignHeader);
+    if (tableScroll.current) observer.observe(tableScroll.current);
+    alignHeader();
+    return () => observer.disconnect();
+  }, [query.tab]);
+  useLayoutEffect(() => {
+    const header = masthead.current;
+    if (!header) return;
+    const measure = () =>
+      document.documentElement.style.setProperty(
+        "--masthead-height",
+        `${header.getBoundingClientRect().height}px`,
+      );
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(header);
+    return () => observer.disconnect();
+  }, []);
+  useLayoutEffect(() => {
+    const tabs = viewTabs.current;
+    if (!tabs) return;
+    const measure = () => {
+      const active = tabs.querySelector<HTMLElement>('[aria-pressed="true"]');
+      if (active)
+        setIndicator({ x: active.offsetLeft, width: active.offsetWidth });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(tabs);
+    for (const button of tabs.querySelectorAll("button"))
+      observer.observe(button);
+    return () => observer.disconnect();
+  }, [query.tab]);
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setSearch(q);
-      setPage(1);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [q]);
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true);
-    setError("");
-    const params = new URLSearchParams({
-      q: search,
-      language,
-      topic,
-      sort,
-      direction,
-      page: String(page),
-    });
-    get<ListResult>(`/api/projects?${params}`, controller.signal)
-      .then((result) => {
-        setData(result);
-        setExpanded(null);
-      })
-      .catch((e) => {
-        if (!controller.signal.aborted) setError(e.message);
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => controller.abort();
-  }, [search, language, topic, sort, direction, page, refresh]);
-  function changeSort(value: string) {
-    setSort(value);
-    setDirection(value === sort && direction === "desc" ? "asc" : "desc");
-    setPage(1);
-  }
+    const focusSearch = (event: KeyboardEvent) => {
+      if (
+        event.key === "/" &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !/input|select|textarea/i.test((event.target as HTMLElement).tagName) &&
+        !(event.target as HTMLElement).isContentEditable
+      ) {
+        event.preventDefault();
+        searchInput.current?.focus();
+      }
+    };
+    addEventListener("keydown", focusSearch);
+    return () => removeEventListener("keydown", focusSearch);
+  }, []);
   const clear = () => {
-    setQ("");
-    setSearch("");
-    setLanguage("");
-    setTopic("");
-    setPage(1);
+    setDraft("");
+    commit({ q: "", language: "", topic: "", page: 1 });
   };
-  const tools = (
-    <>
-      <button onClick={() => dialog.current?.showModal()}>
-        <Icon name="info" />
-        数据说明
+  const changeSort = (sort: string) =>
+    commit({
+      sort,
+      direction:
+        query.sort === sort && query.direction === "desc" ? "asc" : "desc",
+      page: 1,
+    });
+  const selectProject = (project: Project) => {
+    commit({ project: project.id });
+    if (inspector.current) inspector.current.scrollTop = 0;
+    if (matchMedia("(max-width:760px)").matches)
+      requestAnimationFrame(() =>
+        inspector.current?.scrollIntoView({
+          block: "start",
+          behavior: "instant",
+        }),
+      );
+  };
+  const syncHorizontal = (
+    source: HTMLDivElement,
+    target: HTMLDivElement | null,
+  ) => {
+    if (target && target.scrollLeft !== source.scrollLeft)
+      target.scrollLeft = source.scrollLeft;
+  };
+  const sortHeading = (field: string, label: string, className = "numeric") => (
+    <th
+      scope="col"
+      className={className}
+      aria-sort={
+        query.sort === field
+          ? query.direction === "desc"
+            ? "descending"
+            : "ascending"
+          : "none"
+      }
+    >
+      <button type="button" onClick={() => changeSort(field)}>
+        {label}
+        {query.sort === field && (
+          <span aria-hidden="true">
+            {" "}
+            {query.direction === "desc" ? "↓" : "↑"}
+          </span>
+        )}
       </button>
-      <button
-        aria-label={dark ? "切换浅色主题" : "切换深色主题"}
-        onClick={() => setDark(!dark)}
-      >
-        <Icon name={dark ? "sun" : "moon"} />
-        <span>{dark ? "浅色模式" : "深色模式"}</span>
-      </button>
-    </>
+    </th>
   );
   const collection = data?.status.collection as RunState | undefined;
-  const discovery = data?.status.discovery as RunState | undefined;
-  const scheduler = data?.status.scheduler as RunState | undefined;
+  const failures = [
+    data?.status.scheduler,
+    data?.status.collection,
+    data?.status.discovery,
+  ] as (RunState | undefined)[];
+  const failure = failures.find((state) => state?.failed);
   return (
-    <>
-      <a className="skip-link" href="#results">
-        跳转到趋势列表
+    <div className="app-shell">
+      <a className="skip-link" href="#rankings">
+        跳转到项目榜单
       </a>
-      <aside className="sidebar" aria-label="趋势筛选">
-        <div className="brand">
-          <span className="brand-mark">
-            <Icon name="radar" size={24} />
-          </span>
-          <h1>
-            GitHub <span>趋势追踪</span>
-          </h1>
-        </div>
-        <span className="eyebrow">探索工作台</span>
-        <button className="all-projects" onClick={clear}>
-          全部追踪项目 <span>{data?.summary.tracked ?? "—"}</span>
-        </button>
-        <label>
-          编程语言
-          <select
-            value={language}
-            onChange={(e) => {
-              setLanguage(e.target.value);
-              setPage(1);
-            }}
-          >
-            <option value="">全部语言</option>
-            {data?.languages.map((value) => (
-              <option key={value}>{value}</option>
-            ))}
-          </select>
-        </label>
-        <label>
-          仓库 Topic
-          <select
-            value={topic}
-            onChange={(e) => {
-              setTopic(e.target.value);
-              setPage(1);
-            }}
-          >
-            <option value="">全部 Topics</option>
-            {data?.topics.map((value) => (
-              <option key={value}>{value}</option>
-            ))}
-          </select>
-        </label>
-        <div className="sidebar-note">
-          <span className="status-dot" />
-          共享观测，持续追踪
-          <p>
-            离开榜单的项目仍按小时采样。
-            <br />
-            历史最多保留 30 天。
-          </p>
-        </div>
-        <div className="sidebar-tools">{tools}</div>
-      </aside>
-      <main>
-        <div className="metrics" aria-label="数据概览">
-          {[
-            ["追踪项目", data?.summary.tracked, "公开数据，所有访客共享"],
-            [
-              "最近 2 小时已更新",
-              data?.summary.fresh,
-              "小时采样 · 保留真实观测",
-            ],
-            [
-              "正在积累观测",
-              data?.summary.accumulating,
-              "至少两次有效快照后显示净增量",
-            ],
-          ].map(([label, value, note]) => (
-            <article className="metric" key={label}>
-              <span>{label}</span>
-              <strong>{typeof value === "number" ? number(value) : "—"}</strong>
-              <small>{note}</small>
-            </article>
-          ))}
-        </div>
-        <div className="section-heading">
-          <h2 id="results" tabIndex={-1}>
-            项目趋势 <span>{data?.total ?? "—"}</span>
-          </h2>
-          <button
-            className="refresh"
-            disabled={loading}
-            onClick={() => setRefresh(refresh + 1)}
-          >
-            <Icon name="refresh" />
-            刷新数据
-          </button>
-        </div>
-        <div className="freshness">
-          <span className="status-dot" />
-          最近成功采集 {time(collection?.succeededAt)}
-          {collection?.attemptedAt ? (
-            <span> · 最近尝试 {time(collection.attemptedAt)}</span>
-          ) : null}
-        </div>
-        {scheduler?.failed || collection?.failed || discovery?.failed ? (
-          <div className="notice" role="status">
-            更新异常：
-            {scheduler?.error || collection?.error || discovery?.error}
-            。继续展示上次有效观测，后台将重试。
-          </div>
-        ) : null}
-        {data && data.summary.fresh < data.summary.tracked && (
-          <div className="notice" role="status">
-            {data.summary.tracked - data.summary.fresh} 个项目已超过 2
-            小时未成功更新，已标记为数据过期。
-          </div>
-        )}
-        <div className="filterbar">
-          <label className="search">
-            <span className="sr-only">搜索仓库名称和简介</span>
-            <Icon name="search" />
-            <input
-              type="search"
-              placeholder="搜索仓库名称或简介…"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-            />
-          </label>
-          <label className="mobile-filter">
-            语言
-            <select
-              value={language}
-              onChange={(e) => {
-                setLanguage(e.target.value);
-                setPage(1);
-              }}
-            >
-              <option value="">全部语言</option>
-              {data?.languages.map((value) => (
-                <option key={value}>{value}</option>
-              ))}
-            </select>
-          </label>
-          <label className="mobile-filter">
-            Topic
-            <select
-              value={topic}
-              onChange={(e) => {
-                setTopic(e.target.value);
-                setPage(1);
-              }}
-            >
-              <option value="">全部 Topics</option>
-              {data?.topics.map((value) => (
-                <option key={value}>{value}</option>
-              ))}
-            </select>
-          </label>
-          <label className="sort-control">
-            <span className="sr-only">排序字段</span>
-            <select
-              aria-label="排序字段"
-              value={sort}
-              onChange={(e) => {
-                setSort(e.target.value);
-                setPage(1);
-              }}
-            >
-              <option value="name">仓库名称</option>
-              <option value="stars">Star 总数</option>
-              {WINDOWS.map((hours) => (
-                <option key={hours} value={hours}>
-                  {labels[hours]}净增量
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            aria-label={`当前${direction === "desc" ? "降序" : "升序"}，切换排序方向`}
-            onClick={() => {
-              setDirection(direction === "desc" ? "asc" : "desc");
-              setPage(1);
-            }}
-          >
-            {direction === "desc" ? "↓ 降序" : "↑ 升序"}
-          </button>
-        </div>
-        {(search || language || topic) && (
-          <p className="active-filters">
-            {[search && `搜索：${search}`, language, topic]
-              .filter(Boolean)
-              .join(" · ")}{" "}
-            <button onClick={clear}>清除筛选</button>
-          </p>
-        )}
-        <div aria-live="polite" className="request-status">
-          {loading
-            ? "正在读取趋势数据…"
-            : data
-              ? `共 ${data.total} 个项目，第 ${data.page} / ${data.pages} 页`
-              : ""}
-        </div>
-        {error && (
-          <div className="notice error" role="alert">
-            {error}{" "}
-            <button onClick={() => setRefresh(refresh + 1)}>重试</button>
-          </div>
-        )}
-        <div className="results-card" aria-busy={loading}>
-          {data?.items.length ? (
-            <table>
-              <caption className="sr-only">
-                GitHub 仓库的 Star 总数与四个滚动趋势窗口
-              </caption>
-              <thead>
-                <tr>
-                  {[
-                    ["name", "仓库"],
-                    ["stars", "Star"],
-                    ...WINDOWS.map((h) => [String(h), `${labels[h]}趋势`]),
-                  ].map(([field, label]) => (
-                    <th
-                      key={field}
-                      scope="col"
-                      aria-sort={
-                        sort === field
-                          ? direction === "desc"
-                            ? "descending"
-                            : "ascending"
-                          : "none"
-                      }
-                    >
-                      <button onClick={() => changeSort(field)}>
-                        {label}{" "}
-                        {sort === field
-                          ? direction === "desc"
-                            ? "↓"
-                            : "↑"
-                          : "↕"}
-                      </button>
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {data.items.map((project) => (
-                  <Fragment key={project.id}>
-                    <tr
-                      className={`repo-row ${expanded === project.id ? "is-expanded" : ""}`}
-                    >
-                      <td className="repository">
-                        <button
-                          className="expand"
-                          aria-label={`${expanded === project.id ? "收起" : "展开"} ${project.name} 详情`}
-                          aria-expanded={expanded === project.id}
-                          aria-controls={
-                            expanded === project.id
-                              ? `details-${project.id}`
-                              : undefined
-                          }
-                          onClick={() =>
-                            setExpanded(
-                              expanded === project.id ? null : project.id,
-                            )
-                          }
-                        >
-                          <Icon name="chevron" />
-                        </button>
-                        <div>
-                          <a
-                            className="repo-link"
-                            href={`https://github.com/${project.name}`}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            {project.name}
-                          </a>
-                          <p>
-                            {project.language || "语言未提供"}
-                            {project.stale ? " · 数据过期" : ""}
-                            {project.error ? " · 更新异常" : ""}
-                          </p>
-                        </div>
-                      </td>
-                      <td className="stars">
-                        <span className="mobile-only">Star 总数 </span>
-                        {number(project.stars)}
-                      </td>
-                      {WINDOWS.map((hours) => (
-                        <td key={hours} className="trend-cell">
-                          <span className="mobile-only window-label">
-                            {labels[hours]}
-                          </span>
-                          <TrendCell trend={project.trends[hours]} />
-                        </td>
-                      ))}
-                    </tr>
-                    {expanded === project.id && (
-                      <tr className="detail-row">
-                        <td colSpan={6}>
-                          <Details project={project} />
-                        </td>
-                      </tr>
-                    )}
-                  </Fragment>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <div className="empty">
-              <Icon name="radar" size={38} />
-              <h3>
-                {loading
-                  ? "正在连接观测数据"
-                  : error
-                    ? "暂时无法读取数据"
-                    : data?.summary.tracked
-                      ? "没有匹配的项目"
-                      : "暂无追踪项目"}
-              </h3>
-              <p>
-                {loading
-                  ? "请稍候…"
-                  : data?.summary.tracked
-                    ? "试试其他关键词、语言或 Topic。"
-                    : "后台采集后，项目会自动出现在这里。"}
-              </p>
-              {data?.summary.tracked ? (
-                <button onClick={clear}>清除筛选</button>
-              ) : null}
-            </div>
-          )}
-        </div>
-        {data && data.total > 0 && (
-          <nav className="pagination" aria-label="项目列表分页">
-            <span>每页 50 项 · 共 {number(data.total)} 项</span>
+      <header className="masthead" id="top" ref={masthead}>
+        <div className="frame masthead-inner">
+          <a className="brand" href="/" aria-label="开源观察首页">
+            <Icon name="mark" size={28} />
+            <strong>开源观察</strong>
+          </a>
+          <section className="header-stats" aria-label="全站观测概览">
             <div>
-              <button
-                disabled={loading || data.page <= 1}
-                onClick={() => setPage(data.page - 1)}
-              >
-                上一页
-              </button>
-              <span>
-                {data.page} / {data.pages}
+              <span className="metric-label-full">正在追踪</span>
+              <span className="metric-label-short" aria-hidden="true">
+                追踪
               </span>
-              <button
-                disabled={loading || data.page >= data.pages}
-                onClick={() => setPage(data.page + 1)}
-              >
-                下一页
-              </button>
+              <strong>
+                {data
+                  ? number(data.summary.tracked)
+                  : resource.loading
+                    ? "…"
+                    : "—"}
+              </strong>
             </div>
-          </nav>
+            <div title="全体追踪项目已知的 24 小时窗口净增量合计，含部分观测与负值；各项目实际区间可能不同。">
+              <span className="metric-label-full">24 小时 Star 净增量</span>
+              <span className="metric-label-short" aria-hidden="true">
+                24h 净增量
+              </span>
+              <strong>
+                {data
+                  ? signed(data.summary.net24 ?? null)
+                  : resource.loading
+                    ? "…"
+                    : "—"}
+              </strong>
+            </div>
+            <div>
+              <span className="metric-label-full">覆盖编程语言</span>
+              <span className="metric-label-short" aria-hidden="true">
+                语言
+              </span>
+              <strong>
+                {data
+                  ? number(data.languages.length)
+                  : resource.loading
+                    ? "…"
+                    : "—"}
+              </strong>
+            </div>
+          </section>
+          <div className="masthead-end">
+            <button
+              type="button"
+              className="icon-button"
+              aria-label={dark ? "切换浅色主题" : "切换深色主题"}
+              onClick={() => setDark((value) => !value)}
+            >
+              <Icon name={dark ? "sun" : "moon"} size={20} />
+            </button>
+            <a
+              className="icon-button source-link"
+              href="https://github.com/lizhian/github-trending-tracking"
+              target="_blank"
+              rel="noreferrer"
+              aria-label="查看本站 GitHub 仓库"
+            >
+              <Icon name="github" size={20} />
+            </a>
+          </div>
+        </div>
+      </header>
+      <main className="frame app-main">
+        <h1 className="visually-hidden">GitHub 趋势追踪</h1>
+        {query.tab === "github" && failure && (
+          <p className="notice" role="status">
+            更新异常：{failure.error || "采集尚未恢复"}
+            。继续展示上次有效观测，后台将重试。
+          </p>
         )}
-        <p className="page-note">
-          净增量基于实际观测区间。部分观测参与排序；积累中始终排在最后。刷新只查询已采集结果。
-        </p>
+        {query.tab === "github" &&
+          data &&
+          data.summary.fresh < data.summary.tracked && (
+            <p className="notice" role="status">
+              {data.summary.tracked - data.summary.fresh} 个项目已超过 2
+              小时未成功更新，已标记为数据过期。
+            </p>
+          )}
+        <section
+          className={`workspace ${query.tab === "linuxdo" ? "placeholder-workspace" : ""}`}
+          id="rankings"
+          aria-label="趋势探索工作台"
+        >
+          <div className="listing">
+            <div className="list-controls" ref={controls}>
+              <div className="view-tabs" ref={viewTabs} aria-label="趋势来源">
+                <span
+                  className="view-indicator"
+                  aria-hidden="true"
+                  style={{
+                    transform: `translateX(${indicator.x}px) scaleX(${indicator.width})`,
+                  }}
+                />
+                {(
+                  [
+                    ["github", "github趋势"],
+                    ["linuxdo", "Linux.do开源趋势"],
+                  ] as const
+                ).map(([tab, label]) => (
+                  <button
+                    type="button"
+                    key={tab}
+                    aria-pressed={query.tab === tab}
+                    onClick={() => commit({ tab })}
+                  >
+                    {label}
+                    {tab === "github" && (
+                      <span>{data?.summary.tracked ?? "…"}</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+              {query.tab === "github" && (
+                <>
+                  <div className="filters">
+                    <label className="search-field">
+                      <Icon name="search" />
+                      <span className="visually-hidden">
+                        搜索项目名称或简介
+                      </span>
+                      <input
+                        ref={searchInput}
+                        type="search"
+                        name="q"
+                        autoComplete="off"
+                        value={draft}
+                        onChange={(event) =>
+                          setDraft(event.target.value.slice(0, 200))
+                        }
+                        placeholder="搜索项目、描述…"
+                      />
+                      <kbd>/</kbd>
+                    </label>
+                    <SearchSelect
+                      label="编程语言"
+                      all="全部语言"
+                      name="language"
+                      value={query.language}
+                      options={options?.languages ?? []}
+                      onChange={(language) => commit({ language, page: 1 })}
+                    />
+                    <SearchSelect
+                      label="仓库 Topics"
+                      all="全部 Topics"
+                      name="topic"
+                      value={query.topic}
+                      options={options?.topics ?? []}
+                      onChange={(topic) => commit({ topic, page: 1 })}
+                    />
+                    <button
+                      type="button"
+                      className="icon-button reset"
+                      title="清除筛选"
+                      aria-label="清除全部筛选"
+                      onClick={clear}
+                    >
+                      <Icon name="reset" />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button reset"
+                      disabled={resource.loading}
+                      aria-label="刷新数据"
+                      title="只查询已采集结果"
+                      onClick={() => setRefresh((value) => value + 1)}
+                    >
+                      <Icon name="refresh" />
+                    </button>
+                  </div>
+                  <div
+                    className="heading-scroll"
+                    ref={headerScroll}
+                    onScroll={(event) =>
+                      syncHorizontal(event.currentTarget, tableScroll.current)
+                    }
+                  >
+                    <table aria-label="项目排序">
+                      <ProjectColumns />
+                      <thead>
+                        <tr>
+                          <th scope="col" className="rank-head">
+                            排名
+                          </th>
+                          {sortHeading("name", "项目名称", "name-col")}
+                          <th scope="col" className="lang-col">
+                            语言
+                          </th>
+                          {sortHeading("stars", "Star 总数")}
+                          {WINDOWS.map((hours) => (
+                            <React.Fragment key={hours}>
+                              {sortHeading(String(hours), labels[hours])}
+                            </React.Fragment>
+                          ))}
+                        </tr>
+                      </thead>
+                    </table>
+                  </div>
+                </>
+              )}
+            </div>
+            {query.tab === "github" ? (
+              <>
+                {resource.error && (
+                  <p className="notice error" role="alert">
+                    {resource.error}{" "}
+                    <button
+                      type="button"
+                      onClick={() => setRefresh((value) => value + 1)}
+                    >
+                      重试列表查询
+                    </button>
+                  </p>
+                )}
+                <div className="visually-hidden" role="status">
+                  {resource.loading
+                    ? "正在读取趋势数据…"
+                    : data
+                      ? `共 ${data.total} 个项目，第 ${data.page} / ${data.pages} 页`
+                      : ""}
+                </div>
+                <div
+                  className="table-wrap"
+                  ref={tableScroll}
+                  onScroll={(event) =>
+                    syncHorizontal(event.currentTarget, headerScroll.current)
+                  }
+                  aria-busy={resource.loading}
+                >
+                  <table
+                    id="project-data"
+                    key={resource.value ? listPath : "loading"}
+                    className={
+                      resource.value && !resource.loading
+                        ? "list-arrival"
+                        : undefined
+                    }
+                  >
+                    <ProjectColumns />
+                    <caption className="visually-hidden">
+                      追踪项目及其 Star 净增量
+                    </caption>
+                    <thead>
+                      <tr>
+                        <th className="visually-hidden" scope="col">
+                          排名
+                        </th>
+                        <th className="visually-hidden" scope="col">
+                          项目名称
+                        </th>
+                        <th className="visually-hidden" scope="col">
+                          语言
+                        </th>
+                        <th className="visually-hidden" scope="col">
+                          Star 总数
+                        </th>
+                        {WINDOWS.map((hours) => (
+                          <th
+                            className="visually-hidden"
+                            scope="col"
+                            key={hours}
+                          >
+                            {labels[hours]}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {data?.items.length ? (
+                        data.items.map((project, index) => {
+                          const [owner, ...name] = project.name.split("/");
+                          return (
+                            <tr
+                              key={project.id}
+                              onClick={() => selectProject(project)}
+                              className={
+                                selected?.id === project.id ? "selected" : ""
+                              }
+                            >
+                              <td className="rank">
+                                {String(
+                                  (data.page - 1) * data.pageSize + index + 1,
+                                ).padStart(2, "0")}
+                              </td>
+                              <td className="repo-cell">
+                                <button
+                                  type="button"
+                                  className="repo-button"
+                                  aria-pressed={selected?.id === project.id}
+                                  aria-label={`查看 ${project.name} 趋势`}
+                                  title={project.name}
+                                >
+                                  <span className="owner">{owner}</span>
+                                  <span className="slash">/</span>
+                                  {name.join("/")}
+                                </button>
+                                <p
+                                  className="repo-description"
+                                  title={project.description ?? undefined}
+                                >
+                                  {project.stale ? "数据过期 / " : ""}
+                                  {project.error ? "更新异常 / " : ""}
+                                  {project.description || "仓库尚未提供简介。"}
+                                </p>
+                              </td>
+                              <td className="lang-col">
+                                <span className="lang">
+                                  {project.language || "未提供"}
+                                </span>
+                              </td>
+                              <td className="numeric">
+                                <span
+                                  title={number(project.stars)}
+                                  aria-label={`${number(project.stars)} Star`}
+                                >
+                                  {compact(project.stars)}
+                                </span>
+                              </td>
+                              {WINDOWS.map((hours) => (
+                                <td className="numeric" key={hours}>
+                                  <TrendValue trend={project.trends[hours]} />
+                                </td>
+                              ))}
+                            </tr>
+                          );
+                        })
+                      ) : (
+                        <tr>
+                          <td colSpan={8} className="empty-cell">
+                            <strong>
+                              {resource.loading
+                                ? "正在连接观测数据"
+                                : resource.error
+                                  ? "暂时无法读取数据"
+                                  : data?.summary.tracked
+                                    ? "没有匹配的项目"
+                                    : "暂无追踪项目"}
+                            </strong>
+                            <p>
+                              {resource.loading
+                                ? "请稍候…"
+                                : resource.error
+                                  ? "请重试列表查询。"
+                                  : data?.summary.tracked
+                                    ? "试试其他关键词、语言或 Topic。"
+                                    : "后台采集后，项目会自动出现在这里。"}
+                            </p>
+                            {!resource.loading &&
+                              !resource.error &&
+                              !!data?.summary.tracked && (
+                                <button type="button" onClick={clear}>
+                                  清除全部筛选
+                                </button>
+                              )}
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="list-footer">
+                  <span>
+                    {data
+                      ? `每页 ${data.pageSize} 项，共 ${number(data.total)} 项`
+                      : "正在读取列表"}
+                  </span>
+                  <nav className="pagination" aria-label="项目列表分页">
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label="上一页"
+                      disabled={!data || resource.loading || data.page <= 1}
+                      onClick={() => commit({ page: (data?.page ?? 1) - 1 })}
+                    >
+                      <Icon name="previous" />
+                    </button>
+                    <span>{data ? `${data.page} / ${data.pages}` : "…"}</span>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label="下一页"
+                      disabled={
+                        !data || resource.loading || data.page >= data.pages
+                      }
+                      onClick={() => commit({ page: (data?.page ?? 1) + 1 })}
+                    >
+                      <Icon name="next" />
+                    </button>
+                  </nav>
+                </div>
+              </>
+            ) : (
+              <div className="source-placeholder" role="status">
+                暂未开放
+              </div>
+            )}
+          </div>
+          {query.tab === "github" && (
+            <aside
+              className="inspector"
+              ref={inspector}
+              aria-label="选中项目详情"
+            >
+              {selected && data ? (
+                <Details
+                  key={selected.id}
+                  project={selected}
+                  window={query.window}
+                  refresh={refresh}
+                  asOf={data.asOf}
+                  onWindow={(window) => commit({ window })}
+                  onTopic={(topic) => commit({ topic, page: 1 })}
+                  onRefresh={() => setRefresh((value) => value + 1)}
+                />
+              ) : (
+                <p className="detail-empty">
+                  {resource.loading
+                    ? "正在读取追踪项目…"
+                    : "从榜单中选择一个项目，查看它的 Star 变化。"}
+                </p>
+              )}
+              <details className="method" id="method">
+                <summary>
+                  数据说明<span aria-hidden="true">＋</span>
+                </summary>
+                <p>
+                  项目来自 GitHub Trending、HelloGithub 和 OpenGithubs。GitHub
+                  日榜每小时抓取一次，其余来源北京时间每天 09:00
+                  开始抓取；追踪项目持续按小时记录 Star
+                  总数。所有访客共享观测，无需登录。
+                </p>
+                <p>
+                  趋势窗口为滚动 24、72、168、720
+                  小时，以项目最新成功观测为终点，仅保留最近 30
+                  天内的实际快照，端点允许约一小时偏差。历史不足显示部分观测，不足两次快照显示积累中。负净增量原样展示，缺测区间断线，不补零或推算。
+                </p>
+                <p>
+                  顶部净增量为全站已知项目窗口的合计，含部分观测，各项目实际区间可能不同；积累中项目不参与合计。语言数与项目数量均为全站范围。
+                </p>
+                <p>
+                  超过 2 小时未更新标为数据过期。每日北京时间 04:00
+                  按保留评分清理，目标保留 1000
+                  项；保护期、资料过期或观测不足的项目暂缓淘汰，因此可能超额。
+                </p>
+                <p>
+                  最近成功采集：{time(collection?.succeededAt)}。最近采集尝试：
+                  {time(collection?.attemptedAt)}。
+                </p>
+              </details>
+            </aside>
+          )}
+        </section>
       </main>
-      <div className="mobile-tools">{tools}</div>
-      <dialog ref={dialog} aria-labelledby="about-title">
-        <h2 id="about-title">关于这些数据</h2>
-        <p>
-          项目来自 GitHub Trending、HelloGithub 和 OpenGithubs。GitHub
-          日榜每小时抓取一次，其余来源北京时间每天 09:00
-          开始抓取；所有追踪项目持续按小时记录 Star 总数。所有访客共享同一份数据，无需登录。
-        </p>
-        <p>
-          四个窗口分别为滚动 24、72、168、720
-          小时，以最新成功观测为终点，只使用最近 30
-          天内的实际快照。端点允许约一小时偏差。
-        </p>
-        <p>
-          历史不足显示“部分观测”和实际区间；不足两次快照显示“积累中”。负增量原样展示，缺测区间断开曲线，不补零或推算。超过
-          2 小时未更新标为数据过期。
-        </p>
-        <p>
-          每日北京时间 04:00 按近期增长优先的保留评分清理，目标保留 1000
-          项。入库未满 24 小时、资料过期或观测不足的项目暂缓淘汰，因此可能超额。
-        </p>
-        <form method="dialog">
-          <button>知道了</button>
-        </form>
-      </dialog>
-    </>
+    </div>
   );
 }
 createRoot(document.getElementById("root")!).render(

@@ -1,29 +1,35 @@
 import { DeferredRequest, type Upstream } from "./upstream";
 
-export interface Repository {
+export interface RepositoryStars {
   id: string;
+  stargazerCount: number;
+}
+export interface Repository extends RepositoryStars {
   nameWithOwner: string;
   description: string | null;
   primaryLanguage: { name: string } | null;
   repositoryTopics: { nodes: { topic: { name: string } }[] };
-  stargazerCount: number;
 }
 const FIELDS =
   "id nameWithOwner description primaryLanguage { name } repositoryTopics(first:100) { nodes { topic { name } } } stargazerCount";
 
+export function repositories(token: string, targets: string[], byId: boolean, upstream: Upstream, metadata?: true): Promise<(Repository | null)[]>;
+export function repositories(token: string, targets: string[], byId: boolean, upstream: Upstream, metadata: false): Promise<(RepositoryStars | null)[]>;
 export async function repositories(
   token: string,
   targets: string[],
   byId: boolean,
   upstream: Upstream,
-): Promise<(Repository | null)[]> {
+  metadata = true,
+): Promise<(Repository | RepositoryStars | null)[]> {
   if (!targets.length) return [];
+  const fields = metadata ? FIELDS : "id stargazerCount";
   const query = byId
-    ? `query { nodes(ids:${JSON.stringify(targets)}) { ... on Repository { ${FIELDS} } } }`
+    ? `query { nodes(ids:${JSON.stringify(targets)}) { ... on Repository { ${fields} } } }`
     : `query { ${targets
         .map((name, i) => {
           const [owner, repo] = name.split("/");
-          return `r${i}: repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(repo)}) { ${FIELDS} }`;
+          return `r${i}: repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(repo)}) { ${fields} }`;
         })
         .join(" ")} }`;
   const url = "https://api.github.com/graphql";
@@ -58,13 +64,11 @@ export async function repositories(
     : targets.map((_, i) => result.data?.[`r${i}`]);
   return targets.map((_, i) => {
     const node = nodes[i] as Repository | undefined;
-    return node &&
+    if (!(node &&
       typeof node.id === "string" &&
-      /^[\w.-]+\/[\w.-]+$/.test(node.nameWithOwner) &&
       Number.isSafeInteger(node.stargazerCount) &&
-      node.stargazerCount >= 0 &&
-      node.repositoryTopics?.nodes
-      ? node
-      : null;
+      node.stargazerCount >= 0)) return null;
+    if (!metadata) return { id: node.id, stargazerCount: node.stargazerCount };
+    return /^[\w.-]+\/[\w.-]+$/.test(node.nameWithOwner) && node.repositoryTopics?.nodes ? node : null;
   });
 }

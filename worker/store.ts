@@ -1,6 +1,6 @@
-import { type Project, type Point } from "./contracts";
-import { allTrends, DAY, HOUR, RETENTION } from "./trends";
-import { type Repository } from "./github";
+import { WINDOWS, type Project, type Point, type WindowHours } from "./contracts";
+import { summarize, DAY, HOUR, RETENTION } from "./trends";
+import { type Repository, type RepositoryStars } from "./github";
 export interface ProjectRow {
   id: string;
   cycle: string;
@@ -15,6 +15,7 @@ export interface ProjectRow {
   attempted_at: number;
   error: string | null;
   trends: string;
+  metadata_at: number;
 }
 export async function state<T>(db: D1Database, key: string): Promise<T | null> {
   const row = await db
@@ -54,8 +55,68 @@ export async function histories(
   for (const points of output.values()) points.sort((a, b) => a[0] - b[0]);
   return output;
 }
+/** Read only the first eligible day for each window, then at most its 24 points.
+ * Excluding the replacement hour makes same-hour observations newer-only.
+ */
+export async function baselines(
+  db: D1Database,
+  targets: { cycle: string; end: number }[],
+  now: number,
+  replacing = false,
+  windows: readonly WindowHours[] = WINDOWS,
+) {
+  const output = new Map<string, Partial<Record<WindowHours, Point>>>();
+  // Hourly data normally has the boundary hour or its next hour. Probe those
+  // JSON keys directly; use the day search only for real missing observations.
+  const atHour = (offset: number) => {
+    const hour = `CAST((cutoff+${offset * HOUR})/${HOUR} AS INTEGER)`;
+    const path = `'$."' || ${hour} || '"'`;
+    return `(SELECT json_extract(hours,${path}) FROM snapshot_days
+      WHERE cycle=bounds.cycle AND day=CAST((cutoff+${offset * HOUR})/${DAY} AS INTEGER)
+        AND json_extract(hours,${path} || '[0]') BETWEEN cutoff AND end_at
+        ${replacing ? `AND ${hour} != CAST(end_at/${HOUR} AS INTEGER)` : ""})`;
+  };
+  for (let offset = 0; offset < targets.length; offset += 45) {
+    const group = targets.slice(offset, offset + 45);
+    const result = await db.prepare(`
+      WITH targets(cycle,end_at) AS (VALUES ${group.map(() => "(?,?)").join(",")}),
+      windows(width) AS (VALUES ${windows.map((hours) => `(${hours})`).join(",")}),
+      bounds AS (
+        SELECT cycle,end_at,width,MAX(?,end_at-width*${HOUR}) AS cutoff
+        FROM targets CROSS JOIN windows
+      )
+      SELECT cycle,width,COALESCE(${atHour(0)},${atHour(1)},(
+        SELECT value FROM json_each((
+          SELECT hours FROM snapshot_days AS days
+          WHERE days.cycle=bounds.cycle
+            AND day BETWEEN CAST(cutoff/${DAY} AS INTEGER) AND CAST(end_at/${DAY} AS INTEGER)
+            AND EXISTS (
+              SELECT 1 FROM json_each(hours)
+              WHERE json_extract(value,'$[0]') BETWEEN cutoff AND end_at
+                ${replacing ? `AND CAST(key AS INTEGER) != CAST(end_at/${HOUR} AS INTEGER)` : ""}
+            )
+          ORDER BY day LIMIT 1
+        ))
+        WHERE json_extract(value,'$[0]') BETWEEN cutoff AND end_at
+          ${replacing ? `AND CAST(key AS INTEGER) != CAST(end_at/${HOUR} AS INTEGER)` : ""}
+        ORDER BY CAST(key AS INTEGER) LIMIT 1
+      )) AS point FROM bounds
+    `).bind(...group.flatMap(({ cycle, end }) => [cycle, end]), now - RETENTION)
+      .all<{ cycle: string; width: WindowHours; point: string | null }>();
+    for (const { cycle, width, point } of result.results) {
+      if (!output.has(cycle)) output.set(cycle, {});
+      if (point) output.get(cycle)![width] = JSON.parse(point) as Point;
+    }
+  }
+  return output;
+}
+
 export function project(row: ProjectRow, now: number): Project {
-  let trends: Project["trends"] = JSON.parse(row.trends);
+  // Strip unused legacy graph points while existing rows refresh naturally.
+  const stored: Project["trends"] = JSON.parse(row.trends);
+  const trends = Object.fromEntries(Object.entries(stored).map(([hours, trend]) => [hours, {
+    delta: trend.delta, state: trend.state, start: trend.start, end: trend.end, gaps: trend.gaps,
+  }])) as Project["trends"];
   return {
     id: row.id,
     name: row.name,
@@ -72,54 +133,82 @@ export function project(row: ProjectRow, now: number): Project {
     trends,
   };
 }
+
+export async function projects(db: D1Database, rows: ProjectRow[], now: number) {
+  const items = rows.map((row) => project(row, now));
+  const expired = items.flatMap((item, index) =>
+    Object.values(item.trends).some((trend) => trend.start !== null && trend.start < now - RETENTION)
+      ? [{ item, row: rows[index] }] : [],
+  );
+  const widths = WINDOWS.filter((hours) => expired.some(({ item }) =>
+    item.trends[hours].start !== null && item.trends[hours].start! < now - RETENTION));
+  const actual = await baselines(db, expired.map(({ item, row }) => ({ cycle: row.cycle, end: item.observedAt })), now, false, widths);
+  for (const { item, row } of expired) {
+    const updated = summarize(actual.get(row.cycle) ?? {},
+      item.observedAt >= now - RETENTION ? [item.observedAt, item.stars] : null,
+      item.trends[720].gaps);
+    for (const hours of widths) {
+      const start = item.trends[hours].start;
+      if (start !== null && start < now - RETENTION) item.trends[hours] = updated[hours];
+    }
+  }
+  return items;
+}
 export async function saveObservations(
   db: D1Database,
   observations: {
-    repo: Repository;
+    repo: Repository | RepositoryStars;
     previous?: ProjectRow;
     listedAt: number | null;
   }[],
   now: number,
 ) {
-  const history = await histories(
+  const firstPoints = await baselines(
     db,
-    observations.flatMap((o) => (o.previous ? [o.previous.cycle] : [])),
+    observations.flatMap((o) => o.previous ? [{ cycle: o.previous.cycle, end: now }] : []),
     now,
+    true,
   );
   const statements: D1PreparedStatement[] = [];
   for (const { repo, previous, listedAt } of observations) {
     const cycle = previous?.cycle ?? crypto.randomUUID();
     const hour = Math.floor(now / HOUR);
-    const points = (history.get(cycle) ?? []).filter(
-      ([time]) => Math.floor(time / HOUR) !== hour,
-    );
-    points.push([now, repo.stargazerCount]);
-    points.sort((a, b) => a[0] - b[0]);
+    const gaps: [number, number][] = previous ? JSON.parse(previous.trends)[720].gaps : [];
+    if (previous && previous.observed_at < now) {
+      if (Math.floor(previous.observed_at / HOUR) === hour) {
+        const lastGap = gaps.at(-1);
+        if (lastGap?.[1] === previous.observed_at) lastGap[1] = now;
+      } else if (hour - Math.floor(previous.observed_at / HOUR) > 1) {
+        gaps.push([previous.observed_at, now]);
+      }
+    }
+    const metadata = "nameWithOwner" in repo;
+    if (!previous && !metadata) throw new Error("New repository requires metadata");
     const values = [
-      repo.nameWithOwner,
-      repo.description ?? null,
-      repo.primaryLanguage?.name ?? null,
-      JSON.stringify(repo.repositoryTopics.nodes.map((n) => n.topic.name)),
+      metadata ? repo.nameWithOwner : previous!.name,
+      metadata ? repo.description ?? null : previous!.description,
+      metadata ? repo.primaryLanguage?.name ?? null : previous!.language,
+      metadata ? JSON.stringify(repo.repositoryTopics.nodes.map((n) => n.topic.name)) : previous!.topics,
       now,
       now,
       repo.stargazerCount,
-      JSON.stringify(allTrends(points, now)),
+      JSON.stringify(summarize(firstPoints.get(cycle) ?? {}, [now, repo.stargazerCount], gaps)),
     ];
     if (previous) {
       statements.push(
         db
           .prepare(
-            `UPDATE projects SET name=?,description=?,language=?,topics=?,observed_at=?,attempted_at=?,stars=?,trends=?,error=NULL,listed_at=MAX(listed_at,?) WHERE id=? AND cycle=? AND observed_at < ?`,
+            `UPDATE projects SET name=?,description=?,language=?,topics=?,observed_at=?,attempted_at=?,stars=?,trends=?,error=NULL,metadata_at=?,listed_at=MAX(listed_at,?) WHERE id=? AND cycle=? AND observed_at < ?`,
           )
-          .bind(...values, listedAt ?? previous.listed_at, repo.id, cycle, now),
+          .bind(...values, metadata ? now : previous.metadata_at, listedAt ?? previous.listed_at, repo.id, cycle, now),
       );
     } else {
       statements.push(
         db
           .prepare(
-            `INSERT INTO projects(id,cycle,name,description,language,topics,observed_at,attempted_at,stars,trends,entered_at,listed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
+            `INSERT INTO projects(id,cycle,name,description,language,topics,observed_at,attempted_at,stars,trends,entered_at,listed_at,metadata_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
           )
-          .bind(repo.id, cycle, ...values, now, listedAt ?? now),
+          .bind(repo.id, cycle, ...values, now, listedAt ?? now, now),
       );
     }
     const path = `$."${hour}"`;

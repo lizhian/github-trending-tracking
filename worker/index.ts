@@ -1,10 +1,10 @@
 import { cleanup, prune } from "./retention";
 import { query } from "./api";
-import { repositories } from "./github";
+import { repositories, type Repository, type RepositoryStars } from "./github";
 import { discover, emptyDiscovery, type DiscoveryState } from "./discovery";
 import { Upstream, safeError, type Hosts } from "./upstream";
 import { saveObservations, setState, state, type ProjectRow } from "./store";
-import { HOUR } from "./trends";
+import { DAY, HOUR } from "./trends";
 import { type RunState } from "./contracts";
 export interface Env {
   DB: D1Database;
@@ -26,14 +26,16 @@ async function collect(env: Env, now: number, upstream: Upstream) {
     failed: 0,
     error: null,
   };
-  let rows = (await env.DB.prepare("SELECT * FROM projects").all<ProjectRow>())
-    .results;
   const discovery = await discover(
     upstream,
     (await state<DiscoveryState>(env.DB, "discoverySources")) ?? emptyDiscovery(),
     now,
     await state<RunState>(env.DB, "discovery"),
   );
+  const priorPending = (await state<PendingDiscovery[]>(env.DB, "pending")) ?? [];
+  // Most ticks only sample stars: do not load every project's JSON summaries.
+  const rows = discovery.entries.length || priorPending.length
+    ? (await env.DB.prepare("SELECT * FROM projects").all<ProjectRow>()).results : [];
   const known = new Set(rows.map((r) => r.name.toLowerCase()));
   const listed = new Map(
     discovery.entries.map((entry) => [entry.name.toLowerCase(), entry.listedAt]),
@@ -44,7 +46,6 @@ async function collect(env: Env, now: number, upstream: Upstream) {
     ).bind(listed.get(r.name.toLowerCase()), r.id, r.cycle),
   );
   if (updates.length) await env.DB.batch(updates);
-  const priorPending = (await state<PendingDiscovery[]>(env.DB, "pending")) ?? [];
   const discoveries = new Map(
     priorPending.map((entry) => [entry.name.toLowerCase(), entry]),
   );
@@ -57,11 +58,13 @@ async function collect(env: Env, now: number, upstream: Upstream) {
     (entry) => !known.has(entry.name.toLowerCase()),
   );
   // Persist discovery and detail progress before repository metadata collection.
-  await env.DB.batch([
-    setState(env.DB, "pending", pending),
-    setState(env.DB, "discovery", discovery.status),
-    setState(env.DB, "discoverySources", discovery.state),
-  ]);
+  if (discovery.changed) {
+    await env.DB.batch([
+      setState(env.DB, "pending", pending),
+      setState(env.DB, "discovery", discovery.status),
+      setState(env.DB, "discoverySources", discovery.state),
+    ]);
+  }
   const targets = pending.slice(0, 20);
   if (targets.length) {
     try {
@@ -111,26 +114,21 @@ async function collect(env: Env, now: number, upstream: Upstream) {
       pending = [...pending.slice(targets.length), ...targets];
     }
   }
-  rows = (await env.DB.prepare("SELECT * FROM projects").all<ProjectRow>())
-    .results;
-  const due = rows
-    .filter(
-      (row) => Math.floor(row.observed_at / HOUR) < Math.floor(now / HOUR),
-    )
-    .sort((a, b) => a.attempted_at - b.attempted_at || a.id.localeCompare(b.id))
-    .slice(0, 180);
-  // Two bounded upstream calls; every DB write remains fenced to the selected cycle.
-  for (let start = 0; start < due.length; start += 90) {
-    const group = due.slice(start, start + 90);
-    let nodes: Awaited<ReturnType<typeof repositories>> = [];
+  const due = (await env.DB.prepare(
+    "SELECT * FROM projects WHERE observed_at < ? ORDER BY attempted_at,id LIMIT 30",
+  ).bind(Math.floor(now / HOUR) * HOUR).all<ProjectRow>()).results;
+  // 30 per minute leaves capacity for 1800 observations/hour, including retries.
+  // Metadata refreshes piggyback on samples once per day, rather than every hour.
+  for (const metadata of [true, false] as const) {
+    const group = due.filter((row) => (row.metadata_at <= now - DAY) === metadata);
+    if (!group.length) continue;
+    let nodes: (Repository | RepositoryStars | null)[] = [];
     let error = "GitHub repository unavailable";
     try {
-      nodes = await repositories(
-        env.GITHUB_TOKEN,
-        group.map((row) => row.id),
-        true,
-        upstream,
-      );
+      const ids = group.map((row) => row.id);
+      nodes = metadata
+        ? await repositories(env.GITHUB_TOKEN, ids, true, upstream)
+        : await repositories(env.GITHUB_TOKEN, ids, true, upstream, false);
     } catch (cause) {
       error = safeError(cause);
     }
@@ -160,7 +158,7 @@ async function collect(env: Env, now: number, upstream: Upstream) {
   }
   if (result.succeeded) result.succeededAt = now;
   await env.DB.batch([
-    setState(env.DB, "pending", pending),
+    ...(targets.length ? [setState(env.DB, "pending", pending)] : []),
     setState(env.DB, "collection", result),
   ]);
 }
@@ -179,8 +177,10 @@ export default {
       .first();
     if (!acquired) return;
     const upstream = new Upstream({});
+    let previousHosts = "{}";
     try {
       Object.assign(upstream.hosts, (await state<Hosts>(env.DB, "upstream")) ?? {});
+      previousHosts = JSON.stringify(upstream.hosts);
       await prune(env.DB, now);
       await collect(env, now, upstream);
       await cleanup(env.DB, now);
@@ -201,7 +201,8 @@ export default {
       }).run();
       throw new Error("Scheduled tracking failed");
     } finally {
-      await setState(env.DB, "upstream", upstream.hosts).run();
+      if (JSON.stringify(upstream.hosts) !== previousHosts)
+        await setState(env.DB, "upstream", upstream.hosts).run();
       await env.DB.prepare(
         "DELETE FROM system_state WHERE key='lease' AND json_extract(value,'$.lease')=?",
       )

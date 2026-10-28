@@ -1,21 +1,12 @@
 import { WINDOWS, type CleanupResult } from "./contracts";
-import { histories, setState, state, type ProjectRow } from "./store";
-import { allTrends, DAY, HOUR, RETENTION } from "./trends";
+import { projects, setState, state, type ProjectRow } from "./store";
+import { DAY, HOUR, RETENTION } from "./trends";
 
 export async function prune(db: D1Database, now: number) {
   const cutoff = now - RETENTION;
-  // The boundary day is rewritten once per ten-minute tick; older days are removed.
-  // JSON reconstruction drops individual expired hours, not an entire valid boundary day.
-  await db.batch([
-    db
-      .prepare("DELETE FROM snapshot_days WHERE day < ?")
-      .bind(Math.floor(cutoff / DAY)),
-    db
-      .prepare(
-        `UPDATE snapshot_days SET hours=COALESCE((SELECT json_group_object(key,json(value)) FROM json_each(snapshot_days.hours) WHERE json_extract(value,'$[0]') >= ?),'{}') WHERE day=? AND EXISTS (SELECT 1 FROM json_each(snapshot_days.hours) WHERE json_extract(value,'$[0]') < ?)`,
-      )
-      .bind(cutoff, Math.floor(cutoff / DAY), cutoff),
-  ]);
+  // Queries enforce the exact rolling cutoff; retain the boundary day intact.
+  await db.prepare("DELETE FROM snapshot_days WHERE day < ?")
+    .bind(Math.floor(cutoff / DAY)).run();
 }
 export async function cleanup(db: D1Database, now: number) {
   // Most recent 04:00 Asia/Shanghai, including catch-up after a missed tick.
@@ -36,18 +27,14 @@ export async function cleanup(db: D1Database, now: number) {
   const potential = rows.filter(
     (row) => now - row.entered_at >= DAY && now - row.observed_at <= 2 * HOUR,
   );
-  const history = await histories(
-    db,
-    potential.map((row) => row.cycle),
-    now,
-  );
+  const summaries = await projects(db, potential, now);
   const weights = [0.6, 0.25, 0.1, 0.05];
   const candidates = potential
-    .flatMap((row) => {
-      const points = history.get(row.cycle) ?? [];
-      if (points.length < 2 || points.at(-1)![0] - points[0][0] < DAY)
+    .flatMap((row, index) => {
+      const trends = summaries[index].trends;
+      const longest = trends[720];
+      if (longest.start === null || longest.end === null || longest.end - longest.start < DAY)
         return [];
-      const trends = allTrends(points, now);
       if (WINDOWS.some((hours) => trends[hours].delta === null)) return [];
       const score = WINDOWS.reduce((sum, hours, i) => {
         const trend = trends[hours];

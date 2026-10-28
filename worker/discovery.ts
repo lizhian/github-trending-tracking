@@ -121,7 +121,7 @@ export async function discover(
   state: DiscoveryState,
   now: number,
   prior: RunState | null,
-): Promise<{ entries: Discovery[]; status: RunState; state: DiscoveryState }> {
+): Promise<{ entries: Discovery[]; status: RunState; state: DiscoveryState; changed: boolean }> {
   const deadline = upstream.clock.now() + 3 * 60_000;
   const day = beijingDay(now);
   state.resolved = Object.fromEntries(
@@ -201,7 +201,7 @@ export async function discover(
     ...state.details.flatMap((task) => task.error ? [`hellogithub-detail: ${task.error}`] : []),
   ];
   return {
-    entries: [...entries.values()], state,
+    entries: [...entries.values()], state, changed: attempted,
     status: {
       attemptedAt: attempted ? now : prior?.attemptedAt ?? now,
       succeededAt: succeeded ? now : prior?.succeededAt ?? null,

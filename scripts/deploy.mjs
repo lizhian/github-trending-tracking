@@ -49,6 +49,10 @@ const cf = (args, capture = false) =>
   run(process.execPath, [wrangler, ...args], capture);
 
 async function verify(origin, expectedAssets = []) {
+  const expectedTitle = readFileSync("index.html", "utf8").match(
+    /<title>[^<]+<\/title>/,
+  )?.[0];
+  if (!expectedTitle) throw new Error("The local frontend title is missing");
   let failure;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -62,7 +66,7 @@ async function verify(origin, expectedAssets = []) {
       };
       const html = await (await get("/")).text();
       if (
-        !html.includes("<title>GitHub 趋势追踪</title>") ||
+        !html.includes(expectedTitle) ||
         expectedAssets.some((asset) => !html.includes(asset))
       )
         throw new Error(
