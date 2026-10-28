@@ -30,6 +30,7 @@ function harness(at = Date.parse("2026-10-01T01:00:00Z")) {
     source: (id: string) => SOURCES.find((source) => source.id === id)!.url,
   };
 }
+const policy: SamplingPolicy = { version: 2, effectiveAt: Date.parse("2026-09-01T00:00:00Z") };
 const rss = (...links: string[]) => `<rss><channel>${links.map((link) => `<item><link>${link}</link></item>`).join("")}</channel></rss>`;
 const detail = (url: string) => `<a href="https://github.com/irrelevant/recommendation">推荐</a><script type="application/json" id="__NEXT_DATA__">${JSON.stringify({ props: { pageProps: { repo: { url } } } })}</script>`;
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -40,9 +41,11 @@ test("daily trending follows the nine slots, normalizes old nextAt, retries fail
   const policy: SamplingPolicy = { version: 2, effectiveAt: h.upstream.clock.now() };
   let result = await discover(h.upstream, emptyDiscovery(), h.upstream.clock.now(), null, policy);
   expect(h.calls).toHaveLength(8);
+  result.state = JSON.parse(JSON.stringify(result.state));
+  const rebooted = new Upstream(JSON.parse(JSON.stringify(h.upstream.hosts)), h.upstream.clock);
   const step = async (time: string) => {
     h.setTime(at(time));
-    result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy);
+    result = await discover(rebooted, result.state, h.upstream.clock.now(), result.status, policy);
   };
   await step("2026-10-01T08:50:00");
   expect(h.calls).toHaveLength(8);
@@ -69,6 +72,11 @@ test("daily trending follows the nine slots, normalizes old nextAt, retries fail
   await step("2026-10-02T01:00:00");
   expect(h.calls).toHaveLength(20);
   expect(h.count(h.source("github-weekly"))).toBe(2); // initial read + daily 09:00
+  await step("2026-10-04T10:20:00"); // Catch up each source once after several missed days.
+  expect(h.calls).toHaveLength(28);
+  expect(h.count(h.source("github-weekly"))).toBe(3);
+  await step("2026-10-04T10:20:00");
+  expect(h.calls).toHaveLength(28);
 });
 
 test("extracts authoritative RSS and HelloGithub projects and all Markdown repository links", () => {
@@ -95,43 +103,23 @@ test("extracts authoritative RSS and HelloGithub projects and all Markdown repos
   `).map((name) => name.toLowerCase()).sort()).toEqual(["acme/four", "acme/one", "acme/three", "acme/two"]);
 });
 
-test("runs hourly and at 09:00 Beijing, persists schedules and catches up without replaying missed slots", async () => {
-  const h = harness(Date.parse("2026-10-01T00:40:00Z"));
-  let state = emptyDiscovery();
-  let result = await discover(h.upstream, state, h.upstream.clock.now(), null);
-  expect(h.calls).toHaveLength(8);
-  state = JSON.parse(JSON.stringify(result.state));
-  const rebooted = new Upstream(JSON.parse(JSON.stringify(h.upstream.hosts)), h.upstream.clock);
-  h.setTime(Date.parse("2026-10-01T00:50:00Z"));
-  result = await discover(rebooted, state, h.upstream.clock.now(), result.status);
-  expect(h.calls).toHaveLength(8);
-  h.setTime(Date.parse("2026-10-01T01:00:00Z"));
-  result = await discover(rebooted, state, h.upstream.clock.now(), result.status);
-  expect(h.calls).toHaveLength(16);
-  h.setTime(Date.parse("2026-10-01T02:00:00Z"));
-  result = await discover(rebooted, state, h.upstream.clock.now(), result.status);
-  expect(h.calls).toHaveLength(17);
-  h.setTime(Date.parse("2026-10-04T02:20:00Z"));
-  result = await discover(rebooted, state, h.upstream.clock.now(), result.status);
-  expect(h.calls).toHaveLength(25);
-  await discover(rebooted, state, h.upstream.clock.now(), result.status);
-  expect(h.calls).toHaveLength(25);
-});
-
-test("retains unresolved source failures across hourly successes and retries after 30 minutes", async () => {
+test("retains unresolved source failures across other source successes and retries after 30 minutes", async () => {
   const h = harness();
   const url = h.source("opengithubs-weekly");
   h.responses.set(url, () => new Response("private details", { status: 503 }));
-  let result = await discover(h.upstream, emptyDiscovery(), h.upstream.clock.now(), null);
+  let result = await discover(h.upstream, emptyDiscovery(), h.upstream.clock.now(), null, policy);
   expect(result.status).toMatchObject({ failed: 1, error: "opengithubs-weekly: OpenGithubs HTTP 503" });
   h.setTime(Date.parse("2026-10-01T01:20:00Z"));
-  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status);
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy);
   expect(h.count(url)).toBe(1);
   expect(result.status.failed).toBe(1);
+  h.setTime(Date.parse("2026-10-01T03:00:00Z")); // 11:00: daily trending succeeds, weekly source still fails.
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy);
+  expect(result.status.failed).toBe(1);
   h.responses.set(url, () => new Response("https://github.com/acme/recovered"));
-  h.setTime(Date.parse("2026-10-01T02:00:00Z"));
-  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status);
-  expect(h.count(url)).toBe(2);
+  h.setTime(Date.parse("2026-10-01T03:30:00Z"));
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy);
+  expect(h.count(url)).toBe(3);
   expect(result.status.failed).toBe(0);
   expect(result.entries).toContainEqual({ name: "acme/recovered", listedAt: h.upstream.clock.now() });
 });
@@ -144,22 +132,22 @@ test("shares daily HelloGithub results, limits failed detail requests to 20 and 
   h.responses.set(h.source("hellogithub-featured"), () => new Response(rss(...pages)));
   for (const [i, page] of pages.entries())
     h.responses.set(page, () => new Response("invalid page", { status: i % 2 ? 503 : 200 }));
-  let result = await discover(h.upstream, emptyDiscovery(), start, null);
+  let result = await discover(h.upstream, emptyDiscovery(), start, null, policy);
   expect(h.calls.filter((call) => call.url.startsWith("https://hellogithub.com/"))).toHaveLength(20);
   expect(result.state.details).toHaveLength(21);
   expect(result.status.failed).toBe(20);
   h.setTime(start + 10 * 60_000);
   h.responses.set(pages[20], () => new Response(detail("https://github.com/acme/last")));
-  result = await discover(h.upstream, JSON.parse(JSON.stringify(result.state)), h.upstream.clock.now(), result.status);
+  result = await discover(h.upstream, JSON.parse(JSON.stringify(result.state)), h.upstream.clock.now(), result.status, policy);
   expect(result.entries).toEqual([{ name: "acme/last", listedAt: start }]);
   expect(h.count(pages[0])).toBe(1);
   expect(h.count(h.source("hellogithub-all"))).toBe(1);
   h.setTime(start + DAY);
   for (const page of pages) h.responses.set(page, () => new Response(detail("https://github.com/acme/updated")));
-  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status);
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy);
   expect(h.count(pages[20])).toBe(1); // The batch is bounded even after the next day's RSS.
   h.setTime(start + DAY + 10 * 60_000);
-  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status);
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy);
   expect(h.count(pages[20])).toBe(2);
   expect(result.status.failed).toBe(0);
   expect(result.entries[0].name).toBe("acme/updated");
@@ -173,16 +161,16 @@ test("reuses successful HelloGithub details within a Beijing day and refreshes c
   h.responses.set(h.source("hellogithub-all"), () => new Response(rss(page)));
   h.responses.set(featured, () => new Response("unavailable", { status: 503 }));
   h.responses.set(page, () => new Response(detail("https://github.com/acme/original")));
-  let result = await discover(h.upstream, emptyDiscovery(), start, null);
+  let result = await discover(h.upstream, emptyDiscovery(), start, null, policy);
   expect(h.count(page)).toBe(1);
   h.setTime(start + HOUR);
   h.responses.set(featured, () => new Response(rss(page)));
-  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status);
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy);
   expect(h.count(page)).toBe(1);
   expect(result.entries).toEqual([{ name: "acme/original", listedAt: start + HOUR }]);
   h.setTime(start + DAY);
   h.responses.set(page, () => new Response(detail("https://github.com/acme/corrected")));
-  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status);
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy);
   expect(h.count(page)).toBe(2);
   expect(result.entries).toEqual([{ name: "acme/corrected", listedAt: start + DAY }]);
 });
@@ -211,7 +199,7 @@ test("paces same-host calls and persists whole-host rate-limit cooldown with bot
 test("isolates limited hosts, handles GraphQL rate limits and preserves partial successful repositories", async () => {
   const h = harness();
   h.responses.set(h.source("github-daily"), () => new Response("private", { status: 429 }));
-  const result = await discover(h.upstream, emptyDiscovery(), h.upstream.clock.now(), null);
+  const result = await discover(h.upstream, emptyDiscovery(), h.upstream.clock.now(), null, policy);
   expect(result.status.failed).toBe(1);
   expect(h.count(h.source("github-weekly"))).toBe(0);
   expect(h.count(h.source("opengithubs-daily"))).toBe(1);
@@ -242,7 +230,7 @@ test("stops discovery at its time budget and leaves remaining details for later"
     await h.upstream.clock.sleep(15_000);
     return new Response(detail("https://github.com/acme/one"));
   });
-  const result = await discover(h.upstream, emptyDiscovery(), start, null);
+  const result = await discover(h.upstream, emptyDiscovery(), start, null, policy);
   expect(h.upstream.clock.now() - start).toBeLessThanOrEqual(3 * 60_000);
   expect(result.state.details.length).toBeGreaterThan(0);
   expect(result.state.details.length).toBeLessThan(20);

@@ -139,10 +139,6 @@ nav a[aria-current]::after {
   align-items: center;
   gap: 20px;
 }
-.prototype-label {
-  font-size: 12px;
-  color: var(--color-muted);
-}
 .icon-button {
   display: inline-flex;
   justify-content: center;
@@ -759,9 +755,6 @@ td.numeric {
   .detail-star-line strong {
     font-size: 28px;
   }
-  .prototype-label {
-    font-size: 11px;
-  }
 }
 @media (max-width: 760px) {
   :root {
@@ -782,9 +775,6 @@ td.numeric {
   .masthead-end {
     margin-left: 0;
     gap: 0;
-  }
-  .prototype-label {
-    display: none;
   }
   .overview {
     padding: 20px;

@@ -56,9 +56,10 @@ test("window completeness follows expected times and preserves legacy gaps acros
     [bj("2026-10-01T13:04:00"), 110], [bj("2026-10-01T15:04:00"), 105],
   ];
   const actual = windowTrend(points, 24, points[3][0], undefined, transition);
-  expect(actual.gaps).toEqual([[points[0][0], points[1][0]], [points[1][0], points[2][0]]]);
+  const gaps = [[points[0][0], points[1][0]], [points[1][0], points[2][0]]];
+  expect(actual).toMatchObject({ delta: 5, state: "partial", gaps });
   const first = Object.fromEntries(WINDOWS.map((hours) => [hours, points[0]])) as Record<WindowHours, Point>;
   expect(summarize(first, points[3], actual.gaps, transition)[24]).toEqual({
-    delta: 5, state: actual.state, start: points[0][0], end: points[3][0], gaps: actual.gaps,
+    delta: 5, state: "partial", start: points[0][0], end: points[3][0], gaps,
   });
 });

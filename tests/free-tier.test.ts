@@ -7,7 +7,7 @@ import { prune } from "../worker/retention";
 import { DAY, HOUR, summarize, windowTrend } from "../worker/trends";
 import worker from "../worker/index";
 import { SOURCES } from "../worker/discovery";
-import { latestSlot, nextSlot, samplingSlot, type SamplingPolicy } from "../worker/schedule";
+import { latestSlot, nextSlot, type SamplingPolicy } from "../worker/schedule";
 
 // Measure SQLite's reported rows, including indexes and JSON virtual tables.
 function metered(db: D1Database) {
@@ -45,7 +45,7 @@ function metered(db: D1Database) {
   };
 }
 
-test("500 projects with nine daily rounds and 30 days fit the background D1 budget", async () => {
+test("bounds sampling writes for 500 projects with 30 days of history and measures a steady scheduled batch", async () => {
   const mf = new Miniflare(convertV4MiniflareOptions({
     name: "budget", modules: true,
     script: "export default {fetch() {return new Response()}}",
@@ -87,9 +87,6 @@ test("500 projects with nine daily rounds and 30 days fit the background D1 budg
       repo: { id: previous.id, stargazerCount: stars }, previous, listedAt: null,
     })), now, policy);
     const sampling = meter.usage();
-    const dueMeter = metered(db);
-    await dueMeter.db.prepare("SELECT * FROM projects WHERE observed_at < ? AND (error IS NULL OR attempted_at <= ?) ORDER BY attempted_at,id LIMIT 100")
-      .bind(samplingSlot(now, policy), now - 30 * 60_000).all();
     const cold = metered(db);
     const allRows = (await cold.db.prepare("SELECT * FROM projects").all<ProjectRow>()).results;
     await projects(cold.db, allRows, now + 60_000);
@@ -134,7 +131,7 @@ test("500 projects with nine daily rounds and 30 days fit the background D1 budg
     const storage = (await db.prepare("SELECT 1").all()).meta.size_after;
     const batchesPerDay = 4500 / rows.length;
     const dailySampling = { reads: sampling.reads * batchesPerDay, writes: sampling.writes * batchesPerDay };
-    const report = { sampling, dailySampling, dueSelection: dueMeter.usage(), scheduled: scheduled.usage(), coldList: cold.usage(),
+    const report = { sampling, dailySampling, scheduled: scheduled.usage(), coldList: cold.usage(),
       pruning: cleaning.usage(), storageBytes: storage };
     if (process.env.FREE_TIER_BUDGET_REPORT) {
       // Local Node CPU for trend functions only; excludes D1 and Worker runtime.

@@ -3,7 +3,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "prototype": "node prototype/server.mjs",
     "dev": "vite",
     "dev:worker": "wrangler dev --test-scheduled",
     "typecheck": "tsc --noEmit",

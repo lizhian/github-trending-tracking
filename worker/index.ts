@@ -16,6 +16,7 @@ export interface Env {
 interface PendingDiscovery {
   name: string;
   listedAt: number;
+  nextAt?: number;
 }
 
 async function collect(env: Env, now: number, upstream: Upstream, policy: SamplingPolicy) {
@@ -54,7 +55,7 @@ async function collect(env: Env, now: number, upstream: Upstream, policy: Sampli
   for (const entry of discovery.entries) {
     const previous = discoveries.get(entry.name.toLowerCase());
     if (!previous || previous.listedAt < entry.listedAt)
-      discoveries.set(entry.name.toLowerCase(), entry);
+      discoveries.set(entry.name.toLowerCase(), { ...previous, ...entry });
   }
   let pending = [...discoveries.values()].filter(
     (entry) => !known.has(entry.name.toLowerCase()),
@@ -68,8 +69,9 @@ async function collect(env: Env, now: number, upstream: Upstream, policy: Sampli
     ]);
   }
   const githubReady = () => upstream.blockedUntil("https://api.github.com/graphql") <= upstream.clock.now();
-  const targets = githubReady() ? pending.slice(0, 20) : [];
+  const targets = githubReady() ? pending.filter((entry) => (entry.nextAt ?? 0) <= now).slice(0, 20) : [];
   if (targets.length) {
+    const remaining = pending.filter((entry) => !targets.includes(entry));
     try {
       const nodes = await repositories(
         env.GITHUB_TOKEN,
@@ -105,8 +107,10 @@ async function collect(env: Env, now: number, upstream: Upstream, policy: Sampli
         policy,
       );
       pending = [
-        ...pending.slice(targets.length),
-        ...targets.filter((_, i) => !nodes[i]),
+        ...remaining,
+        ...targets.filter((_, i) => !nodes[i]).map((entry) => ({
+          ...entry, nextAt: upstream.clock.now() + 30 * 60_000,
+        })),
       ];
       result.succeeded += successful.length;
       const failed = nodes.filter((node) => !node).length;
@@ -115,7 +119,9 @@ async function collect(env: Env, now: number, upstream: Upstream, policy: Sampli
     } catch (error) {
       result.failed += targets.length;
       result.error = safeError(error);
-      pending = [...pending.slice(targets.length), ...targets];
+      pending = [...remaining, ...targets.map((entry) => ({
+        ...entry, nextAt: upstream.clock.now() + 30 * 60_000,
+      }))];
     }
   }
   const due = githubReady() ? (await env.DB.prepare(

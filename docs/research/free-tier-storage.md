@@ -1,6 +1,6 @@
 # 免费运行：D1、Workers KV 与 R2 研究
 
-日期：2026-10-28。状态：已完成 Workers + D1 第一阶段优化与验证，并按后续指令发布 [ADR 0003](../adr/0003-scheduled-sampling-and-500-projects.md) 的 500 项与分时采样版本；免费约束见 [ADR 0002](../adr/0002-zero-charge-runtime.md)。本地预算和两次生产观察分别记录如下。
+日期：2026-10-28。状态：已完成 Workers + D1 第一阶段优化与验证，并按后续指令发布 [ADR 0003](../adr/0003-scheduled-sampling-and-500-projects.md) 的 500 项与分时采样版本；免费约束见 [ADR 0002](../adr/0002-zero-charge-runtime.md)。本地预算和历史生产测量分别记录如下。
 
 范围：约 500 个追踪项目、每天 9 轮 Star 采样、保留 30 天。当前预算假设稳定在 500 项、无失败重试，不代表生产实测；保护期允许容量临时超额，见 [ADR 0001](../adr/0001-protect-new-projects-during-retention.md)。
 
@@ -66,9 +66,9 @@ KV 只存可重建的公共结果；D1 继续负责采集进度、租约和事�
 以下说明哪些已落地，哪些仍是后续候选；均未证明生产全链路能满足 10 ms：
 
 1. 已拆开列表摘要和详情历史。[main.tsx](../../src/main.tsx) 的列表只使用净增量、观测状态、起止时间和缺测信息，图表仅在详情展示；[trends.ts](../../worker/trends.ts) 不再为采样生成四套压缩点。旧摘要中的图点在读取时剔除，项目下次采样自然更新。
-2. [github.ts](../../worker/github.ts) 平时只查稳定标识与 Star；新项目完整查询，名称、简介、语言、Topics 随小时采样每 24 小时刷新。元数据变更可能稍后显示，Star 精度不变。
+2. [github.ts](../../worker/github.ts) 平时只查稳定标识与 Star；新项目完整查询，名称、简介、语言、Topics 随计划采样每 24 小时刷新。元数据变更可能稍后显示，Star 精度不变。
 3. [store.ts](../../worker/store.ts) 在 D1 中先直接读取边界小时及下一小时的 JSON key，遇到真实缺测才按日查找最早有效点；Worker 不再解析整段历史。真实缺测区间随成功观测维护，同小时替换修正端点；陈旧摘要只修正已越过保留边界的窗口。
-4. [retention.ts](../../worker/retention.ts) 复用准确摘要评分，保留保护期、失败暂缓淘汰与追踪周期隔离。物理过期按整日清理。
+4. [retention.ts](../../worker/retention.ts) 复用准确摘要评分，保留保护期、可靠观测资格与追踪周期隔离。物理过期按整日清理。
 5. 列表保持现有服务端筛选排序，缓存延长至 10 分钟。统一公开快照、浏览器筛选或 KV 发布仍是后续候选；本次没有增加 KV 或全站数据复制。
 6. [index.ts](../../worker/index.ts) 保留每分钟调度，每批最多 100 项，仅采样当前计划轮次尚未成功的项目；500 项通常 5 批完成。没有实际采样时不重复写采集状态，冷却期间不反复写失败尝试；部分仓库不可用也至少 30 分钟后重试。到期索引避免返回全站摘要。新策略生效时间保存在 `system_state`，旧历史继续按小时识别缺测，新数据按计划轮次；新鲜度锚定观测后的下一时段及 10 分钟宽限。
 
@@ -86,13 +86,13 @@ KV 只存可重建的公共结果；D1 继续负责采集进度、租约和事�
 
 ## 可选免费计算后备
 
-如果 Workers 优化后仍不能满足 10 ms，可评估把采集与计算移到 GitHub Actions，让 Worker 仅查询或流式分发。公开仓库的标准 GitHub 托管 runner 可免费使用；本次已用 `gh repo view` 核实仓库为 PUBLIC、默认分支为 main。scheduled workflow 可能延迟或丢任务、只在默认分支运行，公开库 60 天无活动会自动停用。因此它需要用户接受调度和托管方式的变化，不能承诺每小时必有快照。这只是后备，不意味着采用频繁提交数据到 Git 或每小时部署 Pages 的方式。[Actions 计费](https://docs.github.com/en/billing/concepts/product-billing/github-actions)、[schedule 事件](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
+如果 Workers 优化后仍不能满足 10 ms，可评估把采集与计算移到 GitHub Actions，让 Worker 仅查询或流式分发。公开仓库的标准 GitHub 托管 runner 可免费使用；本次已用 `gh repo view` 核实仓库为 PUBLIC、默认分支为 main。scheduled workflow 可能延迟或丢任务、只在默认分支运行，公开库 60 天无活动会自动停用。因此它需要用户接受调度和托管方式的变化，不能承诺每个应采时段都有快照。这只是后备，不意味着采用频繁提交数据到 Git 或每小时部署 Pages 的方式。[Actions 计费](https://docs.github.com/en/billing/concepts/product-billing/github-actions)、[schedule 事件](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
 
 ## 本地验证与剩余限制
 
 用户已确认：物理按日清理、查询严格 30 天；真实缺测、过期与必要时暂停服务可接受；API 仅供本站，可调整内部结构；先沿用 Workers + D1，KV 和 Actions 都没有启用。免费约束见 ADR 0002，最新容量、采样及历史兼容规则见 ADR 0003。
 
-[free-tier.test.ts](../../tests/free-tier.test.ts) 在独立本地 Miniflare D1 中生成 500 项、每天 9 个实际点、每项 30 天共 270 个点，读取实际 `meta.rows_read` / `rows_written`，包含 JSON 虚拟表和索引。2026-10-28 结果：
+[free-tier.test.ts](../../tests/free-tier.test.ts) 在独立本地 Miniflare D1 中生成 500 项、每天 9 个实际点、每项 30 天共 270 个点，读取实际 `meta.rows_read` / `rows_written`，包含 JSON 虚拟表和索引。硬断言约束采样写回预算、数据库大小及调用量；完整稳态调度和冷列表读写另作局部测量，不是全站每日预算或生产 CPU 验证。2026-10-28 结果：
 
 | 操作 | 本地结果 |
 | --- | --- |
@@ -108,17 +108,19 @@ KV 只存可重建的公共结果；D1 继续负责采集进度、租约和事�
 
 调度读取还包括到期索引范围与排序；每天要累加所有轮次，不能只按一轮的最大值相乘。每日写入还要加上租约、状态、日记录索引、新发现、删除与重试。缺测较多时 SQL 回退路径与缺测区间会更大；高频筛选和不同边缘节点会增加缓存未命中次数。
 
-集成测试保留缺测、负净增量、30 天边界、保护期超额及重新收录的周期隔离，并补充轻量 Star 请求、每日元数据刷新、同小时缺测端点替换与旧结果写回。生产还需验证完整调度（尤其发现阶段）、冷查询的 CPU，以及稳定日读写和计划轮次覆盖率。分时采样已按后续指令发布，下方区分此前小时采样与新版本的生产记录。若生产 CPU 仍超限，按已确认范围再讨论 Actions 后备。
+集成测试保留缺测、负净增量、30 天边界、保护期超额及重新收录的周期隔离，并补充轻量 Star 请求、每日元数据刷新、同小时缺测端点替换与旧结果写回。生产还需验证完整调度（尤其发现阶段）、冷查询的 CPU，以及稳定日读写和计划轮次覆盖率。历史测量按采样策略分别记录在下表。若生产 CPU 仍超限，按已确认范围再讨论 Actions 后备。
 
 
-## 首次生产观察
+## 生产测量记录
 
-2026-10-28 合并发布记录见 [发布 #9](https://github.com/lizhian/github-trending-tracking/issues/9) 和 [README](../../README.md#合并发布验证)。已应用新增元数据字段和到期索引迁移，沿用现有 Pages、Worker、D1；未引入 KV、R2 或付费资源。列表边缘快照仍为 10 分钟，但浏览器响应改为 `no-store`；生产验证发现原 `public,max-age=600` 会被对外延长为 14400 秒，因此缓存现在只保留在 Worker Cache API 内。
+以下均为 2026-10-28 的历史测量，CPU 包含当次完整调度。版本、部署步骤及验收明细保留在对应发布 Issue。
 
-北京时间 12:00，版本 `201ae0af-ee19-471a-a549-172701f4cc93` 的每分钟 Cron 成功采集 30 项、失败 0，元数据刷新 30 项；调度与发现也写入新的成功状态。Tail 结果为 `ok`，CPU **34 ms**，wall time 7758 ms。当前仅 100 个真实项目，该轮含发现和首次元数据刷新，不能直接外推稳态或 1000 项规模；但它已说明生产全链路尚未证明满足 Free 的 10 ms 目标。成功执行不能作为 CPU 达标的证据。合并后 19 项测试和线上页面/API 回归通过，CPU、免费日额度及小时覆盖率仍需后续观察与优化。
+| 北京时间 | 运行条件 | CPU / wall time | 记录 |
+| --- | --- | --- | --- |
+| 02:00 | 首次部署，冷启动采集 10 项，失败 0；数据库约 64 KiB | 17 ms / 约 3.7 秒 | [首次部署](https://github.com/lizhian/github-trending-tracking/issues/1#issuecomment-6449772270) |
+| 12:00 | 小时采样阶段，追踪 100 项；当轮采集及元数据刷新 30 项，失败 0，含发现 | 34 ms / 7758 ms | [发布 #9](https://github.com/lizhian/github-trending-tracking/issues/9) |
+| 15:00:08 | 分时采样阶段，策略于 14:59:08 生效；采集 100 项，失败 0，日榜发现 11 项；数据库确认全部 100 项更新，下轮日榜 17:00 | 72 ms / 3754 ms | [发布 #13](https://github.com/lizhian/github-trending-tracking/issues/13) |
 
-## 分时采样生产观察
+三次调度 outcome 均为 `ok`，表示执行成功，不能作为满足 Free 10 ms 标称 CPU 额度的证据；它们也不代表 500 项、完整 30 天历史及稳定访问流量的表现。日读写统计存在聚合延迟，需要在稳定运行后核对。
 
-2026-10-28 提交 `7390885` 已推送至 main 并发布，Worker 为 `9908fddd-2590-417e-a0c9-38d628ca900a`，Pages 为 `9060202d`，没有待执行数据库迁移或新资源。27 项测试和生产页面/API 验证通过，浏览器确认每页 100 项、详情图表和新采样说明。
-
-北京时间 14:59:08 首次 Cron 记录策略生效时间；15:00:08 新一轮成功采集 100 项、失败 0，日榜发现 11 项，调度成功。直接查询生产状态和项目表确认这 100 项全部写入了本轮实际观测时间；日榜下轮为 17:00。Tail outcome 为 `ok`、CPU **72 ms**、wall time 3754 ms。该结果证明新批次和计划已实际运行，同时表明全链路尚未满足 Free 的 10 ms 标称 CPU 目标，不能从本地纯趋势函数测量推断生产 CPU 达标。结果见 [发布 #13](https://github.com/lizhian/github-trending-tracking/issues/13)。
+发布 #9 还发现对外的 `public,max-age=600` 会被域名浏览器缓存设置延长到 14400 秒，因此列表缓存仅保留在 Worker Cache API 内，对浏览器返回 `no-store`。此生产问题由缓存回归测试保护。

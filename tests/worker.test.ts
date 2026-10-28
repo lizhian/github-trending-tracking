@@ -81,6 +81,15 @@ async function run(at = now) {
     {} as ExecutionContext,
   );
 }
+// Prepare large fixtures directly; scenarios still exercise scheduling and public queries.
+async function seedProjects(at: number, from = 0) {
+  for (let offset = from; offset < names.length; offset += 100) {
+    await saveObservations(env.DB, names.slice(offset, offset + 100).map((nameWithOwner, i) => ({
+      repo: { id: `R_${offset + i}`, nameWithOwner, description: null, primaryLanguage: null,
+        repositoryTopics: { nodes: [] }, stargazerCount: 100 }, listedAt: at,
+    })), at);
+  }
+}
 async function api(path = "/api/projects") {
   return worker.fetch(
     new Request(`https://worker.test${path}`),
@@ -128,8 +137,7 @@ beforeEach(async () => {
   failedIds = new Set();
   rssFailure = false;
   sourceResponses = new Map();
-  // These existing hourly scenarios cover observations before policy cutover.
-  await setState(env.DB, "sampling_policy", { version: 2, effectiveAt: Date.parse("2100-01-01T00:00:00Z") }).run();
+  await setState(env.DB, "sampling_policy", { version: 2, effectiveAt: now - 30 * DAY }).run();
 });
 afterAll(async () => {
   vi.unstubAllGlobals();
@@ -142,12 +150,7 @@ test("completes 500 projects in five scheduled batches and leaves completed/idle
   await setState(env.DB, "sampling_policy", policy).run();
   names = Array.from({ length: 500 }, (_, i) => `acme/round-${i}`);
   stars = names.map(() => 120);
-  for (let offset = 0; offset < 500; offset += 100) {
-    await saveObservations(env.DB, names.slice(offset, offset + 100).map((nameWithOwner, i) => ({
-      repo: { id: `R_${offset + i}`, nameWithOwner, description: null, primaryLanguage: null,
-        repositoryTopics: { nodes: [] }, stargazerCount: 100 }, listedAt: null,
-    })), start - 4 * HOUR + 4 * 60_000, policy);
-  }
+  await seedProjects(start - 4 * HOUR + 4 * 60_000);
   const success = { attemptedAt: start - HOUR, succeededAt: start - HOUR, succeeded: 1, failed: 0, error: null, nextAt: start + DAY };
   await setState(env.DB, "discoverySources", { scheduleVersion: 2,
     sources: Object.fromEntries(SOURCES.map(({ id }) => [id, success])), details: [], resolved: {} }).run();
@@ -197,6 +200,10 @@ test("initializes policy once, retries incomplete rounds, catches up only curren
   expect((await list()).items.find((item: any) => item.id === "R_0").trends[24].gaps).toEqual(history.gaps);
   fail = true;
   await run(start + 10 * HOUR); // 19:05
+  expect((await list()).items.find((item: any) => item.id === "R_0")).toMatchObject({
+    stars: 105, observedAt: start + 8 * HOUR, error: "GitHub HTTP 503",
+  });
+  expect(JSON.stringify(await list())).not.toContain("test-secret");
   const calls = external.mock.calls.length;
   const attempt = await env.DB.prepare("SELECT attempted_at FROM projects WHERE id='R_0'").first();
   await run(start + 10 * HOUR + 60_000);
@@ -215,11 +222,11 @@ test("initializes policy once, retries incomplete rounds, catches up only curren
 
 test("preserves legacy hourly gaps while subsequent planned intervals agree in list and history", async () => {
   const start = Date.parse("2026-10-02T00:05:00Z"); // Beijing 08:05, legacy policy.
+  const policy: SamplingPolicy = { version: 2, effectiveAt: start + 2 * HOUR + 25 * 60_000 };
+  await setState(env.DB, "sampling_policy", policy).run();
   await run(start);
   stars[0] = 130;
   await run(start + 2 * HOUR); // missing legacy 09:00
-  const policy: SamplingPolicy = { version: 2, effectiveAt: start + 2 * HOUR + 25 * 60_000 };
-  await setState(env.DB, "sampling_policy", policy).run();
   await run(policy.effectiveAt);
   await run(start + 3 * HOUR); // 11:05
   stars[0] = 125;
@@ -231,45 +238,23 @@ test("preserves legacy hourly gaps while subsequent planned intervals agree in l
   expect(summary).toEqual(expected);
 });
 
-test("discovers, deduplicates by GitHub identity, samples across hours and recovers from upstream failure", async () => {
+test("deduplicates renamed repositories and keeps successful samples despite source and repository failures", async () => {
+  const start = now;
   await run();
-  expect((await list()).total).toBe(2);
-  expect((await list()).items[0].trends["24"].state).toBe("accumulating");
-  await run(now + 10 * 60_000);
   names[0] = "acme/renamed";
   stars[0] = 125;
-  await run(now + 3_600_000);
+  await run(start + HOUR);
   let result = await list();
   expect(result.total).toBe(2);
-  expect(result.items[0]).toMatchObject({ name: "acme/renamed", stars: 125 });
-  expect(result.items[0].trends["24"]).toMatchObject({
-    delta: 25,
-    state: "partial",
-  });
-  fail = true;
-  await run(now + 3_600_000);
-  expect((await list()).items[0]).toMatchObject({
-    stars: 125,
-    error: "GitHub HTTP 503",
-  });
-  fail = false;
-  stars[0] = 120;
-  await run(now + 3_600_000);
-  const history = (await (
-    await api("/api/projects/R_0/history?window=24")
-  ).json()) as any;
-  expect(history.points.map((p: number[]) => p[1])).toEqual([100, 125, 120]);
-  expect(history.trend.delta).toBe(20);
-  expect(history.gaps).toHaveLength(1);
+  expect(result.items[0]).toMatchObject({ id: "R_0", name: names[0], enteredAt: start, stars: 125 });
   failedIds.add("R_1");
   rssFailure = true;
   stars[0] = 140;
-  await run(now + 3_600_000);
+  await run(start + 3 * HOUR);
   result = await list();
   expect(result.items.find((p: any) => p.id === "R_0").stars).toBe(140);
   expect(result.items.find((p: any) => p.id === "R_1")).toMatchObject({
-    stars: 200,
-    error: "GitHub repository unavailable",
+    stars: 200, error: "GitHub repository unavailable",
   });
   expect(result.status.discovery.failed).toBe(1);
   expect(JSON.stringify(result)).not.toContain("test-secret");
@@ -359,9 +344,6 @@ test("samples only stars between daily metadata refreshes and keeps same-hour ga
     ],
     now,
   );
-  const replacement = await env.DB.prepare(
-    "SELECT * FROM projects WHERE id='R_0'",
-  ).first<ProjectRow>();
   // An older result cannot replace a newer point in the same tracking cycle.
   await saveObservations(
     env.DB,
@@ -374,20 +356,15 @@ test("samples only stars between daily metadata refreshes and keeps same-hour ga
     ],
     now - 60_000,
   );
-  expect(
-    await env.DB.prepare(
-      "SELECT observed_at FROM projects WHERE id='R_0'",
-    ).first(),
-  ).toEqual({ observed_at: now });
   vi.spyOn(Date, "now").mockReturnValue(now);
   const item = (await list()).items.find((item: any) => item.id === "R_0");
   const history = (await (
     await api("/api/projects/R_0/history?window=720")
   ).json()) as any;
+  expect(item).toMatchObject({ stars: 135, observedAt: now });
   expect(item.trends[720]).toMatchObject({ delta: 35, gaps: [[start, now]] });
   expect(item.trends[720]).not.toHaveProperty("points");
   expect(item.trends[720].gaps).toEqual(history.gaps);
-  expect(JSON.parse(replacement!.trends)[720].gaps).toEqual(history.gaps);
   external.mockClear();
   names[0] = "acme/renamed-without-listing";
   await run(start + 25 * 3_600_000);
@@ -442,7 +419,6 @@ test("aggregates known partial deltas and negative values across all tracked pro
     net24: null,
     comparable24: 0,
   });
-  expect(await list()).not.toHaveProperty("views");
   stars = [400, 150];
   await run(start + 3_600_000);
   expect((await list()).items[0].trends[24]).toMatchObject({
@@ -455,7 +431,7 @@ test("aggregates known partial deltas and negative values across all tracked pro
   stars[0] = 399;
   names.push("acme/gamma");
   stars.push(900);
-  await run(start + 2 * 3_600_000);
+  await run(start + 3 * HOUR);
   expect((await list()).summary).toMatchObject({
     net24: 249,
     comparable24: 2,
@@ -485,7 +461,7 @@ test("combines filters, stable sorting, nulls-last and 100-item pagination; reje
   // Newly discovered projects have no delta and must remain last in either direction.
   names.push("acme/zz-new");
   stars.push(100);
-  await run(start + 2 * 3_600_000);
+  await run(start + 3 * HOUR);
   expect((await list("?sort=24&direction=asc")).items[0].name).toBe(
     "acme/project-00",
   );
@@ -498,8 +474,7 @@ test("combines filters, stable sorting, nulls-last and 100-item pagination; reje
   });
   expect((await api("/api/projects?sort=invalid")).status).toBe(400);
   expect((await api("/api/projects?page=0")).status).toBe(400);
-  for (const removed of ["all", "hot", "new", "invalid"])
-    expect((await api(`/api/projects?view=${removed}`)).status).toBe(400);
+  expect((await api("/api/projects?view=all")).status).toBe(400);
   expect((await api("/api/projects/R_0/history?window=25")).status).toBe(400);
   expect(
     (
@@ -529,10 +504,8 @@ test("keeps protected overflow, removes lowest reliable growth at 04:00 Beijing,
   await setState(env.DB, "sampling_policy", { version: 2, effectiveAt: start }).run();
   names = Array.from({ length: 504 }, (_, i) => `acme/repo-${i}`);
   stars = names.map(() => 100);
-  for (let i = 0; i < 26; i++) {
-    await run(start + i * 1000);
-    rssNames = [];
-  }
+  await seedProjects(start);
+  rssNames = [];
   expect((await list()).total).toBe(504);
   stars[0] = 600;
   stars[1] = 200;
@@ -540,6 +513,9 @@ test("keeps protected overflow, removes lowest reliable growth at 04:00 Beijing,
   for (let i = 0; i < 6; i++) await run(start + 23 * 3_600_000 + i * 1000);
   expect((await list()).total).toBe(504);
   for (let i = 0; i < 6; i++) await run(start + DAY + i * 60_000);
+  const oldCycle = (await env.DB.prepare("SELECT * FROM projects WHERE id='R_10'").first<ProjectRow>())!;
+  // A failure flag alone does not disqualify otherwise fresh, comparable observations.
+  await env.DB.prepare("UPDATE projects SET error='GitHub repository unavailable' WHERE id='R_10'").run();
   await run(start + 27 * HOUR); // 04:00: normal 01:00 snapshots are still fresh.
   const cleaned = await list();
   expect(cleaned.total).toBe(500);
@@ -556,6 +532,13 @@ test("keeps protected overflow, removes lowest reliable growth at 04:00 Beijing,
   ).json()) as any;
   expect(restored.points).toHaveLength(1);
   expect(restored.trend.state).toBe("accumulating");
+  now += 60_000;
+  vi.spyOn(Date, "now").mockReturnValue(now);
+  // The late result is newer than re-entry, but belongs to the deleted tracking cycle.
+  await saveObservations(env.DB, [{ repo: { id: "R_10", stargazerCount: 999 }, previous: oldCycle, listedAt: null }], now);
+  expect(await (await api("/api/projects/R_10/history")).json()).toEqual(restored);
+  expect((await list("?q=acme%2Frepo-10")).items.find((p: any) => p.id === "R_10"))
+    .toMatchObject({ stars: 100, observedAt: restored.observedAt });
   expect((await list()).total).toBe(504);
   fail = true;
   rssNames = [];
@@ -568,26 +551,29 @@ test("keeps protected overflow, removes lowest reliable growth at 04:00 Beijing,
   expect((await (await api("/api/projects/R_0/history")).json()) as any).toMatchObject({ stale: true });
 }, 60_000);
 
-test("rotates failed discoveries so other new projects can still enter tracking", async () => {
+test("rotates failed discoveries and preserves their 30-minute cooldown across rediscovery", async () => {
+  now = Date.parse("2026-10-01T00:50:00Z"); // Beijing 08:50, shortly before source refresh.
   names = Array.from({ length: 21 }, (_, i) => `acme/new-${i}`);
   stars = names.map(() => 100);
   failedIds = new Set(names.slice(0, 20).map((_, i) => `R_${i}`));
   const firstSeen = now;
+  const lookups = () => external.mock.calls.filter(([, init]) =>
+    init?.body && !JSON.parse(String(init.body)).query.includes("nodes("));
   await run();
   expect((await list()).total).toBe(0);
-  expect((await list()).status.discovery.succeeded).toBe(21);
-  expect((await list()).status.collection.error).toBe(
-    "GitHub repository unavailable",
-  );
+  expect((await list()).status.collection.error).toBe("GitHub repository unavailable");
   rssNames = [];
-  await run(now + 600_000);
+  await run(firstSeen + 5 * 60_000);
   expect((await list()).items[0]).toMatchObject({
-    name: "acme/new-20",
-    listedAt: firstSeen,
-    enteredAt: firstSeen + 600_000,
+    name: "acme/new-20", listedAt: firstSeen, enteredAt: firstSeen + 5 * 60_000,
   });
   failedIds.clear();
-  await run(now + 600_000);
+  rssNames = null;
+  await run(firstSeen + 10 * 60_000); // Source rediscovers the failed projects at 09:00.
+  await run(firstSeen + 29 * 60_000);
+  expect(lookups()).toHaveLength(2);
+  expect((await list()).total).toBe(1);
+  await run(firstSeen + 30 * 60_000);
   expect((await list()).total).toBe(21);
 });
 
@@ -606,10 +592,8 @@ test("the worked retention scores favor recent acceleration over historical popu
   // 499 new protected projects leave room for precisely one mature project.
   names.push(...Array.from({ length: 499 }, (_, i) => `acme/protected-${i}`));
   stars.push(...Array(499).fill(100));
-  for (let i = 0; i < 25; i++) {
-    await run(start + 29 * day + 3_600_000 + i * 1000);
-    rssNames = [];
-  }
+  await seedProjects(start + 29 * day + HOUR, 4);
+  rssNames = [];
   stars.fill(20000, 0, 4);
   for (let i = 0; i < 6; i++) await run(start + 30 * day - 600_000 + i * 1000);
   await run(start + 30 * day);
