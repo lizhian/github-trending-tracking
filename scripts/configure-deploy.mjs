@@ -2,6 +2,7 @@ import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse } from "jsonc-parser";
 const databaseId = process.env.CLOUDFLARE_D1_DATABASE_ID;
+const accountId = process.env.CLOUDFLARE_ACCOUNT_ID;
 const origin = process.env.ALLOWED_ORIGIN;
 const zoneName = process.env.CLOUDFLARE_ZONE_NAME;
 if (
@@ -18,6 +19,11 @@ if (
     "Set ALLOWED_ORIGIN to the exact HTTPS Pages origin, without a trailing slash",
   );
 const config = parse(readFileSync("wrangler.jsonc", "utf8"));
+if (accountId) {
+  if (!/^[\da-f]{32}$/i.test(accountId))
+    throw new Error("Set CLOUDFLARE_ACCOUNT_ID to the account ID");
+  config.account_id = accountId;
+}
 config.main = resolve("worker/index.ts");
 config.d1_databases[0].database_id = databaseId;
 config.d1_databases[0].migrations_dir = resolve("migrations");

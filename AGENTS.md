@@ -15,3 +15,7 @@
 ### Domain docs
 
 采用 single-context 布局。探索代码前读取 `docs/agents/domain.md`。
+
+### Cloudflare deployment
+
+发布到 Cloudflare、执行生产迁移或排查部署失败前，读取 `docs/agents/deployment.md`。

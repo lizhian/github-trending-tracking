@@ -47,7 +47,11 @@ npm run db:migrate
 
 `build:worker` 只打包，不部署；输出在被忽略的 `.wrangler/build`，不会混入 Pages 的 `dist`。
 
-## 部署
+## 增量部署
+
+更新现有站点使用 [Cloudflare 增量部署流程](docs/agents/deployment.md)，支持仅前端、仅 Worker、整站发布和本地 dry-run。
+
+## 首次部署
 
 实际资源创建、迁移及发布应在获得部署授权后进行。以下命令由维护者执行；仓库不含个人账号或数据库标识。设置 Cloudflare 凭据（`wrangler login`，或配置 `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID`）。
 

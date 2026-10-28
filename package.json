@@ -11,7 +11,11 @@
     "build": "vite build",
     "build:worker": "wrangler deploy --dry-run --outdir .wrangler/build",
     "db:migrate": "wrangler d1 migrations apply DB --local",
-    "configure:deploy": "node scripts/configure-deploy.mjs"
+    "configure:deploy": "node scripts/configure-deploy.mjs",
+    "deploy": "node scripts/deploy.mjs all",
+    "deploy:pages": "node scripts/deploy.mjs pages",
+    "deploy:worker": "node scripts/deploy.mjs worker",
+    "deploy:verify": "node scripts/deploy.mjs verify"
   },
   "dependencies": {
     "fast-xml-parser": "^5.11.2",
