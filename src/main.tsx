@@ -769,8 +769,9 @@ function App() {
       <dialog ref={dialog} aria-labelledby="about-title">
         <h2 id="about-title">关于这些数据</h2>
         <p>
-          每 10 分钟从 GitHub Trending RSS 发现项目，持续按小时记录 Star
-          总数。所有访客共享同一份数据，无需登录。
+          项目来自 GitHub Trending、HelloGithub 和 OpenGithubs。GitHub
+          日榜每小时抓取一次，其余来源北京时间每天 09:00
+          开始抓取；所有追踪项目持续按小时记录 Star 总数。所有访客共享同一份数据，无需登录。
         </p>
         <p>
           四个窗口分别为滚动 24、72、168、720

@@ -2,9 +2,9 @@
 
 [线上站点](https://github.lizhian.cc.cd/) · 页面和 API 共用该域名。
 
-无需登录的中文只读趋势站。React / TypeScript / Vite 前端部署到 Cloudflare Pages；Worker 定时从唯一 RSS 趋势源发现项目、使用 GitHub GraphQL 批量获取 Star，D1 保存共享观测。
+无需登录的中文只读趋势站。React / TypeScript / Vite 前端部署到 Cloudflare Pages；Worker 定时从八个趋势源发现项目、使用 GitHub GraphQL 批量获取 Star，D1 保存共享观测。
 
-规格：[Issue #1](https://github.com/lizhian/github-trending-tracking/issues/1)。`prototype/` 是设计探索记录，正式页面位于 `src/`。
+规格：[Issue #1](https://github.com/lizhian/github-trending-tracking/issues/1)、[多来源采集 #3](https://github.com/lizhian/github-trending-tracking/issues/3)。`prototype/` 是设计探索记录，正式页面位于 `src/`。
 
 ## 本地运行
 
@@ -43,7 +43,7 @@ npm run build:worker
 npm run db:migrate
 ```
 
-集成测试直接调用 Worker 的定时入口和公开查询，使用 Miniflare 的真实本地 D1，只控制 RSS、GitHub 响应与时间。涵盖持久化/改名/重试、滚动窗口与缺测、筛选排序分页、保护期与容量清理及重新收录。测试数据库和开发数据库互相隔离。
+集成测试直接调用 Worker 的定时入口和公开查询，使用 Miniflare 的真实本地 D1，只控制上游响应与时间。涵盖多来源解析、逐源调度、详情队列、限流冷却、持久化/改名/重试、滚动窗口与缺测、筛选排序分页、保护期与容量清理及重新收录。测试数据库和开发数据库互相隔离。
 
 `build:worker` 只打包，不部署；输出在被忽略的 `.wrangler/build`，不会混入 Pages 的 `dist`。
 
@@ -102,7 +102,26 @@ Worker 仅接受 GET / OPTIONS，CORS 只允许配置的 Pages 来源（预览�
 
 ## 调度、存储与资源预算
 
-UTC 每 10 分钟运行一次。RSS 仅用于发现及上榜时间，不作为 Star 观测。已追踪项目每小时到期采样，每次最多处理 180 项、按最早尝试排序，分两组各 90 项请求 GitHub GraphQL；新增仓库按最多 20 项单独解析。可在一个小时内处理 1080 个既有项目，若软容量长期超额或上游持续失败，积压会明确表现为数据过期，后续调度继续追赶。
+UTC 每 10 分钟运行一次。趋势源只用于发现项目及上榜时间，不作为 Star 观测。
+
+| 趋势源 | 地址 | 抓取时间 |
+| --- | --- | --- |
+| GitHub Trending 日榜 | https://rsshub-balancer.virworks.moe/github/trending/daily/any | 每个整点 |
+| GitHub Trending 周榜 | https://rsshub-balancer.virworks.moe/github/trending/weekly/any | 北京时间每天 09:00 开始 |
+| GitHub Trending 月榜 | https://rsshub-balancer.virworks.moe/github/trending/monthly/any | 北京时间每天 09:00 开始 |
+| HelloGithub 全部 | https://rsshub-balancer.virworks.moe/hellogithub/home/all | 北京时间每天 09:00 开始 |
+| HelloGithub 精选 | https://rsshub-balancer.virworks.moe/hellogithub/home/featured | 北京时间每天 09:00 开始 |
+| OpenGithubs 日榜 | https://raw.githubusercontent.com/OpenGithubs/github-daily-rank/refs/heads/main/README.md | 北京时间每天 09:00 开始 |
+| OpenGithubs 周榜 | https://raw.githubusercontent.com/OpenGithubs/github-weekly-rank/refs/heads/main/README.md | 北京时间每天 09:00 开始 |
+| OpenGithubs 月榜 | https://raw.githubusercontent.com/OpenGithubs/github-monthly-rank/refs/heads/main/README.md | 北京时间每天 09:00 开始 |
+
+首次启用立即抓取八个源，之后进入固定时段；漏跑后下一轮补抓一次，不补放历史周期。同一主机的请求串行执行，开始时间至少相隔 2 秒，包括 GitHub GraphQL。来源或详情抓取普通失败最早 30 分钟后重试；HTTP 429 或明确的限流响应使整个主机至少冷却 1 小时，并遵守更长的 `Retry-After` / GitHub 限流重置时间。GitHub GraphQL 上游失败也至少冷却 30 分钟；部分成功的仓库仍可保存。
+
+GitHub RSS 只读取条目的 link/guid。HelloGithub 进入内容页，仅读取 `__NEXT_DATA__.props.pageProps.repo.url` 中的主项目，解析失败不扫描推荐区或页脚补凑。两个 RSS 的同一内容页共用当天成功结果，次日重抓；详情任务持久化，每轮最多请求 20 页，失败独立重试并保留原始发现时间。OpenGithubs 扫描当前 README 全文中的 GitHub 仓库链接（含子路径），归一为 owner/repo；仅在这些 README 中排除 OpenGithubs owner 的全部仓库（忽略大小写）。不遍历分页、历史文件或递归链接。
+
+发现阶段最多使用 3 分钟，剩余任务留待下一轮；每次请求开始前预留完整超时预算。逐源执行状态、下次执行时间、详情队列和主机冷却保存在现有 `system_state`，无需数据库迁移。公开接口保留聚合 `status.discovery`，未恢复的来源或详情失败不会被其他来源的成功覆盖，错误包含来源标识。
+
+已追踪项目每小时到期采样，每次最多处理 180 项、按最早尝试排序，分两组各 90 项请求 GitHub GraphQL；新增仓库按最多 20 项单独解析。可在一个小时内处理 1080 个既有项目，若软容量长期超额或上游持续失败，积压会明确表现为数据过期，后续调度继续追赶。
 
 同小时快照只允许更新的成功观测替换。失败不写零、不改变最后成功时间。调度租约避免正常重叠，每个追踪周期使用随机标识；采集和清理写回均核对周期，旧结果不能改写重新收录的项目。租约九分钟后可恢复，不足以获取上游资料的项目会重试。
 
@@ -116,12 +135,12 @@ UTC 每 10 分钟运行一次。RSS 仅用于发现及上榜时间，不作为 S
 | --- | --- |
 | 小时采集 | 每天 24,000 次项目更新 + 24,000 次日记录写入/更新 |
 | 快照索引与删除 | 每天约 1,000 次新日索引插入、约 1,000 个过期日级联/索引删除；边界日逐小时移除过期点 |
-| RSS 与调度状态 | 144 次 RSS/天，榜单资料更新时间写入约 `144 × 榜单大小` 行；少量队列、租约与状态行 |
+| 趋势源与调度状态 | 稳态无重试时每天 31 次入口请求，另加 HelloGithub 当前内容页（按页去重，目前两个 RSS 合计至多 40 页）；按实际发现项目更新上榜时间，另有队列、租约与状态行 |
 | 历史读取 | 每个小时采样至多 31 行，约 744,000 日记录行/天；清理候选另读最多约 31,000 行/天 |
 | 公开查询 | 每个列表缓存未命中约 1,000 行；历史查询约 31 行；筛选变体和不同边缘节点分别缓存 |
 | 数据量 | 约 720,000 个小时点，打包为约 31,000 日记录，随 30 天边界滚动删除 |
 
-以上未把所有 SQLite 虚拟表扫描、JSON 处理 CPU、索引维护及重试折算成确定账单，不能视为免费运行承诺。尤其需要观察 D1 的 `rows_read` / `rows_written`、存储量，以及每次定时任务的 CPU / wall time。Cloudflare 当前免费 D1 每日额度为 500 万读行、10 万写行，单库 500 MB；Workers Free CPU 预算也需实测。已使用批量 D1 语句（一个 batch 计一次调用），单次正常采集的数据库调用数控制在 50 次以下，外部请求通常不超过 4 次。高流量、持续大量上榜、长期容量超额或冷数据查询可能超出免费额度。
+以上未把所有 SQLite 虚拟表扫描、JSON 处理 CPU、索引维护及重试折算成确定账单，不能视为免费运行承诺。尤其需要观察 D1 的 `rows_read` / `rows_written`、存储量，以及每次定时任务的 CPU / wall time。Cloudflare 当前免费 D1 每日额度为 500 万读行、10 万写行，单库 500 MB；Workers Free CPU 预算也需实测。已使用批量 D1 语句（一个 batch 计一次调用），单次正常采集的数据库调用数控制在 50 次以下，单轮外部请求最多 8 个入口 + 20 个详情 + 3 次 GraphQL（未计重定向，且受发现时间预算及主机冷却约束）。高流量、持续大量上榜、长期容量超额或冷数据查询可能超出免费额度。
 
 参考：[D1 计费](https://developers.cloudflare.com/d1/platform/pricing/)、[D1 限制](https://developers.cloudflare.com/d1/platform/limits/)、[Workers 限制](https://developers.cloudflare.com/workers/platform/limits/)、[GitHub GraphQL 限流](https://docs.github.com/en/graphql/overview/rate-limits-and-query-limits-for-the-graphql-api)。实际部署后的 CPU、读写和首轮采集仍需部署环境验证。
 

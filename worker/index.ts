@@ -1,6 +1,8 @@
 import { cleanup, prune } from "./retention";
 import { query } from "./api";
-import { discover, repositories } from "./github";
+import { repositories } from "./github";
+import { discover, emptyDiscovery, type DiscoveryState } from "./discovery";
+import { Upstream, safeError, type Hosts } from "./upstream";
 import { saveObservations, setState, state, type ProjectRow } from "./store";
 import { HOUR } from "./trends";
 import { type RunState } from "./contracts";
@@ -15,7 +17,7 @@ interface PendingDiscovery {
   listedAt: number;
 }
 
-async function collect(env: Env, now: number) {
+async function collect(env: Env, now: number, upstream: Upstream) {
   const prior = await state<RunState>(env.DB, "collection");
   const result: RunState = {
     attemptedAt: now,
@@ -26,41 +28,40 @@ async function collect(env: Env, now: number) {
   };
   let rows = (await env.DB.prepare("SELECT * FROM projects").all<ProjectRow>())
     .results;
-  const rssPrior = await state<RunState>(env.DB, "discovery");
-  const rssState: RunState = {
-    attemptedAt: now,
-    succeededAt: rssPrior?.succeededAt ?? null,
-    succeeded: 0,
-    failed: 0,
-    error: null,
-  };
-  let pending = (await state<PendingDiscovery[]>(env.DB, "pending")) ?? [];
-  try {
-    const names = await discover();
-    const known = new Set(rows.map((r) => r.name.toLowerCase()));
-    const listed = new Set(names.map((name) => name.toLowerCase()));
-    const updates = rows
-      .filter((r) => listed.has(r.name.toLowerCase()))
-      .map((r) =>
-        env.DB.prepare(
-          "UPDATE projects SET listed_at=MAX(listed_at,?) WHERE id=? AND cycle=?",
-        ).bind(now, r.id, r.cycle),
-      );
-    if (updates.length) await env.DB.batch(updates);
-    const discoveries = new Map(
-      pending.map((entry) => [entry.name.toLowerCase(), entry]),
-    );
-    for (const name of names)
-      discoveries.set(name.toLowerCase(), { name, listedAt: now });
-    pending = [...discoveries.values()].filter(
-      (entry) => !known.has(entry.name.toLowerCase()),
-    );
-    rssState.succeededAt = now;
-    rssState.succeeded = names.length;
-  } catch (error) {
-    rssState.failed = 1;
-    rssState.error = safeError(error);
+  const discovery = await discover(
+    upstream,
+    (await state<DiscoveryState>(env.DB, "discoverySources")) ?? emptyDiscovery(),
+    now,
+    await state<RunState>(env.DB, "discovery"),
+  );
+  const known = new Set(rows.map((r) => r.name.toLowerCase()));
+  const listed = new Map(
+    discovery.entries.map((entry) => [entry.name.toLowerCase(), entry.listedAt]),
+  );
+  const updates = rows.filter((r) => listed.has(r.name.toLowerCase())).map((r) =>
+    env.DB.prepare(
+      "UPDATE projects SET listed_at=MAX(listed_at,?) WHERE id=? AND cycle=?",
+    ).bind(listed.get(r.name.toLowerCase()), r.id, r.cycle),
+  );
+  if (updates.length) await env.DB.batch(updates);
+  const priorPending = (await state<PendingDiscovery[]>(env.DB, "pending")) ?? [];
+  const discoveries = new Map(
+    priorPending.map((entry) => [entry.name.toLowerCase(), entry]),
+  );
+  for (const entry of discovery.entries) {
+    const previous = discoveries.get(entry.name.toLowerCase());
+    if (!previous || previous.listedAt < entry.listedAt)
+      discoveries.set(entry.name.toLowerCase(), entry);
   }
+  let pending = [...discoveries.values()].filter(
+    (entry) => !known.has(entry.name.toLowerCase()),
+  );
+  // Persist discovery and detail progress before repository metadata collection.
+  await env.DB.batch([
+    setState(env.DB, "pending", pending),
+    setState(env.DB, "discovery", discovery.status),
+    setState(env.DB, "discoverySources", discovery.state),
+  ]);
   const targets = pending.slice(0, 20);
   if (targets.length) {
     try {
@@ -68,6 +69,7 @@ async function collect(env: Env, now: number) {
         env.GITHUB_TOKEN,
         targets.map((entry) => entry.name),
         false,
+        upstream,
       );
       const successful = nodes.flatMap((repo, i) =>
         repo
@@ -127,6 +129,7 @@ async function collect(env: Env, now: number) {
         env.GITHUB_TOKEN,
         group.map((row) => row.id),
         true,
+        upstream,
       );
     } catch (cause) {
       error = safeError(cause);
@@ -158,22 +161,9 @@ async function collect(env: Env, now: number) {
   if (result.succeeded) result.succeededAt = now;
   await env.DB.batch([
     setState(env.DB, "pending", pending),
-    setState(env.DB, "discovery", rssState),
     setState(env.DB, "collection", result),
   ]);
 }
-function safeError(error: unknown): string {
-  // Never persist upstream bodies, queries, headers, or untrusted exception text.
-  if (
-    error instanceof Error &&
-    /^(GitHub HTTP \d{3}|RSS HTTP \d{3}|GitHub GraphQL unavailable|RSS invalid XML|RSS missing channel|Upstream response too large|Upstream empty response)$/.test(
-      error.message,
-    )
-  )
-    return error.message;
-  return "Upstream timeout or unavailable";
-}
-
 export default {
   async scheduled(
     _controller: ScheduledController,
@@ -188,9 +178,11 @@ export default {
       .bind(JSON.stringify({ lease, until: now + 9 * 60_000 }), now)
       .first();
     if (!acquired) return;
+    const upstream = new Upstream({});
     try {
+      Object.assign(upstream.hosts, (await state<Hosts>(env.DB, "upstream")) ?? {});
       await prune(env.DB, now);
-      await collect(env, now);
+      await collect(env, now, upstream);
       await cleanup(env.DB, now);
       await setState(env.DB, "scheduler", {
         attemptedAt: now,
@@ -209,6 +201,7 @@ export default {
       }).run();
       throw new Error("Scheduled tracking failed");
     } finally {
+      await setState(env.DB, "upstream", upstream.hosts).run();
       await env.DB.prepare(
         "DELETE FROM system_state WHERE key='lease' AND json_extract(value,'$.lease')=?",
       )

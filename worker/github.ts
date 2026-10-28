@@ -1,6 +1,5 @@
-import { XMLParser, XMLValidator } from "fast-xml-parser";
-export const RSS_URL =
-  "https://rsshub-balancer.virworks.moe/github/trending/daily/any";
+import { DeferredRequest, type Upstream } from "./upstream";
+
 export interface Repository {
   id: string;
   nameWithOwner: string;
@@ -12,73 +11,11 @@ export interface Repository {
 const FIELDS =
   "id nameWithOwner description primaryLanguage { name } repositoryTopics(first:100) { nodes { topic { name } } } stargazerCount";
 
-async function boundedResponse(response: Response): Promise<string> {
-  if (!response.body) throw new Error("Upstream empty response");
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let bytes = 0;
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    bytes += value.length;
-    if (bytes > 2_000_000) {
-      await reader.cancel();
-      throw new Error("Upstream response too large");
-    }
-    chunks.push(value);
-  }
-  const decoder = new TextDecoder();
-  return (
-    chunks.map((value) => decoder.decode(value, { stream: true })).join("") +
-    decoder.decode()
-  );
-}
-export async function discover(): Promise<string[]> {
-  const response = await fetch(RSS_URL, {
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!response.ok) throw new Error(`RSS HTTP ${response.status}`);
-  const xml = await boundedResponse(response);
-  if (XMLValidator.validate(xml) !== true) throw new Error("RSS invalid XML");
-  const parsed = new XMLParser({
-    ignoreAttributes: false,
-    processEntities: false,
-  }).parse(xml);
-  if (!parsed.rss?.channel) throw new Error("RSS missing channel");
-  const items = parsed.rss.channel.item ?? [];
-  const names = new Set<string>();
-  for (const item of Array.isArray(items) ? items : [items]) {
-    const link = typeof item.link === "string" ? item.link : "";
-    const guid =
-      typeof item.guid === "string" ? item.guid : item.guid?.["#text"];
-    // RSS entry identity is authoritative; arbitrary links in its prose are not discoveries.
-    for (const candidate of [link, guid]) {
-      if (typeof candidate !== "string") continue;
-      const match = candidate
-        .trim()
-        .match(/^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/?(?:[?#].*)?$/);
-      if (
-        match &&
-        ![
-          "trending",
-          "topics",
-          "collections",
-          "sponsors",
-          "features",
-          "marketplace",
-        ].includes(match[1])
-      ) {
-        names.add(`${match[1]}/${match[2]}`.replace(/\.git$/, ""));
-        break;
-      }
-    }
-  }
-  return [...names];
-}
 export async function repositories(
   token: string,
   targets: string[],
   byId: boolean,
+  upstream: Upstream,
 ): Promise<(Repository | null)[]> {
   if (!targets.length) return [];
   const query = byId
@@ -89,22 +26,32 @@ export async function repositories(
           return `r${i}: repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(repo)}) { ${FIELDS} }`;
         })
         .join(" ")} }`;
-  const response = await fetch("https://api.github.com/graphql", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      "User-Agent": "github-trending-tracking",
-    },
-    body: JSON.stringify({ query }),
-    signal: AbortSignal.timeout(20_000),
-  });
-  if (!response.ok) throw new Error(`GitHub HTTP ${response.status}`);
-  const result = JSON.parse(await boundedResponse(response)) as {
+  const url = "https://api.github.com/graphql";
+  let result: {
     data?: { nodes?: unknown[]; [key: string]: unknown };
-    errors?: { type?: string }[];
+    errors?: { type?: string; message?: string; extensions?: { code?: string } }[];
   };
-  if (!result.data) throw new Error("GitHub GraphQL unavailable");
+  try {
+    const body = await upstream.text(url, "GitHub", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "User-Agent": "github-trending-tracking",
+      },
+      body: JSON.stringify({ query }),
+    });
+    result = JSON.parse(body);
+    if (result.errors?.some((error) =>
+      error.type === "RATE_LIMITED" || error.extensions?.code === "RATE_LIMITED" ||
+      /rate limit/i.test(error.message ?? "")
+    )) upstream.cooldown(url);
+    if (!result.data) throw new Error("GitHub GraphQL unavailable");
+  } catch (error) {
+    if (!(error instanceof DeferredRequest))
+      upstream.cooldown(url, undefined, 30 * 60_000);
+    throw error;
+  }
   // Partial GraphQL failures preserve successful repositories; absent nodes retry later.
   const nodes = byId
     ? (result.data.nodes ?? [])

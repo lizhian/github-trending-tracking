@@ -2,6 +2,8 @@ import { afterAll, beforeAll, beforeEach, expect, test, vi } from "vitest";
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
 import { readFileSync } from "node:fs";
 import worker, { type Env } from "../worker/index";
+import { upstreamClock } from "../worker/upstream";
+import { SOURCES } from "../worker/discovery";
 
 const mf = new Miniflare(
   convertV4MiniflareOptions({
@@ -20,7 +22,13 @@ let fail = false;
 let rssNames: string[] | null = null;
 let failedIds = new Set<string>();
 let rssFailure = false;
+let sourceResponses = new Map<string, () => Response>();
 const external = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+  const custom = sourceResponses.get(String(input));
+  if (custom) return custom();
+  if (String(input).includes("raw.githubusercontent.com")) return new Response("");
+  if (String(input).includes("rsshub") && !String(input).includes("/github/trending/daily/"))
+    return new Response("<rss><channel></channel></rss>");
   if (String(input).includes("rsshub") && rssFailure)
     return new Response("test-secret", { status: 503 });
   if (String(input).includes("rsshub"))
@@ -92,6 +100,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   vi.restoreAllMocks();
   vi.stubGlobal("fetch", external);
+  vi.spyOn(upstreamClock, "sleep").mockResolvedValue();
   external.mockClear();
   await env.DB.batch(
     [
@@ -107,6 +116,7 @@ beforeEach(async () => {
   rssNames = null;
   failedIds = new Set();
   rssFailure = false;
+  sourceResponses = new Map();
 });
 afterAll(async () => {
   vi.unstubAllGlobals();
@@ -234,7 +244,7 @@ test("combines filters, stable sorting, nulls-last and 50-item pagination; rejec
   // Newly discovered projects have no delta and must remain last in either direction.
   names.push("acme/zz-new");
   stars.push(100);
-  await run(start + 3_660_000);
+  await run(start + 2 * 3_600_000);
   expect((await list("?sort=24&direction=asc")).items[0].name).toBe(
     "acme/project-00",
   );
@@ -288,7 +298,7 @@ test("keeps protected overflow, removes lowest reliable growth at 04:00 Beijing,
   expect((await api("/api/projects/R_10/history")).status).toBe(404);
   expect((await api("/api/projects/R_0/history")).status).toBe(200);
   rssNames = null;
-  await run(start + 24 * 3_600_000 + 600_000);
+  await run(start + 25 * 3_600_000);
   const restored = (await (
     await api("/api/projects/R_10/history")
   ).json()) as any;
@@ -354,3 +364,37 @@ test("the worked retention scores favor recent acceleration over historical popu
   for (const id of ["R_1", "R_2", "R_3"])
     expect((await api(`/api/projects/${id}/history`)).status).toBe(404);
 }, 60_000);
+
+
+test("persists independent source and detail progress, keeps original listing times and deduplicates across sources", async () => {
+  const page = "https://hellogithub.com/repository/abc123";
+  const hello = SOURCES.find((source) => source.id === "hellogithub-all")!.url;
+  const weekly = SOURCES.find((source) => source.id === "github-weekly")!.url;
+  const markdown = SOURCES.find((source) => source.id === "opengithubs-daily")!.url;
+  sourceResponses.set(hello, () => new Response(`<rss><channel><item><link>${page}</link></item></channel></rss>`));
+  sourceResponses.set(weekly, () => new Response("private response must not escape", { status: 503 }));
+  sourceResponses.set(markdown, () => new Response("https://github.com/ACME/alpha/tree/main https://github.com/OpenGithubs/weekly"));
+  sourceResponses.set(page, () => new Response("not embedded project data"));
+  const firstSeen = now;
+  await run();
+  expect((await list()).total).toBe(2);
+  expect((await list()).status.discovery.failed).toBe(2);
+  const calls = (url: string) => external.mock.calls.filter(([input]) => String(input) === url).length;
+  const sourceCalls = calls(hello);
+  sourceResponses.set(weekly, () => new Response("<rss><channel/></rss>"));
+  sourceResponses.set(page, () => new Response(`<script id="__NEXT_DATA__">${JSON.stringify({ props: { pageProps: { repo: { url: "https://github.com/acme/new" } } } })}</script>`));
+  names.push("acme/new");
+  stars.push(300);
+  await run(firstSeen + 10 * 60_000);
+  expect((await list()).status.discovery.failed).toBe(2);
+  expect(calls(page)).toBe(1);
+  await run(firstSeen + 30 * 60_000);
+  const result = await list();
+  expect(result.total).toBe(3);
+  expect(result.status.discovery.failed).toBe(0);
+  expect(result.items.find((item: any) => item.name === "acme/new")).toMatchObject({
+    listedAt: firstSeen, enteredAt: firstSeen + 30 * 60_000,
+  });
+  expect(calls(hello)).toBe(sourceCalls);
+  expect(JSON.stringify(result)).not.toContain("private response");
+});
