@@ -115,6 +115,16 @@ async function collect(env: Env, now: number, upstream: Upstream, policy: Sampli
     } else canonical.set(key, entry);
   }
   pending = [...canonical.values()];
+  // A repository can fail admission before either type has a projects row.
+  // Keep its retry time shared even when the second type is discovered later.
+  const retryByRepo = new Map<string, number>();
+  for (const entry of pending) {
+    if (entry.repoId) retryByRepo.set(entry.repoId, Math.max(retryByRepo.get(entry.repoId) ?? 0, entry.nextAt ?? 0));
+  }
+  for (const entry of pending) {
+    const retryAt = entry.repoId && retryByRepo.get(entry.repoId);
+    if (retryAt) entry.nextAt = retryAt;
+  }
   const completed = new Set<PendingDiscovery>();
   const ready = pending.filter((entry) => targets.includes(entry) && entry.repoId && (entry.nextAt ?? 0) <= now);
   const reuse: Parameters<typeof saveObservations>[1] = [];

@@ -67,7 +67,7 @@ const external = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
           ) ?? null,
       );
   selected = selected.map((node) =>
-    node && !failedIds.has(node.id) ? node : null,
+    node && (!query.includes("stargazerCount") || !failedIds.has(node.id)) ? node : null,
   );
   return Response.json({
     data: query.includes("nodes(")
@@ -741,5 +741,36 @@ test("shares one real observation per repository and round while a newly discove
     expect(result.status.collection.failed).toBe(1);
     expect(result.items.find((item: any) => item.repoId === "R_0"))
       .toMatchObject({ stars: 175, observedAt: start + 4 * HOUR, error: "GitHub repository unavailable" });
+  }
+});
+
+
+test("shares admission retry cooldown across types before a repository has any tracked project", async () => {
+  const start = Date.parse("2026-10-01T03:00:00Z"); // Beijing 11:00
+  names = ["acme/alpha"];
+  stars = [150];
+  failedIds.add("R_0");
+  await setState(env.DB, "discoverySources", { scheduleVersion: 2, sources: {
+    linuxdo: { attemptedAt: start - 25 * 60_000, succeededAt: null, succeeded: 0, failed: 1,
+      error: "RSS HTTP 503", nextAt: start + 5 * 60_000 },
+  }, details: [], resolved: {} }).run();
+  const linux = SOURCES.find((source) => source.id === "linuxdo")!.url;
+  sourceResponses.set(linux, () => new Response('<rss><channel><item><description>https://github.com/acme/alpha</description></item></channel></rss>'));
+  const samples = () => external.mock.calls.filter(([, init]) => init?.body && JSON.parse(String(init.body)).query.includes("stargazerCount"));
+  await run(start); // Identity resolves, but the repository sample fails.
+  expect((await list()).total).toBe(0);
+  expect(samples()).toHaveLength(1);
+  failedIds.clear();
+  await run(start + 5 * 60_000); // New type discovers it before the shared retry is due.
+  expect(samples()).toHaveLength(1);
+  expect((await list("?type=linux.do")).total).toBe(0);
+  await run(start + 29 * 60_000);
+  expect(samples()).toHaveLength(1);
+  await run(start + 30 * 60_000);
+  expect(samples()).toHaveLength(2);
+  for (const type of ["github", "linux.do"]) {
+    const result = await list(`?type=${type}`);
+    expect(result.total).toBe(1);
+    expect(result.items[0]).toMatchObject({ stars: 150, enteredAt: now, observedAt: now });
   }
 });
