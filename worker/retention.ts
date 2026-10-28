@@ -1,33 +1,37 @@
 import { WINDOWS, type CleanupResult } from "./contracts";
-import { projects, setState, state, type ProjectRow } from "./store";
+import { projects, samplingPolicy, setState, state, type ProjectRow } from "./store";
 import { DAY, HOUR, RETENTION } from "./trends";
+import { isStale, type SamplingPolicy } from "./schedule";
+
+export const PROJECT_TARGET = 500;
 
 export async function prune(db: D1Database, now: number) {
   const cutoff = now - RETENTION;
   // Queries enforce the exact rolling cutoff; retain the boundary day intact.
-  await db.prepare("DELETE FROM snapshot_days WHERE day < ?")
+  return db.prepare("DELETE FROM snapshot_days WHERE day < ?")
     .bind(Math.floor(cutoff / DAY)).run();
 }
-export async function cleanup(db: D1Database, now: number) {
+export async function cleanup(db: D1Database, now: number, policy?: SamplingPolicy) {
   // Most recent 04:00 Asia/Shanghai, including catch-up after a missed tick.
   const at = Math.floor((now + 4 * HOUR) / DAY) * DAY - 4 * HOUR;
   const previous = await state<CleanupResult>(db, "cleanup");
-  if (previous && previous.at >= at) return;
+  if (previous && previous.at >= at) return false;
+  policy ??= await samplingPolicy(db);
   const rows = (await db.prepare("SELECT * FROM projects").all<ProjectRow>())
     .results;
-  if (rows.length <= 1000) {
+  if (rows.length <= PROJECT_TARGET) {
     await setState(db, "cleanup", {
       at,
       removed: 0,
       remaining: rows.length,
       eligible: 0,
     }).run();
-    return;
+    return true;
   }
   const potential = rows.filter(
-    (row) => now - row.entered_at >= DAY && now - row.observed_at <= 2 * HOUR,
+    (row) => now - row.entered_at >= DAY && !isStale(row.observed_at, now, policy),
   );
-  const summaries = await projects(db, potential, now);
+  const summaries = await projects(db, potential, now, policy);
   const weights = [0.6, 0.25, 0.1, 0.05];
   const candidates = potential
     .flatMap((row, index) => {
@@ -53,7 +57,7 @@ export async function cleanup(db: D1Database, now: number) {
         a.delta - b.delta ||
         a.row.id.localeCompare(b.row.id, "en"),
     );
-  const victims = candidates.slice(0, Math.max(0, rows.length - 1000));
+  const victims = candidates.slice(0, Math.max(0, rows.length - PROJECT_TARGET));
   // Freeze candidate ids + cycles before committing; retries cannot touch a new cycle.
   const statements = victims.map(({ row }) =>
     db
@@ -71,4 +75,5 @@ export async function cleanup(db: D1Database, now: number) {
     }),
   );
   await db.batch(statements);
+  return true;
 }

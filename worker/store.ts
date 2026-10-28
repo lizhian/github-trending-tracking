@@ -1,6 +1,7 @@
 import { WINDOWS, type Project, type Point, type WindowHours } from "./contracts";
 import { summarize, DAY, HOUR, RETENTION } from "./trends";
 import { type Repository, type RepositoryStars } from "./github";
+import { completeWindow, isStale, missedSampling, type SamplingPolicy } from "./schedule";
 export interface ProjectRow {
   id: string;
   cycle: string;
@@ -30,6 +31,14 @@ export function setState(db: D1Database, key: string, value: unknown) {
       "INSERT INTO system_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
     )
     .bind(key, JSON.stringify(value));
+}
+export async function samplingPolicy(db: D1Database, initializeAt?: number): Promise<SamplingPolicy | undefined> {
+  const prior = await state<SamplingPolicy>(db, "sampling_policy");
+  if (prior || initializeAt === undefined) return prior ?? undefined;
+  // The scheduler calls this under its lease; readers never initialize policy.
+  const policy: SamplingPolicy = { version: 2, effectiveAt: initializeAt };
+  await setState(db, "sampling_policy", policy).run();
+  return policy;
 }
 export async function histories(
   db: D1Database,
@@ -111,11 +120,14 @@ export async function baselines(
   return output;
 }
 
-export function project(row: ProjectRow, now: number): Project {
+export function project(row: ProjectRow, now: number, policy?: SamplingPolicy): Project {
   // Strip unused legacy graph points while existing rows refresh naturally.
   const stored: Project["trends"] = JSON.parse(row.trends);
   const trends = Object.fromEntries(Object.entries(stored).map(([hours, trend]) => [hours, {
-    delta: trend.delta, state: trend.state, start: trend.start, end: trend.end, gaps: trend.gaps,
+    delta: trend.delta,
+    state: trend.delta === null ? "accumulating"
+      : completeWindow(trend.start!, trend.end!, Number(hours), policy) ? "complete" : "partial",
+    start: trend.start, end: trend.end, gaps: trend.gaps,
   }])) as Project["trends"];
   return {
     id: row.id,
@@ -129,13 +141,14 @@ export function project(row: ProjectRow, now: number): Project {
     observedAt: row.observed_at,
     attemptedAt: row.attempted_at,
     error: row.error,
-    stale: now - row.observed_at > 2 * HOUR,
+    stale: isStale(row.observed_at, now, policy),
     trends,
   };
 }
 
-export async function projects(db: D1Database, rows: ProjectRow[], now: number) {
-  const items = rows.map((row) => project(row, now));
+export async function projects(db: D1Database, rows: ProjectRow[], now: number, policy?: SamplingPolicy) {
+  policy ??= await samplingPolicy(db);
+  const items = rows.map((row) => project(row, now, policy));
   const expired = items.flatMap((item, index) =>
     Object.values(item.trends).some((trend) => trend.start !== null && trend.start < now - RETENTION)
       ? [{ item, row: rows[index] }] : [],
@@ -146,7 +159,7 @@ export async function projects(db: D1Database, rows: ProjectRow[], now: number) 
   for (const { item, row } of expired) {
     const updated = summarize(actual.get(row.cycle) ?? {},
       item.observedAt >= now - RETENTION ? [item.observedAt, item.stars] : null,
-      item.trends[720].gaps);
+      item.trends[720].gaps, policy);
     for (const hours of widths) {
       const start = item.trends[hours].start;
       if (start !== null && start < now - RETENTION) item.trends[hours] = updated[hours];
@@ -162,7 +175,9 @@ export async function saveObservations(
     listedAt: number | null;
   }[],
   now: number,
+  policy?: SamplingPolicy,
 ) {
+  policy ??= await samplingPolicy(db);
   const firstPoints = await baselines(
     db,
     observations.flatMap((o) => o.previous ? [{ cycle: o.previous.cycle, end: now }] : []),
@@ -178,7 +193,7 @@ export async function saveObservations(
       if (Math.floor(previous.observed_at / HOUR) === hour) {
         const lastGap = gaps.at(-1);
         if (lastGap?.[1] === previous.observed_at) lastGap[1] = now;
-      } else if (hour - Math.floor(previous.observed_at / HOUR) > 1) {
+      } else if (missedSampling(previous.observed_at, now, policy)) {
         gaps.push([previous.observed_at, now]);
       }
     }
@@ -192,7 +207,7 @@ export async function saveObservations(
       now,
       now,
       repo.stargazerCount,
-      JSON.stringify(summarize(firstPoints.get(cycle) ?? {}, [now, repo.stargazerCount], gaps)),
+      JSON.stringify(summarize(firstPoints.get(cycle) ?? {}, [now, repo.stargazerCount], gaps, policy)),
     ];
     if (previous) {
       statements.push(

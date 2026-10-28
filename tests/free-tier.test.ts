@@ -7,6 +7,7 @@ import { prune } from "../worker/retention";
 import { DAY, HOUR, summarize, windowTrend } from "../worker/trends";
 import worker from "../worker/index";
 import { SOURCES } from "../worker/discovery";
+import { latestSlot, nextSlot, samplingSlot, type SamplingPolicy } from "../worker/schedule";
 
 // Measure SQLite's reported rows, including indexes and JSON virtual tables.
 function metered(db: D1Database) {
@@ -44,7 +45,7 @@ function metered(db: D1Database) {
   };
 }
 
-test("1000 projects with 30 days fit the background D1 budget without parsing full histories", async () => {
+test("500 projects with nine daily rounds and 30 days fit the background D1 budget", async () => {
   const mf = new Miniflare(convertV4MiniflareOptions({
     name: "budget", modules: true,
     script: "export default {fetch() {return new Response()}}",
@@ -55,56 +56,70 @@ test("1000 projects with 30 days fit the background D1 budget without parsing fu
     for (const file of readdirSync("migrations").filter((file) => file.endsWith(".sql")).sort()) {
       await db.exec(readFileSync(`migrations/${file}`, "utf8").replace(/--[^\n]*/g, "").replace(/\n/g, " "));
     }
-    const now = Date.parse("2026-10-28T12:05:00Z");
+    const now = Date.parse("2026-10-28T01:05:00Z"); // Beijing 09:05
     const start = now - 30 * DAY;
-    const points: Point[] = Array.from({ length: 720 }, (_, i) => [start + i * HOUR, 10_000 + i]);
+    const policy: SamplingPolicy = { version: 2, effectiveAt: start - DAY };
+    await setState(db, "sampling_policy", policy).run();
+    const points: Point[] = [];
+    for (let at = latestSlot(start); at < latestSlot(now); at = nextSlot(at)) {
+      points.push([at + 5 * 60_000, 10_000 + points.length]);
+    }
+    expect(points).toHaveLength(270);
+    const previousAt = points.at(-1)![0];
+    const previousStars = points.at(-1)![1];
+    const stars = previousStars + 1;
     const summaries = Object.fromEntries(WINDOWS.map((hours) => {
-      const { points: _, ...summary } = windowTrend(points, hours, now - HOUR);
+      const { points: _, ...summary } = windowTrend(points, hours, previousAt, undefined, policy);
       return [hours, summary];
     }));
-    await db.prepare(`WITH RECURSIVE ids(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM ids WHERE n<999)
+    await db.prepare(`WITH RECURSIVE ids(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM ids WHERE n<499)
       INSERT INTO projects(id,cycle,name,topics,entered_at,listed_at,observed_at,attempted_at,stars,trends,metadata_at)
-      SELECT 'R_'||n,'cycle-'||n,'acme/repo-'||n,'[]',?,?,?,?,10719,?,? FROM ids`)
-      .bind(start, start, now - HOUR, now - HOUR, JSON.stringify(summaries), now - HOUR).run();
-    await db.prepare(`WITH RECURSIVE ticks(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM ticks WHERE n<719),
-      days AS (SELECT CAST((?+n*${HOUR})/${DAY} AS INTEGER) AS day,
-        json_group_object(CAST(CAST((?+n*${HOUR})/${HOUR} AS INTEGER) AS TEXT),json_array(?+n*${HOUR},10000+n)) AS hours
-        FROM ticks GROUP BY day)
+      SELECT 'R_'||n,'cycle-'||n,'acme/repo-'||n,'[]',?,?,?,?,?,?,? FROM ids`)
+      .bind(start, start, previousAt, previousAt, previousStars, JSON.stringify(summaries), previousAt).run();
+    await db.prepare(`WITH days AS (SELECT CAST(json_extract(value,'$[0]')/${DAY} AS INTEGER) AS day,
+        json_group_object(CAST(CAST(json_extract(value,'$[0]')/${HOUR} AS INTEGER) AS TEXT),json(value)) AS hours
+        FROM json_each(?) GROUP BY day)
       INSERT INTO snapshot_days(cycle,day,hours) SELECT cycle,day,hours FROM projects CROSS JOIN days`)
-      .bind(start, start, start).run();
-    const rows = (await db.prepare("SELECT * FROM projects ORDER BY id LIMIT 30").all<ProjectRow>()).results;
+      .bind(JSON.stringify(points)).run();
+    const rows = (await db.prepare("SELECT * FROM projects ORDER BY id LIMIT 100").all<ProjectRow>()).results;
     const meter = metered(db);
     await saveObservations(meter.db, rows.map((previous) => ({
-      repo: { id: previous.id, stargazerCount: 10720 }, previous, listedAt: null,
-    })), now);
+      repo: { id: previous.id, stargazerCount: stars }, previous, listedAt: null,
+    })), now, policy);
     const sampling = meter.usage();
     const dueMeter = metered(db);
-    await dueMeter.db.prepare("SELECT * FROM projects WHERE observed_at < ? ORDER BY attempted_at,id LIMIT 30")
-      .bind(Math.floor(now / HOUR) * HOUR).all();
+    await dueMeter.db.prepare("SELECT * FROM projects WHERE observed_at < ? AND (error IS NULL OR attempted_at <= ?) ORDER BY attempted_at,id LIMIT 100")
+      .bind(samplingSlot(now, policy), now - 30 * 60_000).all();
     const cold = metered(db);
     const allRows = (await cold.db.prepare("SELECT * FROM projects").all<ProjectRow>()).results;
     await projects(cold.db, allRows, now + 60_000);
     const status = { attemptedAt: now - HOUR, succeededAt: now - HOUR, succeeded: 1, failed: 0, error: null };
     await db.batch([
-      setState(db, "discoverySources", { sources: Object.fromEntries(SOURCES.map(({ id }) => [id, { ...status, nextAt: now + DAY }])), details: [], resolved: {} }),
+      setState(db, "discoverySources", { scheduleVersion: 2, sources: Object.fromEntries(SOURCES.map(({ id }) => [id, { ...status, nextAt: now + DAY }])), details: [], resolved: {} }),
       setState(db, "discovery", status), setState(db, "collection", status),
       setState(db, "scheduler", status), setState(db, "upstream", {}),
-      setState(db, "cleanup", { at: now, removed: 0, remaining: 1000, eligible: 0 }),
+      setState(db, "cleanup", { at: now, removed: 0, remaining: 500, eligible: 0 }),
     ]);
     const scheduled = metered(db);
+    const requestedIds: string[][] = [];
     vi.spyOn(Date, "now").mockReturnValue(now);
     vi.stubGlobal("fetch", async (_input: unknown, init: RequestInit) => {
       const query = JSON.parse(String(init.body)).query as string;
       const ids = JSON.parse(query.match(/ids:(\[[^\]]*\])/)![1]) as string[];
-      return Response.json({ data: { nodes: ids.map((id) => ({ id, stargazerCount: 10720 })) } });
+      requestedIds.push(ids);
+      return Response.json({ data: { nodes: ids.map((id) => ({ id, stargazerCount: stars })) } });
     });
     await worker.scheduled({} as ScheduledController, { DB: scheduled.db, GITHUB_TOKEN: "test", ALLOWED_ORIGIN: "https://site.test" }, {} as ExecutionContext);
+    expect(requestedIds).toHaveLength(1);
+    expect(requestedIds[0]).toHaveLength(100);
+    expect(await db.prepare("SELECT COUNT(*) AS count FROM projects WHERE observed_at=?").bind(now).first("count")).toBe(200);
+    expect(JSON.parse((await db.prepare("SELECT value FROM system_state WHERE key='collection'").first<string>("value"))!).succeeded).toBe(100);
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
     const updated = (await db.prepare("SELECT * FROM projects WHERE id=?").bind(rows[0].id).all<ProjectRow>()).results;
     const [item] = await projects(db, updated, now);
     for (const hours of WINDOWS) {
-      const { points: _, ...expected } = windowTrend([...points, [now, 10720]], hours, now);
+      const { points: _, ...expected } = windowTrend([...points, [now, stars]], hours, now, undefined, policy);
       expect(item.trends[hours]).toEqual(expected);
       expect(item.trends[hours]).not.toHaveProperty("points");
     }
@@ -117,7 +132,8 @@ test("1000 projects with 30 days fit the background D1 budget without parsing fu
     expect(cleaning.usage().writes).toBe(0);
     await prune(cleaning.db, now + DAY);
     const storage = (await db.prepare("SELECT 1").all()).meta.size_after;
-    const dailySampling = { reads: sampling.reads * 800, writes: sampling.writes * 800 };
+    const batchesPerDay = 4500 / rows.length;
+    const dailySampling = { reads: sampling.reads * batchesPerDay, writes: sampling.writes * batchesPerDay };
     const report = { sampling, dailySampling, dueSelection: dueMeter.usage(), scheduled: scheduled.usage(), coldList: cold.usage(),
       pruning: cleaning.usage(), storageBytes: storage };
     if (process.env.FREE_TIER_BUDGET_REPORT) {
@@ -127,20 +143,20 @@ test("1000 projects with 30 days fit the background D1 budget without parsing fu
         const start = process.cpuUsage();
         for (let i = 0; i < iterations; i++) build();
         const used = process.cpuUsage(start);
-        return (used.user + used.system) / 1000 / iterations * 30;
+        return (used.user + used.system) / 1000 / iterations * rows.length;
       };
-      const complete: Point[] = [...points, [now, 10720]];
-      const first = Object.fromEntries(WINDOWS.map((hours) => [hours, points[720 - hours]])) as Record<WindowHours, Point>;
+      const complete: Point[] = [...points, [now, stars]];
+      const first = Object.fromEntries(WINDOWS.map((hours) => [hours, complete.find(([at]) => at >= now - hours * HOUR)!])) as Record<WindowHours, Point>;
       writeFileSync(process.env.FREE_TIER_BUDGET_REPORT, JSON.stringify({ ...report,
-        localTrendCpuMsPer30: {
-          fullHistory: perBatch(() => WINDOWS.map((hours) => windowTrend(complete, hours, now)), 1000),
-          exactBaselines: perBatch(() => summarize(first, [now, 10720], []), 10000),
+        localTrendCpuMsPer100: {
+          fullHistory: perBatch(() => WINDOWS.map((hours) => windowTrend(complete, hours, now, undefined, policy)), 1000),
+          exactBaselines: perBatch(() => summarize(first, [now, stars], [], policy), 10000),
         },
       }, null, 2));
     }
     // Leave room for due selection, scheduler state, expiry and public queries.
-    expect(dailySampling.reads).toBeLessThan(4_000_000);
-    expect(dailySampling.writes).toBeLessThan(85_000);
+    expect(dailySampling.reads).toBeLessThan(1_000_000);
+    expect(dailySampling.writes).toBeLessThan(20_000);
     expect(sampling.calls).toBeLessThan(5);
     expect(scheduled.usage().calls).toBeLessThan(50);
     expect(storage).toBeLessThan(100_000_000);

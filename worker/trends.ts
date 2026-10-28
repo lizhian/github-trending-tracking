@@ -1,6 +1,6 @@
 import { WINDOWS, type Point, type Trend, type TrendSummary, type WindowHours } from "./contracts";
-export const HOUR = 3_600_000;
-export const DAY = 24 * HOUR;
+import { completeWindow, missedSampling, DAY, HOUR, type SamplingPolicy } from "./schedule";
+export { DAY, HOUR } from "./schedule";
 export const RETENTION = 30 * DAY;
 
 export function windowTrend(
@@ -8,6 +8,7 @@ export function windowTrend(
   hours: WindowHours,
   now: number,
   observedGaps?: Trend["gaps"],
+  policy?: SamplingPolicy,
 ): Trend {
   const valid = points.filter(
     ([time]) => time >= now - RETENTION && time <= now,
@@ -22,7 +23,7 @@ export function windowTrend(
     delta: comparable ? last[1] - first[1] : null,
     state: !comparable
       ? "accumulating"
-      : last[0] - first[0] >= (hours - 1) * HOUR
+      : completeWindow(first[0], last[0], hours, policy)
         ? "complete"
         : "partial",
     start: first?.[0] ?? null,
@@ -36,7 +37,7 @@ export function windowTrend(
       : selected
           .slice(1)
           .flatMap((point, i) =>
-            Math.floor(point[0] / HOUR) - Math.floor(selected[i][0] / HOUR) > 1
+            missedSampling(selected[i][0], point[0], policy)
               ? [[selected[i][0], point[0]] as [number, number]]
               : [],
           ),
@@ -48,6 +49,7 @@ export function summarize(
   baselines: Partial<Record<WindowHours, Point>>,
   latest: Point | null,
   gaps: Trend["gaps"],
+  policy?: SamplingPolicy,
 ) {
   return Object.fromEntries(
     WINDOWS.map((hours) => {
@@ -58,7 +60,7 @@ export function summarize(
       const trend: TrendSummary = {
         delta: comparable ? latest[1] - first[1] : null,
         state: !comparable ? "accumulating"
-          : latest[0] - first[0] >= (hours - 1) * HOUR ? "complete" : "partial",
+          : completeWindow(first[0], latest[0], hours, policy) ? "complete" : "partial",
         start, end,
         gaps: gaps.filter(([from, to]) => from >= (start ?? Infinity) && to <= (end ?? -Infinity)),
       };

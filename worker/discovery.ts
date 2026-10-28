@@ -2,6 +2,7 @@ import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { type RunState } from "./contracts";
 import { DAY, HOUR } from "./trends";
 import { DeferredRequest, safeError, type Upstream } from "./upstream";
+import { latestSlot, nextSlot as nextSamplingSlot, type SamplingPolicy } from "./schedule";
 
 const RSS = "https://rsshub-balancer.virworks.moe";
 export const SOURCES = [
@@ -46,6 +47,7 @@ interface DetailTask {
   error: string | null;
 }
 export interface DiscoveryState {
+  scheduleVersion?: number;
   sources: Record<string, SourceState>;
   details: DetailTask[];
   resolved: Record<string, { day: number; name: string }>;
@@ -54,10 +56,10 @@ export function emptyDiscovery(): DiscoveryState {
   return { sources: {}, details: [], resolved: {} };
 }
 const beijingDay = (at: number) => Math.floor((at + 8 * HOUR) / DAY);
-function nextSlot(at: number, hourly: boolean): number {
+function nextSlot(at: number, hourly: boolean, policy?: SamplingPolicy): number {
   // 09:00 Beijing is 01:00 UTC, independent of the runtime timezone.
   return hourly
-    ? (Math.floor(at / HOUR) + 1) * HOUR
+    ? policy && at >= policy.effectiveAt ? nextSamplingSlot(at) : (Math.floor(at / HOUR) + 1) * HOUR
     : (Math.floor((at - HOUR) / DAY) + 1) * DAY + HOUR;
 }
 
@@ -121,9 +123,20 @@ export async function discover(
   state: DiscoveryState,
   now: number,
   prior: RunState | null,
+  policy?: SamplingPolicy,
 ): Promise<{ entries: Discovery[]; status: RunState; state: DiscoveryState; changed: boolean }> {
   const deadline = upstream.clock.now() + 3 * 60_000;
   const day = beijingDay(now);
+  let changed = false;
+  if (policy && now >= policy.effectiveAt && state.scheduleVersion !== policy.version) {
+    const daily = state.sources["github-daily"];
+    if (daily) {
+      const next = daily.succeededAt === null ? latestSlot(now) : nextSamplingSlot(daily.succeededAt);
+      daily.nextAt = Math.max(next, daily.failed ? daily.nextAt : 0, upstream.blockedUntil(SOURCES[0].url));
+    }
+    state.scheduleVersion = policy.version;
+    changed = true;
+  }
   state.resolved = Object.fromEntries(
     Object.entries(state.resolved).filter(([, value]) => value.day === day),
   );
@@ -155,7 +168,7 @@ export async function discover(
       } else for (const name of values) add(name, now);
       state.sources[source.id] = {
         attemptedAt: now, succeededAt: now, succeeded: values.length, failed: 0, error: null,
-        nextAt: nextSlot(upstream.clock.now(), source.hourly),
+        nextAt: nextSlot(upstream.clock.now(), source.hourly, policy),
       };
       succeeded = true;
     } catch (error) {
@@ -201,7 +214,7 @@ export async function discover(
     ...state.details.flatMap((task) => task.error ? [`hellogithub-detail: ${task.error}`] : []),
   ];
   return {
-    entries: [...entries.values()], state, changed: attempted,
+    entries: [...entries.values()], state, changed: changed || attempted,
     status: {
       attemptedAt: attempted ? now : prior?.attemptedAt ?? now,
       succeededAt: succeeded ? now : prior?.succeededAt ?? null,

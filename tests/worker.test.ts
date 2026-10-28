@@ -4,7 +4,8 @@ import { readFileSync, readdirSync } from "node:fs";
 import worker, { type Env } from "../worker/index";
 import { upstreamClock } from "../worker/upstream";
 import { SOURCES } from "../worker/discovery";
-import { saveObservations, type ProjectRow } from "../worker/store";
+import { saveObservations, setState, type ProjectRow } from "../worker/store";
+import { DAY, HOUR, type SamplingPolicy } from "../worker/schedule";
 
 const mf = new Miniflare(
   convertV4MiniflareOptions({
@@ -127,10 +128,107 @@ beforeEach(async () => {
   failedIds = new Set();
   rssFailure = false;
   sourceResponses = new Map();
+  // These existing hourly scenarios cover observations before policy cutover.
+  await setState(env.DB, "sampling_policy", { version: 2, effectiveAt: Date.parse("2100-01-01T00:00:00Z") }).run();
 });
 afterAll(async () => {
   vi.unstubAllGlobals();
   await mf.dispose();
+});
+
+test("completes 500 projects in five scheduled batches and leaves completed/idle rounds untouched", async () => {
+  const start = Date.parse("2026-10-02T01:00:00Z"); // Beijing 09:00
+  const policy: SamplingPolicy = { version: 2, effectiveAt: start - DAY };
+  await setState(env.DB, "sampling_policy", policy).run();
+  names = Array.from({ length: 500 }, (_, i) => `acme/round-${i}`);
+  stars = names.map(() => 120);
+  for (let offset = 0; offset < 500; offset += 100) {
+    await saveObservations(env.DB, names.slice(offset, offset + 100).map((nameWithOwner, i) => ({
+      repo: { id: `R_${offset + i}`, nameWithOwner, description: null, primaryLanguage: null,
+        repositoryTopics: { nodes: [] }, stargazerCount: 100 }, listedAt: null,
+    })), start - 4 * HOUR + 4 * 60_000, policy);
+  }
+  const success = { attemptedAt: start - HOUR, succeededAt: start - HOUR, succeeded: 1, failed: 0, error: null, nextAt: start + DAY };
+  await setState(env.DB, "discoverySources", { scheduleVersion: 2,
+    sources: Object.fromEntries(SOURCES.map(({ id }) => [id, success])), details: [], resolved: {} }).run();
+  external.mockClear();
+  for (let i = 0; i < 5; i++) await run(start + i * 60_000);
+  const requests = external.mock.calls.filter(([input]) => String(input).includes("api.github.com"));
+  expect(requests).toHaveLength(5);
+  const ids = requests.flatMap(([, init]) => {
+    const query = JSON.parse(String(init?.body)).query as string;
+    const group = JSON.parse(query.match(/ids:(\[[^\]]*\])/)![1]) as string[];
+    expect(group).toHaveLength(100);
+    return group;
+  });
+  expect(new Set(ids).size).toBe(500);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM projects WHERE observed_at>=?").bind(start).first("n")).toBe(500);
+  expect(await list()).toMatchObject({ total: 500, pageSize: 100, pages: 5 });
+  const prior = await env.DB.prepare("SELECT key,value FROM system_state WHERE key IN ('collection','scheduler') ORDER BY key").all();
+  await run(start + 9 * 60_000);
+  expect(external.mock.calls.filter(([input]) => String(input).includes("api.github.com"))).toHaveLength(5);
+  expect((await env.DB.prepare("SELECT key,value FROM system_state WHERE key IN ('collection','scheduler') ORDER BY key").all()).results).toEqual(prior.results);
+});
+
+test("initializes policy once, retries incomplete rounds, catches up only current observations and samples new entries immediately", async () => {
+  const start = Date.parse("2026-10-02T01:05:00Z"); // Beijing 09:05
+  await env.DB.prepare("DELETE FROM system_state WHERE key='sampling_policy'").run();
+  await run(start);
+  const firstPolicy = await env.DB.prepare("SELECT value FROM system_state WHERE key='sampling_policy'").first<string>("value");
+  expect(JSON.parse(firstPolicy!)).toEqual({ version: 2, effectiveAt: start });
+  failedIds.add("R_0");
+  stars = [110, 210];
+  await run(start + 2 * HOUR);
+  const beta = await env.DB.prepare("SELECT observed_at FROM projects WHERE id='R_1'").first();
+  failedIds.clear();
+  const failedAttempt = await env.DB.prepare("SELECT attempted_at FROM projects WHERE id='R_0'").first();
+  const requestCount = external.mock.calls.length;
+  await run(start + 2 * HOUR + 60_000);
+  expect(external.mock.calls.length).toBe(requestCount);
+  expect(await env.DB.prepare("SELECT attempted_at FROM projects WHERE id='R_0'").first()).toEqual(failedAttempt);
+  await run(start + 2 * HOUR + 31 * 60_000);
+  expect(await env.DB.prepare("SELECT observed_at FROM projects WHERE id='R_1'").first()).toEqual(beta);
+  expect(((await (await api("/api/projects/R_0/history?window=24")).json()) as any).gaps).toEqual([]);
+  stars[0] = 105;
+  await run(start + 8 * HOUR); // 17:05, no synthetic 13:00 or 15:00 observations.
+  const history = await (await api("/api/projects/R_0/history?window=24")).json() as any;
+  expect(history.points.map(([at]: number[]) => at)).toEqual([start, start + 2 * HOUR + 31 * 60_000, start + 8 * HOUR]);
+  expect(history.gaps).toEqual([[start + 2 * HOUR + 31 * 60_000, start + 8 * HOUR]]);
+  expect((await list()).items.find((item: any) => item.id === "R_0").trends[24].gaps).toEqual(history.gaps);
+  fail = true;
+  await run(start + 10 * HOUR); // 19:05
+  const calls = external.mock.calls.length;
+  const attempt = await env.DB.prepare("SELECT attempted_at FROM projects WHERE id='R_0'").first();
+  await run(start + 10 * HOUR + 60_000);
+  expect(external.mock.calls.length).toBe(calls);
+  expect(await env.DB.prepare("SELECT attempted_at FROM projects WHERE id='R_0'").first()).toEqual(attempt);
+  fail = false;
+  await run(start + 10 * HOUR + 31 * 60_000);
+  expect((await list()).items.every((item: any) => !item.error)).toBe(true);
+  names.push("acme/new-between-rounds");
+  stars.push(500);
+  await setState(env.DB, "pending", [{ name: names[2], listedAt: start + 11 * HOUR }]).run();
+  await run(start + 11 * HOUR); // 20:05, immediate first snapshot.
+  expect((await list()).items.find((item: any) => item.id === "R_2")).toMatchObject({ enteredAt: now, observedAt: now, stars: 500 });
+  expect(await env.DB.prepare("SELECT value FROM system_state WHERE key='sampling_policy'").first("value")).toBe(firstPolicy);
+});
+
+test("preserves legacy hourly gaps while subsequent planned intervals agree in list and history", async () => {
+  const start = Date.parse("2026-10-02T00:05:00Z"); // Beijing 08:05, legacy policy.
+  await run(start);
+  stars[0] = 130;
+  await run(start + 2 * HOUR); // missing legacy 09:00
+  const policy: SamplingPolicy = { version: 2, effectiveAt: start + 2 * HOUR + 25 * 60_000 };
+  await setState(env.DB, "sampling_policy", policy).run();
+  await run(policy.effectiveAt);
+  await run(start + 3 * HOUR); // 11:05
+  stars[0] = 125;
+  await run(start + 5 * HOUR); // 13:05, normal 2h interval.
+  const history = await (await api("/api/projects/R_0/history?window=24")).json() as any;
+  const summary = (await list()).items.find((item: any) => item.id === "R_0").trends[24];
+  expect(history.gaps).toEqual([[start, start + 2 * HOUR]]);
+  const { points: _, ...expected } = history.trend;
+  expect(summary).toEqual(expected);
 });
 
 test("discovers, deduplicates by GitHub identity, samples across hours and recovers from upstream failure", async () => {
@@ -365,21 +463,21 @@ test("aggregates known partial deltas and negative values across all tracked pro
   });
 });
 
-test("combines filters, stable sorting, nulls-last and 50-item pagination; rejects invalid and write requests", async () => {
+test("combines filters, stable sorting, nulls-last and 100-item pagination; rejects invalid and write requests", async () => {
   names = Array.from(
-    { length: 53 },
+    { length: 103 },
     (_, i) => `acme/project-${String(i).padStart(2, "0")}`,
   );
   stars = names.map(() => 100);
   const start = now;
-  for (let i = 0; i < 3; i++) await run(start + i * 60_000);
-  expect((await list()).total).toBe(53);
-  expect((await list()).items).toHaveLength(50);
+  for (let i = 0; i < 6; i++) await run(start + i * 60_000);
+  expect((await list()).total).toBe(103);
+  expect((await list()).items).toHaveLength(100);
   expect((await list("?page=2")).items).toHaveLength(3);
   const combined = await list(
     "?q=USEFUL%20acme%2Fproject&language=Rust&topic=tools&sort=name&direction=asc",
   );
-  expect(combined.total).toBe(52);
+  expect(combined.total).toBe(102);
   expect(combined.items[0].name).toBe("acme/project-01");
   expect((await list("?topic=missing")).total).toBe(0);
   stars[0] = 90;
@@ -396,7 +494,7 @@ test("combines filters, stable sorting, nulls-last and 50-item pagination; rejec
   );
   expect((await list("?page=2")).summary).toMatchObject({
     net24: -10,
-    comparable24: 53,
+    comparable24: 103,
   });
   expect((await api("/api/projects?sort=invalid")).status).toBe(400);
   expect((await api("/api/projects?page=0")).status).toBe(400);
@@ -426,41 +524,48 @@ test("combines filters, stable sorting, nulls-last and 50-item pagination; rejec
 });
 
 test("keeps protected overflow, removes lowest reliable growth at 04:00 Beijing, and restarts evicted tracking cycles", async () => {
-  now = Date.parse("2026-10-01T20:00:00Z");
+  now = Date.parse("2026-10-01T17:00:00Z"); // Beijing 01:00
   const start = now;
-  names = Array.from({ length: 1004 }, (_, i) => `acme/repo-${i}`);
+  await setState(env.DB, "sampling_policy", { version: 2, effectiveAt: start }).run();
+  names = Array.from({ length: 504 }, (_, i) => `acme/repo-${i}`);
   stars = names.map(() => 100);
-  for (let i = 0; i < 51; i++) {
+  for (let i = 0; i < 26; i++) {
     await run(start + i * 1000);
     rssNames = [];
   }
-  expect((await list()).total).toBe(1004);
+  expect((await list()).total).toBe(504);
   stars[0] = 600;
   stars[1] = 200;
   // All projects get a second observation, but still lack 24h of history.
-  for (let i = 0; i < 34; i++) await run(start + 23 * 3_600_000 + i * 1000);
-  expect((await list()).total).toBe(1004);
-  await run(start + 24 * 3_600_000);
+  for (let i = 0; i < 6; i++) await run(start + 23 * 3_600_000 + i * 1000);
+  expect((await list()).total).toBe(504);
+  for (let i = 0; i < 6; i++) await run(start + DAY + i * 60_000);
+  await run(start + 27 * HOUR); // 04:00: normal 01:00 snapshots are still fresh.
   const cleaned = await list();
-  expect(cleaned.total).toBe(1000);
-  expect(cleaned.status.cleanup).toMatchObject({ removed: 4, remaining: 1000 });
+  expect(cleaned.total).toBe(500);
+  expect(cleaned.status.cleanup).toMatchObject({ removed: 4, remaining: 500 });
+  expect(cleaned.summary.fresh).toBe(500);
+  expect((await (await api("/api/projects/R_0/history")).json()) as any).toMatchObject({ stale: false });
+  expect((await list("?page=99")).page).toBe(5);
   expect((await api("/api/projects/R_10/history")).status).toBe(404);
   expect((await api("/api/projects/R_0/history")).status).toBe(200);
   rssNames = null;
-  await run(start + 25 * 3_600_000);
+  await run(start + 28 * HOUR); // 05:00
   const restored = (await (
     await api("/api/projects/R_10/history")
   ).json()) as any;
   expect(restored.points).toHaveLength(1);
   expect(restored.trend.state).toBe("accumulating");
-  expect((await list()).total).toBe(1004);
+  expect((await list()).total).toBe(504);
   fail = true;
   rssNames = [];
   await run(start + 48 * 3_600_000);
+  await run(start + 51 * HOUR); // next 04:00, failed observations cannot be scored.
   const deferred = await list();
-  expect(deferred.total).toBe(1004);
+  expect(deferred.total).toBe(504);
   expect(deferred.status.cleanup).toMatchObject({ removed: 0, eligible: 0 });
   expect(deferred.items.every((p: any) => p.stale)).toBe(true);
+  expect((await (await api("/api/projects/R_0/history")).json()) as any).toMatchObject({ stale: true });
 }, 60_000);
 
 test("rotates failed discoveries so other new projects can still enter tracking", async () => {
@@ -498,17 +603,17 @@ test("the worked retention scores favor recent acceleration over historical popu
   await run(start + 27 * day);
   stars = [19500, 19900, 19990, 20000];
   await run(start + 29 * day);
-  // 999 new protected projects leave room for precisely one mature project.
-  names.push(...Array.from({ length: 999 }, (_, i) => `acme/protected-${i}`));
-  stars.push(...Array(999).fill(100));
-  for (let i = 0; i < 50; i++) {
+  // 499 new protected projects leave room for precisely one mature project.
+  names.push(...Array.from({ length: 499 }, (_, i) => `acme/protected-${i}`));
+  stars.push(...Array(499).fill(100));
+  for (let i = 0; i < 25; i++) {
     await run(start + 29 * day + 3_600_000 + i * 1000);
     rssNames = [];
   }
   stars.fill(20000, 0, 4);
   for (let i = 0; i < 6; i++) await run(start + 30 * day - 600_000 + i * 1000);
   await run(start + 30 * day);
-  expect((await list()).total).toBe(1000);
+  expect((await list()).total).toBe(500);
   expect((await api("/api/projects/R_0/history?window=720")).status).toBe(200);
   for (const id of ["R_1", "R_2", "R_3"])
     expect((await api(`/api/projects/${id}/history`)).status).toBe(404);

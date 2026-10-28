@@ -4,8 +4,9 @@ import {
   type Project,
   type WindowHours,
 } from "./contracts";
-import { histories, projects as projectViews, type ProjectRow } from "./store";
-import { HOUR, windowTrend } from "./trends";
+import { histories, projects as projectViews, samplingPolicy, type ProjectRow } from "./store";
+import { windowTrend } from "./trends";
+import { isStale } from "./schedule";
 import type { Env } from "./index";
 
 class ParameterError extends Error {}
@@ -99,7 +100,8 @@ async function list(env: Env, url: URL, now: number): Promise<ListResult> {
       a.name.localeCompare(b.name, "en")
     );
   });
-  const pages = Math.max(1, Math.ceil(filtered.length / 50));
+  const pageSize = 100;
+  const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const page = Math.min(requested, pages);
   const states = (
     await env.DB.prepare(
@@ -107,10 +109,10 @@ async function list(env: Env, url: URL, now: number): Promise<ListResult> {
     ).all<{ key: string; value: string }>()
   ).results;
   return {
-    items: filtered.slice((page - 1) * 50, page * 50),
+    items: filtered.slice((page - 1) * pageSize, page * pageSize),
     total: filtered.length,
     page,
-    pageSize: 50,
+    pageSize,
     pages,
     languages,
     topics,
@@ -159,7 +161,7 @@ export async function query(request: Request, env: Env): Promise<Response> {
           ? (caches as CacheStorage & { default: Cache }).default
           : undefined;
       const cacheUrl = new URL(url);
-      cacheUrl.searchParams.set("_schema", "source-tabs-v1");
+      cacheUrl.searchParams.set("_schema", "scheduled-sampling-v2-page100");
       const cacheKey = new Request(cacheUrl.toString());
       const cached = await cache?.match(cacheKey);
       if (cached) {
@@ -194,14 +196,15 @@ export async function query(request: Request, env: Env): Promise<Response> {
       if (!row) return json({ error: "项目已淘汰或不存在，请刷新列表" }, 404);
       const points =
         (await histories(env.DB, [row.cycle], now)).get(row.cycle) ?? [];
-      const trend = windowTrend(points, hours, now);
+      const policy = await samplingPolicy(env.DB);
+      const trend = windowTrend(points, hours, now, undefined, policy);
       headers.set("Cache-Control", "no-store");
       return json({
         points: trend.points,
         trend,
         gaps: trend.gaps,
         observedAt: row.observed_at,
-        stale: now - row.observed_at > 2 * HOUR,
+        stale: isStale(row.observed_at, now, policy),
       });
     }
     return json({ error: "接口不存在" }, 404);

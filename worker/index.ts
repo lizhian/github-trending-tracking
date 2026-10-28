@@ -3,8 +3,9 @@ import { query } from "./api";
 import { repositories, type Repository, type RepositoryStars } from "./github";
 import { discover, emptyDiscovery, type DiscoveryState } from "./discovery";
 import { Upstream, safeError, type Hosts } from "./upstream";
-import { saveObservations, setState, state, type ProjectRow } from "./store";
-import { DAY, HOUR } from "./trends";
+import { samplingPolicy, saveObservations, setState, state, type ProjectRow } from "./store";
+import { DAY } from "./trends";
+import { samplingSlot, type SamplingPolicy } from "./schedule";
 import { type RunState } from "./contracts";
 export interface Env {
   DB: D1Database;
@@ -17,7 +18,7 @@ interface PendingDiscovery {
   listedAt: number;
 }
 
-async function collect(env: Env, now: number, upstream: Upstream) {
+async function collect(env: Env, now: number, upstream: Upstream, policy: SamplingPolicy) {
   const prior = await state<RunState>(env.DB, "collection");
   const result: RunState = {
     attemptedAt: now,
@@ -31,6 +32,7 @@ async function collect(env: Env, now: number, upstream: Upstream) {
     (await state<DiscoveryState>(env.DB, "discoverySources")) ?? emptyDiscovery(),
     now,
     await state<RunState>(env.DB, "discovery"),
+    policy,
   );
   const priorPending = (await state<PendingDiscovery[]>(env.DB, "pending")) ?? [];
   // Most ticks only sample stars: do not load every project's JSON summaries.
@@ -65,7 +67,8 @@ async function collect(env: Env, now: number, upstream: Upstream) {
       setState(env.DB, "discoverySources", discovery.state),
     ]);
   }
-  const targets = pending.slice(0, 20);
+  const githubReady = () => upstream.blockedUntil("https://api.github.com/graphql") <= upstream.clock.now();
+  const targets = githubReady() ? pending.slice(0, 20) : [];
   if (targets.length) {
     try {
       const nodes = await repositories(
@@ -99,6 +102,7 @@ async function collect(env: Env, now: number, upstream: Upstream) {
             .values(),
         ],
         now,
+        policy,
       );
       pending = [
         ...pending.slice(targets.length),
@@ -114,12 +118,13 @@ async function collect(env: Env, now: number, upstream: Upstream) {
       pending = [...pending.slice(targets.length), ...targets];
     }
   }
-  const due = (await env.DB.prepare(
-    "SELECT * FROM projects WHERE observed_at < ? ORDER BY attempted_at,id LIMIT 30",
-  ).bind(Math.floor(now / HOUR) * HOUR).all<ProjectRow>()).results;
-  // 30 per minute leaves capacity for 1800 observations/hour, including retries.
+  const due = githubReady() ? (await env.DB.prepare(
+    "SELECT * FROM projects WHERE observed_at < ? AND (error IS NULL OR attempted_at <= ?) ORDER BY attempted_at,id LIMIT 100",
+  ).bind(samplingSlot(now, policy), now - 30 * 60_000).all<ProjectRow>()).results : [];
+  // Up to 100 repositories share a request; metadata refreshes form a separate group.
   // Metadata refreshes piggyback on samples once per day, rather than every hour.
   for (const metadata of [true, false] as const) {
+    if (!githubReady()) break;
     const group = due.filter((row) => (row.metadata_at <= now - DAY) === metadata);
     if (!group.length) continue;
     let nodes: (Repository | RepositoryStars | null)[] = [];
@@ -142,6 +147,7 @@ async function collect(env: Env, now: number, upstream: Upstream) {
         return repo ? [{ repo, previous, listedAt: null }] : [];
       }),
       now,
+      policy,
     );
     const failures = group.filter((row) => !byId.has(row.id));
     if (failures.length)
@@ -157,10 +163,11 @@ async function collect(env: Env, now: number, upstream: Upstream) {
     if (failures.length) result.error = error;
   }
   if (result.succeeded) result.succeededAt = now;
-  await env.DB.batch([
+  if (targets.length || due.length) await env.DB.batch([
     ...(targets.length ? [setState(env.DB, "pending", pending)] : []),
     setState(env.DB, "collection", result),
   ]);
+  return discovery.changed || targets.length > 0 || due.length > 0;
 }
 export default {
   async scheduled(
@@ -181,10 +188,11 @@ export default {
     try {
       Object.assign(upstream.hosts, (await state<Hosts>(env.DB, "upstream")) ?? {});
       previousHosts = JSON.stringify(upstream.hosts);
-      await prune(env.DB, now);
-      await collect(env, now, upstream);
-      await cleanup(env.DB, now);
-      await setState(env.DB, "scheduler", {
+      const policy = (await samplingPolicy(env.DB, now))!;
+      const pruned = await prune(env.DB, now);
+      const collected = await collect(env, now, upstream, policy);
+      const cleaned = await cleanup(env.DB, now, policy);
+      if (collected || cleaned || pruned.meta.rows_written) await setState(env.DB, "scheduler", {
         attemptedAt: now,
         succeededAt: now,
         succeeded: 1,

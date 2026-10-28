@@ -6,6 +6,7 @@ import {
 import { DeferredRequest, Upstream, type Clock } from "../worker/upstream";
 import { repositories } from "../worker/github";
 import { DAY, HOUR } from "../worker/trends";
+import { type SamplingPolicy } from "../worker/schedule";
 
 function harness(at = Date.parse("2026-10-01T01:00:00Z")) {
   let time = at;
@@ -32,6 +33,43 @@ function harness(at = Date.parse("2026-10-01T01:00:00Z")) {
 const rss = (...links: string[]) => `<rss><channel>${links.map((link) => `<item><link>${link}</link></item>`).join("")}</channel></rss>`;
 const detail = (url: string) => `<a href="https://github.com/irrelevant/recommendation">推荐</a><script type="application/json" id="__NEXT_DATA__">${JSON.stringify({ props: { pageProps: { repo: { url } } } })}</script>`;
 afterEach(() => { vi.unstubAllGlobals(); });
+
+test("daily trending follows the nine slots, normalizes old nextAt, retries failures and skips missed rounds", async () => {
+  const at = (time: string) => Date.parse(`${time}+08:00`);
+  const h = harness(at("2026-10-01T08:40:00"));
+  const policy: SamplingPolicy = { version: 2, effectiveAt: h.upstream.clock.now() };
+  let result = await discover(h.upstream, emptyDiscovery(), h.upstream.clock.now(), null, policy);
+  expect(h.calls).toHaveLength(8);
+  const step = async (time: string) => {
+    h.setTime(at(time));
+    result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy);
+  };
+  await step("2026-10-01T08:50:00");
+  expect(h.calls).toHaveLength(8);
+  await step("2026-10-01T09:00:00");
+  expect(h.calls).toHaveLength(16);
+  // A persisted hourly timer must not cause an extra successful read at 10:00.
+  result.state.scheduleVersion = undefined;
+  result.state.sources["github-daily"].nextAt = at("2026-10-01T10:00:00");
+  await step("2026-10-01T10:00:00");
+  expect(h.calls).toHaveLength(16);
+  h.responses.set(h.source("github-daily"), () => new Response("unavailable", { status: 503 }));
+  await step("2026-10-01T11:00:00");
+  expect(h.calls).toHaveLength(17);
+  result.state.scheduleVersion = undefined; // normalization must retain pending backoff.
+  await step("2026-10-01T11:20:00");
+  expect(h.calls).toHaveLength(17);
+  h.responses.delete(h.source("github-daily"));
+  await step("2026-10-01T11:30:00");
+  expect(h.calls).toHaveLength(18);
+  await step("2026-10-01T21:00:00");
+  expect(h.calls).toHaveLength(19);
+  await step("2026-10-01T23:00:00");
+  expect(h.calls).toHaveLength(19);
+  await step("2026-10-02T01:00:00");
+  expect(h.calls).toHaveLength(20);
+  expect(h.count(h.source("github-weekly"))).toBe(2); // initial read + daily 09:00
+});
 
 test("extracts authoritative RSS and HelloGithub projects and all Markdown repository links", () => {
   expect(parseGithubRSS(`<rss><channel>
