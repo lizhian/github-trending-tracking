@@ -53,6 +53,7 @@ npm run build:worker
 
 ## 部署与维护
 
+- 发布双平台镜像与按 digest 手动更新：[版本镜像](docs/image-release.md)。
 - 创建新资源：[首次部署](docs/agents/deployment.md#首次部署)。
 - 更新已有站点、验证或排查发布失败：[Cloudflare 部署流程](docs/agents/deployment.md)。
 - 理解领域概念：[术语表](GLOSSARY.md)。

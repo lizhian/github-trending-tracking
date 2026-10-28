@@ -1,0 +1,83 @@
+name: Publish version image
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/lizhian/github-trending-tracking
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check version tag
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: '[[ "$VERSION" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]'
+
+      - uses: actions/checkout@v6
+
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: amd64,arm64
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR with the workflow token
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish both platforms
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            REVISION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify public manifest and run both platforms
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          anonymous_config="$(mktemp -d)"
+          trap 'rm -rf "$anonymous_config"' EXIT
+          export DOCKER_CONFIG="$anonymous_config"
+          image="$IMAGE@$DIGEST"
+          if ! docker buildx imagetools inspect "$image" --raw > /tmp/image-manifest.json; then
+            echo '::error::GHCR must allow anonymous pull. On the first release, set the package visibility to Public in GitHub Package settings, then rerun this workflow.'
+            exit 1
+          fi
+          jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | sort == ["amd64","arm64"]' /tmp/image-manifest.json
+          for platform in linux/amd64 linux/arm64; do
+            test "$(docker run --rm --platform "$platform" "$image" version)" = "$VERSION $GITHUB_SHA"
+            scripts/verify-image.sh "$image" "$platform"
+          done
+          {
+            echo '## Published image'
+            echo "- Version: $VERSION"
+            echo "- Commit: $GITHUB_SHA"
+            echo "- Image: \`$image\`"
+            echo '- Platforms: linux/amd64, linux/arm64'
+            echo '- Anonymous pull, static frontend and SQLite API verified on both platforms.'
+            echo '- Production update is manual.'
+          } >> "$GITHUB_STEP_SUMMARY"
