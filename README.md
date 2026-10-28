@@ -161,3 +161,12 @@ GitHub RSS 只读取条目的 link/guid。HelloGithub 进入内容页，仅读�
 2026-10-28 已部署 Pages、Worker 和 D1，并绑定 `github.lizhian.cc.cd`。HTTPS 页面、同域列表查询及详情历史查询均已验证。北京时间 02:00 的首轮自动调度发现并成功采集 10 个真实项目，失败 0；本批次 CPU 17 ms、总耗时约 3.7 秒，D1 数据库约 64 KiB。
 
 这是冷启动小批次的实测记录，不代表 1000 项或完整 30 天历史的资源用量。新项目从真实首个快照开始积累，页面初期显示“积累中”。D1 日读写统计有聚合延迟，稳定运行后再与上述预算比较。
+
+
+## 合并发布验证
+
+2026-10-28 已将紧凑工作台和免费运行第一阶段优化一起提交并发布。代码提交 `e9ec623`，发布验收中补充浏览器缓存修正 `2ca7750`；Pages 为 [fb47dd88](https://fb47dd88.github-trending-tracking.pages.dev)，Worker 版本为 `201ae0af-ee19-471a-a549-172701f4cc93`。生产已应用 `0002_free_tier.sql`，只新增元数据时间字段与到期索引，沿用现有资源。
+
+19 项测试、类型检查、前后端构建和 Hallmark 渲染检查通过。线上核对资源哈希、项目联动、四窗口排序、独立滚动、移动吸顶、可搜索筛选、无请求的 Linux.do 占位页及旧 `view` 参数返回 400。列表仅在 Worker Cache API 内缓存 10 分钟，浏览器收到 `no-store`，避免域名浏览器缓存设置把数据陈旧时间延长为四小时。
+
+北京时间 12:00 的新版本 Cron（`* * * * *`）实际成功采集 30 项、失败 0，同时更新 30 项元数据；scheduler 与 discovery 也有新的成功时间。Tail 记录 outcome 为 `ok`、CPU **34 ms**、wall time 约 7.76 秒。该轮包含发现与首次元数据刷新，当前实际追踪 100 项；成功执行不代表满足 Workers Free 的 10 ms 目标，更不能证明 1000 项、完整 30 天下稳定可用。后续优化仍按 [ADR 0002](docs/adr/0002-zero-charge-runtime.md) 的免费约束处理。发布结果见 [#9](https://github.com/lizhian/github-trending-tracking/issues/9)。
