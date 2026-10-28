@@ -171,7 +171,7 @@ export async function query(request: Request, env: Env): Promise<Response> {
           ? (caches as CacheStorage & { default: Cache }).default
           : undefined;
       const cacheUrl = new URL(url);
-      cacheUrl.searchParams.set("_schema", "tracking-types-v3");
+      cacheUrl.searchParams.set("_schema", "tracking-types-v4");
       const cacheKey = new Request(cacheUrl.toString());
       const cached = await cache?.match(cacheKey);
       if (cached) {
@@ -181,8 +181,11 @@ export async function query(request: Request, env: Env): Promise<Response> {
         if (origin) response.headers.set("Access-Control-Allow-Origin", origin);
         return response;
       }
-      const response = json(await list(env, url, now));
-      if (cache) {
+      const result = await list(env, url, now);
+      const response = json(result);
+      // A source's first admissions must appear on the next request, without
+      // pinning its initial empty list and transient status for ten minutes.
+      if (cache && result.summary.tracked > 0) {
         // Cache only within this Worker. Zone browser-TTL settings must not
         // extend the visible age beyond the ten-minute observation snapshot.
         const stored = response.clone();

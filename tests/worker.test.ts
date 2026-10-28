@@ -792,3 +792,25 @@ test("uses the optional Worker fallback RSS configuration for Linux.do admission
   expect(JSON.stringify(result)).not.toMatch(/relay\.example|private/);
   expect((await api("/api/projects/linux.do:R_0/history?window=24")).status).toBe(200);
 });
+
+test("shows admitted Linux.do projects on the same default query after an initially empty failed snapshot", async () => {
+  const stored = new Map<string, Response>();
+  vi.stubGlobal("caches", {
+    default: {
+      match: async (request: Request) => stored.get(request.url)?.clone(),
+      put: async (request: Request, response: Response) => { stored.set(request.url, response.clone()); },
+    },
+  });
+  await setState(env.DB, "collection:linux.do", {
+    attemptedAt: now, succeededAt: now, succeeded: 19, failed: 1, error: "GitHub repository unavailable",
+  }).run();
+  const path = "/api/projects?type=linux.do&q=&language=&topic=&sort=24&direction=desc&page=1";
+  const empty = await (await api(path)).json();
+  expect(empty).toMatchObject({ total: 0, items: [], status: { collection: { failed: 1 } } });
+  rssNames = [];
+  await setState(env.DB, "pending", [{ type: "linux.do", name: names[0], listedAt: now }]).run();
+  await run(now + 60_000);
+  const populated = await (await api(path)).json() as any;
+  expect(populated).toMatchObject({ total: 1, summary: { tracked: 1 }, status: { collection: { failed: 0 } } });
+  expect(populated.items[0]).toMatchObject({ id: "linux.do:R_0", name: "acme/alpha" });
+});
