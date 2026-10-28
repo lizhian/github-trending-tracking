@@ -4,8 +4,11 @@ export interface RepositoryStars {
   id: string;
   stargazerCount: number;
 }
-export interface Repository extends RepositoryStars {
+export interface RepositoryIdentity {
+  id: string;
   nameWithOwner: string;
+}
+export interface Repository extends RepositoryStars, RepositoryIdentity {
   description: string | null;
   primaryLanguage: { name: string } | null;
   repositoryTopics: { nodes: { topic: { name: string } }[] };
@@ -15,15 +18,16 @@ const FIELDS =
 
 export function repositories(token: string, targets: string[], byId: boolean, upstream: Upstream, metadata?: true): Promise<(Repository | null)[]>;
 export function repositories(token: string, targets: string[], byId: boolean, upstream: Upstream, metadata: false): Promise<(RepositoryStars | null)[]>;
+export function repositories(token: string, targets: string[], byId: boolean, upstream: Upstream, metadata: "identity"): Promise<(RepositoryIdentity | null)[]>;
 export async function repositories(
   token: string,
   targets: string[],
   byId: boolean,
   upstream: Upstream,
-  metadata = true,
-): Promise<(Repository | RepositoryStars | null)[]> {
+  metadata: boolean | "identity" = true,
+): Promise<(Repository | RepositoryStars | RepositoryIdentity | null)[]> {
   if (!targets.length) return [];
-  const fields = metadata ? FIELDS : "id stargazerCount";
+  const fields = metadata === "identity" ? "id nameWithOwner" : metadata ? FIELDS : "id stargazerCount";
   const query = byId
     ? `query { nodes(ids:${JSON.stringify(targets)}) { ... on Repository { ${fields} } } }`
     : `query { ${targets
@@ -64,6 +68,8 @@ export async function repositories(
     : targets.map((_, i) => result.data?.[`r${i}`]);
   return targets.map((_, i) => {
     const node = nodes[i] as Repository | undefined;
+    if (metadata === "identity") return node && typeof node.id === "string" && /^[\w.-]+\/[\w.-]+$/.test(node.nameWithOwner)
+      ? { id: node.id, nameWithOwner: node.nameWithOwner } : null;
     if (!(node &&
       typeof node.id === "string" &&
       Number.isSafeInteger(node.stargazerCount) &&

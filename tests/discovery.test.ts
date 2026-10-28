@@ -1,7 +1,7 @@
 import { afterEach, expect, test, vi } from "vitest";
 import {
   discover, emptyDiscovery, parseGithubRSS, parseHelloProject, parseHelloRSS,
-  parseMarkdown, SOURCES,
+  parseMarkdown, parseLinuxRSS, SOURCES,
 } from "../worker/discovery";
 import { DeferredRequest, Upstream, type Clock } from "../worker/upstream";
 import { repositories } from "../worker/github";
@@ -39,8 +39,9 @@ test("daily trending follows the nine slots, normalizes old nextAt, retries fail
   const at = (time: string) => Date.parse(`${time}+08:00`);
   const h = harness(at("2026-10-01T08:40:00"));
   const policy: SamplingPolicy = { version: 2, effectiveAt: h.upstream.clock.now() };
+  const githubCalls = () => h.calls.filter((call) => !call.url.includes("linux.do"));
   let result = await discover(h.upstream, emptyDiscovery(), h.upstream.clock.now(), null, policy);
-  expect(h.calls).toHaveLength(8);
+  expect(githubCalls()).toHaveLength(8);
   result.state = JSON.parse(JSON.stringify(result.state));
   const rebooted = new Upstream(JSON.parse(JSON.stringify(h.upstream.hosts)), h.upstream.clock);
   const step = async (time: string) => {
@@ -48,35 +49,35 @@ test("daily trending follows the nine slots, normalizes old nextAt, retries fail
     result = await discover(rebooted, result.state, h.upstream.clock.now(), result.status, policy);
   };
   await step("2026-10-01T08:50:00");
-  expect(h.calls).toHaveLength(8);
+  expect(githubCalls()).toHaveLength(8);
   await step("2026-10-01T09:00:00");
-  expect(h.calls).toHaveLength(16);
+  expect(githubCalls()).toHaveLength(16);
   // A persisted hourly timer must not cause an extra successful read at 10:00.
   result.state.scheduleVersion = undefined;
   result.state.sources["github-daily"].nextAt = at("2026-10-01T10:00:00");
   await step("2026-10-01T10:00:00");
-  expect(h.calls).toHaveLength(16);
+  expect(githubCalls()).toHaveLength(16);
   h.responses.set(h.source("github-daily"), () => new Response("unavailable", { status: 503 }));
   await step("2026-10-01T11:00:00");
-  expect(h.calls).toHaveLength(17);
+  expect(githubCalls()).toHaveLength(17);
   result.state.scheduleVersion = undefined; // normalization must retain pending backoff.
   await step("2026-10-01T11:20:00");
-  expect(h.calls).toHaveLength(17);
+  expect(githubCalls()).toHaveLength(17);
   h.responses.delete(h.source("github-daily"));
   await step("2026-10-01T11:30:00");
-  expect(h.calls).toHaveLength(18);
+  expect(githubCalls()).toHaveLength(18);
   await step("2026-10-01T21:00:00");
-  expect(h.calls).toHaveLength(19);
+  expect(githubCalls()).toHaveLength(19);
   await step("2026-10-01T23:00:00");
-  expect(h.calls).toHaveLength(19);
+  expect(githubCalls()).toHaveLength(19);
   await step("2026-10-02T01:00:00");
-  expect(h.calls).toHaveLength(20);
+  expect(githubCalls()).toHaveLength(20);
   expect(h.count(h.source("github-weekly"))).toBe(2); // initial read + daily 09:00
   await step("2026-10-04T10:20:00"); // Catch up each source once after several missed days.
-  expect(h.calls).toHaveLength(28);
+  expect(githubCalls()).toHaveLength(28);
   expect(h.count(h.source("github-weekly"))).toBe(3);
   await step("2026-10-04T10:20:00");
-  expect(h.calls).toHaveLength(28);
+  expect(githubCalls()).toHaveLength(28);
 });
 
 test("extracts authoritative RSS and HelloGithub projects and all Markdown repository links", () => {
@@ -121,7 +122,7 @@ test("retains unresolved source failures across other source successes and retri
   result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy);
   expect(h.count(url)).toBe(3);
   expect(result.status.failed).toBe(0);
-  expect(result.entries).toContainEqual({ name: "acme/recovered", listedAt: h.upstream.clock.now() });
+  expect(result.entries).toContainEqual({ type: "github", name: "acme/recovered", listedAt: h.upstream.clock.now() });
 });
 
 test("shares daily HelloGithub results, limits failed detail requests to 20 and keeps listing timestamps", async () => {
@@ -139,7 +140,7 @@ test("shares daily HelloGithub results, limits failed detail requests to 20 and 
   h.setTime(start + 10 * 60_000);
   h.responses.set(pages[20], () => new Response(detail("https://github.com/acme/last")));
   result = await discover(h.upstream, JSON.parse(JSON.stringify(result.state)), h.upstream.clock.now(), result.status, policy);
-  expect(result.entries).toEqual([{ name: "acme/last", listedAt: start }]);
+  expect(result.entries).toEqual([{ type: "github", name: "acme/last", listedAt: start }]);
   expect(h.count(pages[0])).toBe(1);
   expect(h.count(h.source("hellogithub-all"))).toBe(1);
   h.setTime(start + DAY);
@@ -167,12 +168,12 @@ test("reuses successful HelloGithub details within a Beijing day and refreshes c
   h.responses.set(featured, () => new Response(rss(page)));
   result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy);
   expect(h.count(page)).toBe(1);
-  expect(result.entries).toEqual([{ name: "acme/original", listedAt: start + HOUR }]);
+  expect(result.entries).toEqual([{ type: "github", name: "acme/original", listedAt: start + HOUR }]);
   h.setTime(start + DAY);
   h.responses.set(page, () => new Response(detail("https://github.com/acme/corrected")));
   result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy);
   expect(h.count(page)).toBe(2);
-  expect(result.entries).toEqual([{ name: "acme/corrected", listedAt: start + DAY }]);
+  expect(result.entries).toEqual([{ type: "github", name: "acme/corrected", listedAt: start + DAY }]);
 });
 
 test("paces same-host calls and persists whole-host rate-limit cooldown with both Retry-After formats", async () => {
@@ -235,4 +236,52 @@ test("stops discovery at its time budget and leaves remaining details for later"
   expect(result.state.details.length).toBeGreaterThan(0);
   expect(result.state.details.length).toBeLessThan(20);
   expect(result.entries).toHaveLength(1);
+});
+
+
+test("extracts every repository from Linux.do RSS bodies without following topic links", () => {
+  const xml = `<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel>
+    <item><link>https://linux.do/t/topic/123</link><description><![CDATA[
+      <a href="https://github.com/acme/main/tree/master">main</a>
+      dependency: https://github.com/ACME/Main.git https://github.com/acme/dependency/issues/1
+      https://github.com/opengithubs/useful https://github.com/topics/tools
+      https://github.com.evil.com/wrong/repo https://notgithub.com/acme/wrong
+    ]]></description></item>
+    <item><description>&lt;a href=&quot;https://github.com/acme/encoded&quot;&gt;encoded&lt;/a&gt;</description>
+      <content:encoded><![CDATA[https://github.com/acme/extra#readme]]></content:encoded></item>
+  </channel></rss>`;
+  expect(parseLinuxRSS(xml).map((name) => name.toLowerCase()).sort())
+    .toEqual(["acme/dependency", "acme/encoded", "acme/extra", "acme/main", "opengithubs/useful"]);
+  expect(parseLinuxRSS("<rss><channel/></rss>")).toEqual([]);
+  expect(() => parseLinuxRSS("<rss>")).toThrow("RSS invalid XML");
+});
+
+test("discovers the same repository in independent types and isolates Linux.do cooldown on the daily schedule", async () => {
+  const start = Date.parse("2026-10-01T01:00:00Z"); // Beijing 09:00
+  const h = harness(start);
+  const linux = h.source("linuxdo");
+  h.responses.set(h.source("github-daily"), () => new Response(rss("https://github.com/acme/shared")));
+  h.responses.set(linux, () => new Response('<rss><channel><item><description><![CDATA[https://github.com/acme/shared]]></description></item></channel></rss>'));
+  let result = await discover(h.upstream, emptyDiscovery(), start, null, policy);
+  expect(result.entries).toEqual([
+    { type: "github", name: "acme/shared", listedAt: start },
+    { type: "linux.do", name: "acme/shared", listedAt: start },
+  ]);
+  h.setTime(start + HOUR);
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy);
+  expect(h.count(linux)).toBe(1);
+  h.responses.set(linux, () => new Response("limited", { status: 429, headers: { "Retry-After": "7200" } }));
+  h.setTime(start + 2 * HOUR);
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy);
+  expect(result.byType.github.failed).toBe(0);
+  expect(result.byType["linux.do"]).toMatchObject({ failed: 1, error: "linuxdo: RSS HTTP 429" });
+  h.setTime(start + 3 * HOUR);
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy);
+  expect(h.count(linux)).toBe(2);
+  h.responses.set(linux, () => new Response('<rss><channel/></rss>'));
+  h.setTime(start + 4 * HOUR);
+  result = await discover(h.upstream, result.state, h.upstream.clock.now(), result.status, policy);
+  expect(h.count(linux)).toBe(3);
+  expect(result.byType["linux.do"].failed).toBe(0);
+  expect(h.count(h.source("github-daily"))).toBe(3);
 });

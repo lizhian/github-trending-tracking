@@ -1,5 +1,5 @@
 import { XMLParser, XMLValidator } from "fast-xml-parser";
-import { type RunState } from "./contracts";
+import { PROJECT_TYPES, type ProjectType, type RunState } from "./contracts";
 import { DAY, HOUR } from "./trends";
 import { DeferredRequest, safeError, type Upstream } from "./upstream";
 import { latestSlot, nextSlot as nextSamplingSlot, type SamplingPolicy } from "./schedule";
@@ -31,12 +31,17 @@ export const SOURCES = [
     url: `https://raw.githubusercontent.com/OpenGithubs/github-${period}-rank/refs/heads/main/README.md`,
     hourly: false,
   })),
-] as const;
+  {
+    id: "linuxdo", kind: "linuxdo",
+    url: "https://linux.do/tag/2234-tag/2234.rss", hourly: true,
+  },
+].map((source) => ({ ...source, type: source.kind === "linuxdo" ? "linux.do" as const : "github" as const }));
 
 interface SourceState extends RunState {
   nextAt: number;
 }
 export interface Discovery {
+  type: ProjectType;
   name: string;
   listedAt: number;
 }
@@ -75,15 +80,34 @@ export function repositoryName(candidate: string, allowSubpath = false): string 
   if (!repo || repo === "." || repo === ".." || match[1] === "." || match[1] === "..") return null;
   return `${match[1]}/${repo}`;
 }
-function rssLinks(xml: string): string[][] {
+interface RssItem {
+  link?: unknown;
+  guid?: string | { "#text"?: unknown };
+  description?: unknown;
+  "content:encoded"?: unknown;
+}
+function rssItems(xml: string): RssItem[] {
   if (XMLValidator.validate(xml) !== true) throw new Error("RSS invalid XML");
   const parsed = new XMLParser({ ignoreAttributes: false, processEntities: false }).parse(xml);
   if (!parsed.rss || !Object.hasOwn(parsed.rss, "channel"))
     throw new Error("RSS missing channel");
   const items = parsed.rss.channel.item ?? [];
-  return (Array.isArray(items) ? items : [items]).map((item) => [
+  return Array.isArray(items) ? items : [items];
+}
+function rssLinks(xml: string): string[][] {
+  return rssItems(xml).map((item) => [
     item.link, typeof item.guid === "string" ? item.guid : item.guid?.["#text"],
   ].filter((candidate): candidate is string => typeof candidate === "string"));
+}
+export function parseLinuxRSS(xml: string): string[] {
+  const names = new Map<string, string>();
+  for (const item of rssItems(xml)) {
+    for (const field of [item.description, item["content:encoded"]]) {
+      if (typeof field !== "string") continue;
+      for (const name of repositoryLinks(field)) names.set(name.toLowerCase(), name);
+    }
+  }
+  return [...names.values()];
 }
 export function parseGithubRSS(xml: string): string[] {
   return rssLinks(xml).flatMap((links) => {
@@ -107,15 +131,17 @@ export function parseHelloProject(html: string): string {
   } catch { /* Malformed embedded data is a failed detail, never a prose fallback. */ }
   throw new Error("HelloGithub invalid project");
 }
-export function parseMarkdown(text: string): string[] {
+function repositoryLinks(text: string): string[] {
   const names = new Map<string, string>();
   for (const match of text.matchAll(/\bhttps?:\/\/github\.com\/([\w.-]+)\/([\w.-]+)(?:\/[^\s<>"'\[\]()，。；：！？]*)?/gi)) {
     // Punctuation ending a prose URL is not part of the repository name.
     const name = repositoryName(match[0].replace(/[.,;:!?]+$/, ""), true);
-    if (name && name.split("/")[0].toLowerCase() !== "opengithubs")
-      names.set(name.toLowerCase(), name);
+    if (name) names.set(name.toLowerCase(), name);
   }
   return [...names.values()];
+}
+export function parseMarkdown(text: string): string[] {
+  return repositoryLinks(text).filter((name) => name.split("/")[0].toLowerCase() !== "opengithubs");
 }
 
 export async function discover(
@@ -124,7 +150,8 @@ export async function discover(
   now: number,
   prior: RunState | null,
   policy?: SamplingPolicy,
-): Promise<{ entries: Discovery[]; status: RunState; state: DiscoveryState; changed: boolean }> {
+  priorByType: Partial<Record<ProjectType, RunState>> = {},
+): Promise<{ entries: Discovery[]; status: RunState; byType: Record<ProjectType, RunState>; state: DiscoveryState; changed: boolean }> {
   const deadline = upstream.clock.now() + 3 * 60_000;
   const day = beijingDay(now);
   let changed = false;
@@ -141,13 +168,16 @@ export async function discover(
     Object.entries(state.resolved).filter(([, value]) => value.day === day),
   );
   const entries = new Map<string, Discovery>();
-  const add = (name: string, listedAt: number) => {
-    const previous = entries.get(name.toLowerCase());
+  const add = (name: string, listedAt: number, type: ProjectType = "github") => {
+    const key = `${type}:${name.toLowerCase()}`;
+    const previous = entries.get(key);
     if (!previous || previous.listedAt < listedAt)
-      entries.set(name.toLowerCase(), { name, listedAt });
+      entries.set(key, { type, name, listedAt });
   };
   let attempted = false;
   let succeeded = false;
+  const attemptedTypes = new Set<ProjectType>();
+  const succeededTypes = new Set<ProjectType>();
   for (const source of SOURCES) {
     const previous = state.sources[source.id];
     if ((previous?.nextAt ?? 0) > now) continue;
@@ -156,8 +186,10 @@ export async function discover(
         source.url, source.kind === "markdown" ? "OpenGithubs" : "RSS", {}, deadline,
       );
       attempted = true;
+      attemptedTypes.add(source.type);
       const values = source.kind === "markdown" ? parseMarkdown(text)
-        : source.kind === "github" ? parseGithubRSS(text) : parseHelloRSS(text);
+        : source.kind === "github" ? parseGithubRSS(text)
+        : source.kind === "linuxdo" ? parseLinuxRSS(text) : parseHelloRSS(text);
       if (source.kind === "hellogithub") {
         for (const url of new Set(values)) {
           const cached = state.resolved[url];
@@ -165,18 +197,20 @@ export async function discover(
           else if (!state.details.some((task) => task.url === url))
             state.details.push({ url, listedAt: now, nextAt: now, error: null });
         }
-      } else for (const name of values) add(name, now);
+      } else for (const name of values) add(name, now, source.type);
       state.sources[source.id] = {
         attemptedAt: now, succeededAt: now, succeeded: values.length, failed: 0, error: null,
         nextAt: nextSlot(upstream.clock.now(), source.hourly, policy),
       };
       succeeded = true;
+      succeededTypes.add(source.type);
     } catch (error) {
       if (error instanceof DeferredRequest) {
         if (error.retryAt === null) break;
         continue;
       }
       attempted = true;
+      attemptedTypes.add(source.type);
       state.sources[source.id] = {
         attemptedAt: now, succeededAt: previous?.succeededAt ?? null,
         succeeded: 0, failed: 1, error: safeError(error),
@@ -193,11 +227,13 @@ export async function discover(
     try {
       const text = await upstream.text(task.url, "HelloGithub", {}, deadline);
       attempted = true;
+      attemptedTypes.add("github");
       const name = parseHelloProject(text);
       add(name, task.listedAt);
       state.resolved[task.url] = { day: beijingDay(upstream.clock.now()), name };
       state.details.splice(state.details.indexOf(task), 1);
       succeeded = true;
+      succeededTypes.add("github");
     } catch (error) {
       if (error instanceof DeferredRequest) {
         detailRequests--;
@@ -205,6 +241,7 @@ export async function discover(
         continue;
       }
       attempted = true;
+      attemptedTypes.add("github");
       task.error = safeError(error);
       task.nextAt = Math.max(upstream.clock.now() + 30 * 60_000, upstream.blockedUntil(task.url));
     }
@@ -215,6 +252,21 @@ export async function discover(
   ];
   return {
     entries: [...entries.values()], state, changed: changed || attempted,
+    byType: Object.fromEntries(PROJECT_TYPES.map((type) => {
+      const sources = SOURCES.filter((source) => source.type === type)
+        .flatMap((source) => state.sources[source.id] ? [[source.id, state.sources[source.id]] as const] : []);
+      const errors = [
+        ...sources.flatMap(([id, value]) => value.failed ? [`${id}: ${value.error}`] : []),
+        ...(type === "github" ? state.details.flatMap((task) => task.error ? [`hellogithub-detail: ${task.error}`] : []) : []),
+      ];
+      const previous = priorByType[type];
+      return [type, {
+        attemptedAt: attemptedTypes.has(type) ? now : previous?.attemptedAt ?? Math.max(0, ...sources.map(([, value]) => value.attemptedAt)),
+        succeededAt: succeededTypes.has(type) ? now : previous?.succeededAt ?? (Math.max(0, ...sources.map(([, value]) => value.succeededAt ?? 0)) || null),
+        succeeded: attemptedTypes.has(type) ? [...entries.values()].filter((entry) => entry.type === type).length : previous?.succeeded ?? 0,
+        failed: errors.length, error: errors[0] ?? null,
+      }];
+    })) as Record<ProjectType, RunState>,
     status: {
       attemptedAt: attempted ? now : prior?.attemptedAt ?? now,
       succeededAt: succeeded ? now : prior?.succeededAt ?? null,

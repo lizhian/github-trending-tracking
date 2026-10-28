@@ -1714,18 +1714,6 @@ html {
 .table-wrap table {
   min-width: 784px;
 }
-.placeholder-workspace {
-  grid-template-columns: minmax(0, 1fr);
-}
-.source-placeholder {
-  flex: 1;
-  min-height: 240px;
-  display: grid;
-  place-items: center;
-  color: var(--color-muted);
-  font-size: 14px;
-  animation: surface-arrival var(--dur-short) var(--ease-out);
-}
 @media (max-width: 760px) {
   :root {
     --masthead-height: 88px;
@@ -1776,11 +1764,6 @@ html {
   .view-tabs button {
     white-space: nowrap;
     font-size: 12px;
-  }
-}
-@media (prefers-reduced-motion: reduce) {
-  .source-placeholder {
-    animation: none;
   }
 }
 

@@ -79,6 +79,7 @@ function readLocation(): QueryState {
 }
 function listParameters(query: QueryState) {
   return new URLSearchParams({
+    type: query.tab === "linuxdo" ? "linux.do" : "github",
     q: query.q,
     language: query.language,
     topic: query.topic,
@@ -89,6 +90,7 @@ function listParameters(query: QueryState) {
 }
 function locationFor(query: QueryState) {
   const params = listParameters(query);
+  params.delete("type");
   for (const [key, value] of [...params]) {
     if (
       !value ||
@@ -621,11 +623,7 @@ function App() {
   }, []);
   const listPath = `/api/projects?${listParameters(query)}`;
   const previousListPath = useRef(listPath);
-  const resource = useApi<ListResult>(
-    listPath,
-    refresh,
-    query.tab === "github",
-  );
+  const resource = useApi<ListResult>(listPath, refresh);
   const data = resource.value;
   const options = data;
   const selected =
@@ -655,7 +653,7 @@ function App() {
     return () => clearTimeout(timer);
   }, [draft, query.q, commit]);
   useEffect(() => {
-    if (query.tab !== "github" || !data || resource.loading || resource.error)
+    if (!data || resource.loading || resource.error)
       return;
     const project = selected?.id ?? "";
     if (query.page !== data.page || query.project !== project)
@@ -819,7 +817,7 @@ function App() {
             <Icon name="mark" size={28} />
             <strong>开源观察</strong>
           </a>
-          <section className="header-stats" aria-label="全站观测概览">
+          <section className="header-stats" aria-label="当前来源观测概览">
             <div>
               <span className="metric-label-full">正在追踪</span>
               <span className="metric-label-short" aria-hidden="true">
@@ -833,7 +831,7 @@ function App() {
                     : "—"}
               </strong>
             </div>
-            <div title="全体追踪项目已知的 24 小时窗口净增量合计，含部分观测与负值；各项目实际区间可能不同。">
+            <div title="当前来源追踪项目已知的 24 小时窗口净增量合计，含部分观测与负值；各项目实际区间可能不同。">
               <span className="metric-label-full">24 小时 Star 净增量</span>
               <span className="metric-label-short" aria-hidden="true">
                 24h 净增量
@@ -882,15 +880,14 @@ function App() {
         </div>
       </header>
       <main className="frame app-main">
-        <h1 className="visually-hidden">GitHub 趋势追踪</h1>
-        {query.tab === "github" && failure && (
+        <h1 className="visually-hidden">开源趋势追踪</h1>
+        {failure && (
           <p className="notice" role="status">
             更新异常：{failure.error || "采集尚未恢复"}
             。继续展示上次有效观测，后台将重试。
           </p>
         )}
-        {query.tab === "github" &&
-          data &&
+        {data &&
           data.summary.fresh < data.summary.tracked && (
             <p className="notice" role="status">
               {data.summary.tracked - data.summary.fresh} 个项目未按计划完成更新，已超过 10
@@ -898,7 +895,7 @@ function App() {
             </p>
           )}
         <section
-          className={`workspace ${query.tab === "linuxdo" ? "placeholder-workspace" : ""}`}
+          className="workspace"
           id="rankings"
           aria-label="趋势探索工作台"
         >
@@ -922,17 +919,19 @@ function App() {
                     type="button"
                     key={tab}
                     aria-pressed={query.tab === tab}
-                    onClick={() => commit({ tab })}
+                    onClick={() => {
+                      setDraft("");
+                      commit({ tab, q: "", language: "", topic: "", page: 1, project: "" });
+                    }}
                   >
                     {label}
-                    {tab === "github" && (
+                    {query.tab === tab && (
                       <span>{data?.summary.tracked ?? "…"}</span>
                     )}
                   </button>
                 ))}
               </div>
-              {query.tab === "github" && (
-                <>
+              <>
                   <div className="filters">
                     <label className="search-field">
                       <Icon name="search" />
@@ -1016,11 +1015,9 @@ function App() {
                       </thead>
                     </table>
                   </div>
-                </>
-              )}
+              </>
             </div>
-            {query.tab === "github" ? (
-              <>
+            <>
                 {resource.error && (
                   <p className="notice error" role="alert">
                     {resource.error}{" "}
@@ -1208,15 +1205,9 @@ function App() {
                     </button>
                   </nav>
                 </div>
-              </>
-            ) : (
-              <div className="source-placeholder" role="status">
-                暂未开放
-              </div>
-            )}
+            </>
           </div>
-          {query.tab === "github" && (
-            <aside
+          <aside
               className="inspector"
               ref={inspector}
               aria-label="选中项目详情"
@@ -1244,8 +1235,10 @@ function App() {
                   数据说明<span aria-hidden="true">＋</span>
                 </summary>
                 <p>
-                  项目来自 GitHub Trending、HelloGithub 和 OpenGithubs。GitHub
-                  日榜与 Star 采样均在北京时间 01、05、09、11、13、15、17、19、21 点开始，分批完成；其余来源每天 09:00 开始抓取。新收录项目立即记录首个 Star 总数。所有访客共享观测，无需登录。
+                  {query.tab === "linuxdo"
+                    ? "项目来自 Linux.do 开源推广 RSS 正文中的 GitHub 仓库链接。"
+                    : "项目来自 GitHub Trending、HelloGithub 和 OpenGithubs。"}
+                  GitHub 日榜、Linux.do RSS 与 Star 采样均在北京时间 01、05、09、11、13、15、17、19、21 点开始，分批完成；其余来源每天 09:00 开始抓取。新收录项目复用同仓库本轮的真实观测，尚无本轮观测时立即采样。所有访客共享观测，无需登录。
                 </p>
                 <p>
                   趋势窗口为滚动 24、72、168、720
@@ -1253,11 +1246,11 @@ function App() {
                   天内的实际快照，完整窗口的端点容差按应采时段及 10 分钟宽限判断。历史不足显示部分观测，不足两次快照显示积累中。负净增量原样展示，缺测区间断线，不补零或推算。
                 </p>
                 <p>
-                  顶部净增量为全站已知项目窗口的合计，含部分观测，各项目实际区间可能不同；积累中项目不参与合计。语言数与项目数量均为全站范围。
+                  顶部净增量为当前来源已知项目窗口的合计，含部分观测，各项目实际区间可能不同；积累中项目不参与合计。语言数与项目数量也仅统计当前来源。
                 </p>
                 <p>
                   错过应采时段并超过 10 分钟宽限标为数据过期，正常的 2/4 小时间隔不算缺测。旧历史保留原有缺测含义。每日北京时间 04:00
-                  按保留评分清理，目标保留 500
+                  按保留评分分别清理，每个来源目标保留 500
                   项；保护期、观测数据过期或观测不足的项目暂缓淘汰，因此可能超额。
                 </p>
                 <p>
@@ -1265,8 +1258,7 @@ function App() {
                   {time(collection?.attemptedAt)}。
                 </p>
               </details>
-            </aside>
-          )}
+          </aside>
         </section>
       </main>
     </div>

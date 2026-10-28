@@ -5,6 +5,7 @@ import worker, { type Env } from "../worker/index";
 import { upstreamClock } from "../worker/upstream";
 import { SOURCES } from "../worker/discovery";
 import { saveObservations, setState, type ProjectRow } from "../worker/store";
+import { type ProjectType } from "../worker/contracts";
 import { DAY, HOUR, type SamplingPolicy } from "../worker/schedule";
 
 const mf = new Miniflare(
@@ -23,6 +24,7 @@ let stars = [100, 200];
 let fail = false;
 let rssNames: string[] | null = null;
 let failedIds = new Set<string>();
+let aliases = new Map<string, string>();
 let rssFailure = false;
 let sourceResponses = new Map<string, () => Response>();
 const external = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -41,6 +43,7 @@ const external = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     return new Response(
       `<rss><channel>${(rssNames ?? names).map((name) => `<item><link>https://github.com/${name}</link><description>See https://github.com/unrelated/linked</description></item>`).join("")}</channel></rss>`,
     );
+  if (String(input).includes("linux.do")) return new Response("<rss><channel/></rss>");
   const query = JSON.parse(String(init?.body)).query as string;
   const nodes = names.map((name, i) => ({
     id: `R_${i}`,
@@ -59,8 +62,8 @@ const external = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         (match) =>
           nodes.find(
             (node) =>
-              node.nameWithOwner ===
-              `${JSON.parse(match[1])}/${JSON.parse(match[2])}`,
+              node.nameWithOwner === `${JSON.parse(match[1])}/${JSON.parse(match[2])}` ||
+              node.id === aliases.get(`${JSON.parse(match[1])}/${JSON.parse(match[2])}`),
           ) ?? null,
       );
   selected = selected.map((node) =>
@@ -82,11 +85,11 @@ async function run(at = now) {
   );
 }
 // Prepare large fixtures directly; scenarios still exercise scheduling and public queries.
-async function seedProjects(at: number, from = 0) {
+async function seedProjects(at: number, from = 0, type: ProjectType = "github") {
   for (let offset = from; offset < names.length; offset += 100) {
     await saveObservations(env.DB, names.slice(offset, offset + 100).map((nameWithOwner, i) => ({
       repo: { id: `R_${offset + i}`, nameWithOwner, description: null, primaryLanguage: null,
-        repositoryTopics: { nodes: [] }, stargazerCount: 100 }, listedAt: at,
+        repositoryTopics: { nodes: [] }, stargazerCount: 100 }, listedAt: at, type,
     })), at);
   }
 }
@@ -135,6 +138,7 @@ beforeEach(async () => {
   fail = false;
   rssNames = null;
   failedIds = new Set();
+  aliases = new Map();
   rssFailure = false;
   sourceResponses = new Map();
   await setState(env.DB, "sampling_policy", { version: 2, effectiveAt: now - 30 * DAY }).run();
@@ -144,13 +148,14 @@ afterAll(async () => {
   await mf.dispose();
 });
 
-test("completes 500 projects in five scheduled batches and leaves completed/idle rounds untouched", async () => {
+test("completes 500 shared repositories across both types in five scheduled batches and leaves completed/idle rounds untouched", async () => {
   const start = Date.parse("2026-10-02T01:00:00Z"); // Beijing 09:00
   const policy: SamplingPolicy = { version: 2, effectiveAt: start - DAY };
   await setState(env.DB, "sampling_policy", policy).run();
   names = Array.from({ length: 500 }, (_, i) => `acme/round-${i}`);
   stars = names.map(() => 120);
   await seedProjects(start - 4 * HOUR + 4 * 60_000);
+  await seedProjects(start - 4 * HOUR + 4 * 60_000, 0, "linux.do");
   const success = { attemptedAt: start - HOUR, succeededAt: start - HOUR, succeeded: 1, failed: 0, error: null, nextAt: start + DAY };
   await setState(env.DB, "discoverySources", { scheduleVersion: 2,
     sources: Object.fromEntries(SOURCES.map(({ id }) => [id, success])), details: [], resolved: {} }).run();
@@ -165,13 +170,14 @@ test("completes 500 projects in five scheduled batches and leaves completed/idle
     return group;
   });
   expect(new Set(ids).size).toBe(500);
-  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM projects WHERE observed_at>=?").bind(start).first("n")).toBe(500);
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM projects WHERE observed_at>=?").bind(start).first("n")).toBe(1000);
+  expect(await list("?type=linux.do")).toMatchObject({ total: 500, pageSize: 100, pages: 5 });
   expect(await list()).toMatchObject({ total: 500, pageSize: 100, pages: 5 });
   const prior = await env.DB.prepare("SELECT key,value FROM system_state WHERE key IN ('collection','scheduler') ORDER BY key").all();
   await run(start + 9 * 60_000);
   expect(external.mock.calls.filter(([input]) => String(input).includes("api.github.com"))).toHaveLength(5);
   expect((await env.DB.prepare("SELECT key,value FROM system_state WHERE key IN ('collection','scheduler') ORDER BY key").all()).results).toEqual(prior.results);
-});
+}, 15_000);
 
 test("initializes policy once, retries incomplete rounds, catches up only current observations and samples new entries immediately", async () => {
   const start = Date.parse("2026-10-02T01:05:00Z"); // Beijing 09:05
@@ -182,33 +188,33 @@ test("initializes policy once, retries incomplete rounds, catches up only curren
   failedIds.add("R_0");
   stars = [110, 210];
   await run(start + 2 * HOUR);
-  const beta = await env.DB.prepare("SELECT observed_at FROM projects WHERE id='R_1'").first();
+  const beta = await env.DB.prepare("SELECT observed_at FROM projects WHERE id='github:R_1'").first();
   failedIds.clear();
-  const failedAttempt = await env.DB.prepare("SELECT attempted_at FROM projects WHERE id='R_0'").first();
+  const failedAttempt = await env.DB.prepare("SELECT attempted_at FROM projects WHERE id='github:R_0'").first();
   const requestCount = external.mock.calls.length;
   await run(start + 2 * HOUR + 60_000);
   expect(external.mock.calls.length).toBe(requestCount);
-  expect(await env.DB.prepare("SELECT attempted_at FROM projects WHERE id='R_0'").first()).toEqual(failedAttempt);
+  expect(await env.DB.prepare("SELECT attempted_at FROM projects WHERE id='github:R_0'").first()).toEqual(failedAttempt);
   await run(start + 2 * HOUR + 31 * 60_000);
-  expect(await env.DB.prepare("SELECT observed_at FROM projects WHERE id='R_1'").first()).toEqual(beta);
-  expect(((await (await api("/api/projects/R_0/history?window=24")).json()) as any).gaps).toEqual([]);
+  expect(await env.DB.prepare("SELECT observed_at FROM projects WHERE id='github:R_1'").first()).toEqual(beta);
+  expect(((await (await api("/api/projects/github:R_0/history?window=24")).json()) as any).gaps).toEqual([]);
   stars[0] = 105;
   await run(start + 8 * HOUR); // 17:05, no synthetic 13:00 or 15:00 observations.
-  const history = await (await api("/api/projects/R_0/history?window=24")).json() as any;
+  const history = await (await api("/api/projects/github:R_0/history?window=24")).json() as any;
   expect(history.points.map(([at]: number[]) => at)).toEqual([start, start + 2 * HOUR + 31 * 60_000, start + 8 * HOUR]);
   expect(history.gaps).toEqual([[start + 2 * HOUR + 31 * 60_000, start + 8 * HOUR]]);
-  expect((await list()).items.find((item: any) => item.id === "R_0").trends[24].gaps).toEqual(history.gaps);
+  expect((await list()).items.find((item: any) => item.id === "github:R_0").trends[24].gaps).toEqual(history.gaps);
   fail = true;
   await run(start + 10 * HOUR); // 19:05
-  expect((await list()).items.find((item: any) => item.id === "R_0")).toMatchObject({
+  expect((await list()).items.find((item: any) => item.id === "github:R_0")).toMatchObject({
     stars: 105, observedAt: start + 8 * HOUR, error: "GitHub HTTP 503",
   });
   expect(JSON.stringify(await list())).not.toContain("test-secret");
   const calls = external.mock.calls.length;
-  const attempt = await env.DB.prepare("SELECT attempted_at FROM projects WHERE id='R_0'").first();
+  const attempt = await env.DB.prepare("SELECT attempted_at FROM projects WHERE id='github:R_0'").first();
   await run(start + 10 * HOUR + 60_000);
   expect(external.mock.calls.length).toBe(calls);
-  expect(await env.DB.prepare("SELECT attempted_at FROM projects WHERE id='R_0'").first()).toEqual(attempt);
+  expect(await env.DB.prepare("SELECT attempted_at FROM projects WHERE id='github:R_0'").first()).toEqual(attempt);
   fail = false;
   await run(start + 10 * HOUR + 31 * 60_000);
   expect((await list()).items.every((item: any) => !item.error)).toBe(true);
@@ -216,7 +222,7 @@ test("initializes policy once, retries incomplete rounds, catches up only curren
   stars.push(500);
   await setState(env.DB, "pending", [{ name: names[2], listedAt: start + 11 * HOUR }]).run();
   await run(start + 11 * HOUR); // 20:05, immediate first snapshot.
-  expect((await list()).items.find((item: any) => item.id === "R_2")).toMatchObject({ enteredAt: now, observedAt: now, stars: 500 });
+  expect((await list()).items.find((item: any) => item.id === "github:R_2")).toMatchObject({ enteredAt: now, observedAt: now, stars: 500 });
   expect(await env.DB.prepare("SELECT value FROM system_state WHERE key='sampling_policy'").first("value")).toBe(firstPolicy);
 });
 
@@ -231,8 +237,8 @@ test("preserves legacy hourly gaps while subsequent planned intervals agree in l
   await run(start + 3 * HOUR); // 11:05
   stars[0] = 125;
   await run(start + 5 * HOUR); // 13:05, normal 2h interval.
-  const history = await (await api("/api/projects/R_0/history?window=24")).json() as any;
-  const summary = (await list()).items.find((item: any) => item.id === "R_0").trends[24];
+  const history = await (await api("/api/projects/github:R_0/history?window=24")).json() as any;
+  const summary = (await list()).items.find((item: any) => item.id === "github:R_0").trends[24];
   expect(history.gaps).toEqual([[start, start + 2 * HOUR]]);
   const { points: _, ...expected } = history.trend;
   expect(summary).toEqual(expected);
@@ -240,20 +246,24 @@ test("preserves legacy hourly gaps while subsequent planned intervals agree in l
 
 test("deduplicates renamed repositories and keeps successful samples despite source and repository failures", async () => {
   const start = now;
+  aliases.set("acme/old-alpha", "R_0");
+  rssNames = ["acme/old-alpha", ...names];
   await run();
+  expect((await list()).status.collection.succeeded).toBe(2);
+  rssNames = null;
   names[0] = "acme/renamed";
   stars[0] = 125;
   await run(start + HOUR);
   let result = await list();
   expect(result.total).toBe(2);
-  expect(result.items[0]).toMatchObject({ id: "R_0", name: names[0], enteredAt: start, stars: 125 });
+  expect(result.items[0]).toMatchObject({ id: "github:R_0", name: names[0], enteredAt: start, stars: 125 });
   failedIds.add("R_1");
   rssFailure = true;
   stars[0] = 140;
   await run(start + 3 * HOUR);
   result = await list();
-  expect(result.items.find((p: any) => p.id === "R_0").stars).toBe(140);
-  expect(result.items.find((p: any) => p.id === "R_1")).toMatchObject({
+  expect(result.items.find((p: any) => p.id === "github:R_0").stars).toBe(140);
+  expect(result.items.find((p: any) => p.id === "github:R_1")).toMatchObject({
     stars: 200, error: "GitHub repository unavailable",
   });
   expect(result.status.discovery.failed).toBe(1);
@@ -278,11 +288,11 @@ test("uses actual rolling observations, expiry, tolerance and partial periods co
   });
   stars = [140, 180];
   await run(start + 25 * 3_600_000);
-  const alpha = (await list()).items.find((p: any) => p.id === "R_0");
+  const alpha = (await list()).items.find((p: any) => p.id === "github:R_0");
   expect(alpha.trends["24"]).toMatchObject({ delta: -10, state: "partial" });
   expect(alpha.trends["720"].delta).toBe(40);
   const history = (await (
-    await api("/api/projects/R_0/history?window=72")
+    await api("/api/projects/github:R_0/history?window=72")
   ).json()) as any;
   expect(history.trend.delta).toBe(40);
   expect(history.points).toHaveLength(3);
@@ -291,10 +301,10 @@ test("uses actual rolling observations, expiry, tolerance and partial periods co
   now += 60_000;
   vi.spyOn(Date, "now").mockReturnValue(now);
   expect(
-    (await list()).items.find((p: any) => p.id === "R_0").trends["720"].delta,
+    (await list()).items.find((p: any) => p.id === "github:R_0").trends["720"].delta,
   ).toBe(-20);
   expect(
-    ((await (await api("/api/projects/R_0/history?window=720")).json()) as any)
+    ((await (await api("/api/projects/github:R_0/history?window=720")).json()) as any)
       .trend.delta,
   ).toBe(-20);
   await run(start + 31 * 24 * 3_600_000);
@@ -304,7 +314,7 @@ test("uses actual rolling observations, expiry, tolerance and partial periods co
     state: "complete",
   });
   const retained = (await (
-    await api("/api/projects/R_0/history?window=720")
+    await api("/api/projects/github:R_0/history?window=720")
   ).json()) as any;
   expect(retained.points).toHaveLength(3);
   now = start + 61 * 24 * 3_600_000;
@@ -330,7 +340,7 @@ test("samples only stars between daily metadata refreshes and keeps same-hour ga
     "repositoryTopics",
   );
   const previous = await env.DB.prepare(
-    "SELECT * FROM projects WHERE id='R_0'",
+    "SELECT * FROM projects WHERE id='github:R_0'",
   ).first<ProjectRow>();
   now += 600_000;
   await saveObservations(
@@ -357,9 +367,9 @@ test("samples only stars between daily metadata refreshes and keeps same-hour ga
     now - 60_000,
   );
   vi.spyOn(Date, "now").mockReturnValue(now);
-  const item = (await list()).items.find((item: any) => item.id === "R_0");
+  const item = (await list()).items.find((item: any) => item.id === "github:R_0");
   const history = (await (
-    await api("/api/projects/R_0/history?window=720")
+    await api("/api/projects/github:R_0/history?window=720")
   ).json()) as any;
   expect(item).toMatchObject({ stars: 135, observedAt: now });
   expect(item.trends[720]).toMatchObject({ delta: 35, gaps: [[start, now]] });
@@ -374,7 +384,7 @@ test("samples only stars between daily metadata refreshes and keeps same-hour ga
   expect(JSON.parse(String(daily[0][1]?.body)).query).toContain(
     "repositoryTopics",
   );
-  expect((await list()).items.find((item: any) => item.id === "R_0").name).toBe(
+  expect((await list()).items.find((item: any) => item.id === "github:R_0").name).toBe(
     names[0],
   );
 });
@@ -393,6 +403,15 @@ test("keeps the ten-minute edge snapshot out of browser caches on misses and hit
   const first = await api("/api/projects");
   expect(first.headers.get("Cache-Control")).toBe("no-store");
   const original = (await first.json()) as any;
+  await saveObservations(env.DB, [{ type: "linux.do", listedAt: now, repo: {
+    id: "R_L", nameWithOwner: "linux/only", description: null, primaryLanguage: { name: "Go" },
+    repositoryTopics: { nodes: [{ topic: { name: "linux-only" } }] }, stargazerCount: 10,
+  } }], now);
+  const linux = await list("?type=linux.do");
+  expect(linux).toMatchObject({ total: 1, summary: { tracked: 1 }, languages: ["Go"], topics: ["linux-only"] });
+  expect(linux.items[0].id).toBe("linux.do:R_L");
+  expect(await list()).toEqual(original);
+  expect(await list("?type=linux.do&language=TypeScript")).toMatchObject({ total: 0 });
   expect([...stored.values()][0].headers.get("Cache-Control")).toBe(
     "public, max-age=600",
   );
@@ -406,7 +425,7 @@ test("keeps the ten-minute edge snapshot out of browser caches on misses and hit
   expect(fresh.headers.get("Cache-Control")).toBe("no-store");
   expect(((await fresh.json()) as any).items[0].stars).toBe(450);
   expect(
-    (await api("/api/projects/R_0/history?window=24")).headers.get(
+    (await api("/api/projects/github:R_0/history?window=24")).headers.get(
       "Cache-Control",
     ),
   ).toBe("no-store");
@@ -475,7 +494,9 @@ test("combines filters, stable sorting, nulls-last and 100-item pagination; reje
   expect((await api("/api/projects?sort=invalid")).status).toBe(400);
   expect((await api("/api/projects?page=0")).status).toBe(400);
   expect((await api("/api/projects?view=all")).status).toBe(400);
-  expect((await api("/api/projects/R_0/history?window=25")).status).toBe(400);
+  expect((await api("/api/projects?type=linuxdo")).status).toBe(400);
+  expect((await api("/api/projects?type=github&type=linux.do")).status).toBe(400);
+  expect((await api("/api/projects/github:R_0/history?window=25")).status).toBe(400);
   expect(
     (
       await worker.fetch(
@@ -513,22 +534,26 @@ test("keeps protected overflow, removes lowest reliable growth at 04:00 Beijing,
   for (let i = 0; i < 6; i++) await run(start + 23 * 3_600_000 + i * 1000);
   expect((await list()).total).toBe(504);
   for (let i = 0; i < 6; i++) await run(start + DAY + i * 60_000);
-  const oldCycle = (await env.DB.prepare("SELECT * FROM projects WHERE id='R_10'").first<ProjectRow>())!;
+  // The other type has its own capacity and protection: it must survive GitHub cleanup.
+  await seedProjects(start + 26 * HOUR, 0, "linux.do");
+  const oldCycle = (await env.DB.prepare("SELECT * FROM projects WHERE id='github:R_10'").first<ProjectRow>())!;
   // A failure flag alone does not disqualify otherwise fresh, comparable observations.
-  await env.DB.prepare("UPDATE projects SET error='GitHub repository unavailable' WHERE id='R_10'").run();
+  await env.DB.prepare("UPDATE projects SET error='GitHub repository unavailable' WHERE id='github:R_10'").run();
   await run(start + 27 * HOUR); // 04:00: normal 01:00 snapshots are still fresh.
   const cleaned = await list();
   expect(cleaned.total).toBe(500);
+  expect(await list("?type=linux.do")).toMatchObject({ total: 504, status: { cleanup: { removed: 0, remaining: 504 } } });
+  expect((await api("/api/projects/linux.do:R_10/history")).status).toBe(200);
   expect(cleaned.status.cleanup).toMatchObject({ removed: 4, remaining: 500 });
   expect(cleaned.summary.fresh).toBe(500);
-  expect((await (await api("/api/projects/R_0/history")).json()) as any).toMatchObject({ stale: false });
+  expect((await (await api("/api/projects/github:R_0/history")).json()) as any).toMatchObject({ stale: false });
   expect((await list("?page=99")).page).toBe(5);
-  expect((await api("/api/projects/R_10/history")).status).toBe(404);
-  expect((await api("/api/projects/R_0/history")).status).toBe(200);
+  expect((await api("/api/projects/github:R_10/history")).status).toBe(404);
+  expect((await api("/api/projects/github:R_0/history")).status).toBe(200);
   rssNames = null;
   await run(start + 28 * HOUR); // 05:00
   const restored = (await (
-    await api("/api/projects/R_10/history")
+    await api("/api/projects/github:R_10/history")
   ).json()) as any;
   expect(restored.points).toHaveLength(1);
   expect(restored.trend.state).toBe("accumulating");
@@ -536,8 +561,8 @@ test("keeps protected overflow, removes lowest reliable growth at 04:00 Beijing,
   vi.spyOn(Date, "now").mockReturnValue(now);
   // The late result is newer than re-entry, but belongs to the deleted tracking cycle.
   await saveObservations(env.DB, [{ repo: { id: "R_10", stargazerCount: 999 }, previous: oldCycle, listedAt: null }], now);
-  expect(await (await api("/api/projects/R_10/history")).json()).toEqual(restored);
-  expect((await list("?q=acme%2Frepo-10")).items.find((p: any) => p.id === "R_10"))
+  expect(await (await api("/api/projects/github:R_10/history")).json()).toEqual(restored);
+  expect((await list("?q=acme%2Frepo-10")).items.find((p: any) => p.id === "github:R_10"))
     .toMatchObject({ stars: 100, observedAt: restored.observedAt });
   expect((await list()).total).toBe(504);
   fail = true;
@@ -548,7 +573,7 @@ test("keeps protected overflow, removes lowest reliable growth at 04:00 Beijing,
   expect(deferred.total).toBe(504);
   expect(deferred.status.cleanup).toMatchObject({ removed: 0, eligible: 0 });
   expect(deferred.items.every((p: any) => p.stale)).toBe(true);
-  expect((await (await api("/api/projects/R_0/history")).json()) as any).toMatchObject({ stale: true });
+  expect((await (await api("/api/projects/github:R_0/history")).json()) as any).toMatchObject({ stale: true });
 }, 60_000);
 
 test("rotates failed discoveries and preserves their 30-minute cooldown across rediscovery", async () => {
@@ -598,9 +623,9 @@ test("the worked retention scores favor recent acceleration over historical popu
   for (let i = 0; i < 6; i++) await run(start + 30 * day - 600_000 + i * 1000);
   await run(start + 30 * day);
   expect((await list()).total).toBe(500);
-  expect((await api("/api/projects/R_0/history?window=720")).status).toBe(200);
+  expect((await api("/api/projects/github:R_0/history?window=720")).status).toBe(200);
   for (const id of ["R_1", "R_2", "R_3"])
-    expect((await api(`/api/projects/${id}/history`)).status).toBe(404);
+    expect((await api(`/api/projects/github:${id}/history`)).status).toBe(404);
 }, 60_000);
 
 test("persists independent source and detail progress, keeps original listing times and deduplicates across sources", async () => {
@@ -661,4 +686,60 @@ test("persists independent source and detail progress, keeps original listing ti
   });
   expect(calls(hello)).toBe(sourceCalls);
   expect(JSON.stringify(result)).not.toContain("private response");
+});
+
+
+test("shares one real observation per repository and round while a newly discovered type starts its own history", async () => {
+  const start = Date.parse("2026-10-01T01:00:00Z"); // Beijing 09:00
+  const linux = SOURCES.find((source) => source.id === "linuxdo")!.url;
+  sourceResponses.set(linux, () => new Response("unavailable", { status: 503 }));
+  await run(start);
+  stars[0] = 150;
+  await run(start + 2 * HOUR); // 11:00: Linux.do still unavailable.
+  const github = (await list()).items.find((item: any) => item.repoId === "R_0");
+  expect(github).toMatchObject({ id: "github:R_0", type: "github", enteredAt: start, observedAt: now, stars: 150 });
+  expect((await list()).status.discovery.failed).toBe(0);
+  sourceResponses.set(linux, () => new Response('<rss><channel><item><description><![CDATA[https://github.com/acme/alpha/tree/main https://github.com/ACME/alpha]]></description></item></channel></rss>'));
+  external.mockClear();
+  await run(start + 3 * HOUR); // 12:00: retry and attach this type to the 11:00 observation.
+  expect(external.mock.calls.filter(([url]) => String(url).includes("api.github.com"))).toHaveLength(0);
+  const result = await list("?type=linux.do");
+  expect(result).toMatchObject({ total: 1, summary: { tracked: 1, net24: null }, languages: ["TypeScript"] });
+  expect(result.items[0]).toMatchObject({ id: "linux.do:R_0", type: "linux.do", repoId: "R_0", enteredAt: now, observedAt: start + 2 * HOUR, stars: 150 });
+  const history = await (await api("/api/projects/linux.do:R_0/history?window=720")).json() as any;
+  expect(history.points).toEqual([[start + 2 * HOUR, 150]]);
+  expect((await (await api("/api/projects/github:R_0/history?window=720")).json()) as any)
+    .toMatchObject({ points: [[start, 100], [start + 2 * HOUR, 150]] });
+  stars[0] = 175;
+  external.mockClear();
+  await run(start + 4 * HOUR); // 13:00: one request, both projects updated.
+  const requests = external.mock.calls.filter(([url]) => String(url).includes("api.github.com"));
+  expect(requests).toHaveLength(1);
+  const query = JSON.parse(String(requests[0][1]?.body)).query as string;
+  expect(JSON.parse(query.match(/ids:(\[[^\]]*\])/)![1])).toEqual(["R_0", "R_1"]);
+  expect((await list()).items.find((item: any) => item.repoId === "R_0")).toMatchObject({ stars: 175, observedAt: now });
+  expect((await list("?type=linux.do")).items[0]).toMatchObject({ stars: 175, observedAt: now, trends: { 24: { delta: 25 } } });
+  external.mockClear();
+  await run(now + 60_000);
+  expect(external.mock.calls).toHaveLength(0);
+  names[0] = "acme/renamed-between-rounds";
+  await setState(env.DB, "pending", [{ type: "linux.do", name: names[0], listedAt: now }]).run();
+  external.mockClear();
+  await run(now + 60_000);
+  const identities = external.mock.calls.filter(([url]) => String(url).includes("api.github.com"));
+  expect(identities).toHaveLength(1);
+  expect(JSON.parse(String(identities[0][1]?.body)).query).not.toContain("stargazerCount");
+  for (const type of ["github", "linux.do"]) {
+    expect((await list(`?type=${type}`)).items.find((item: any) => item.repoId === "R_0"))
+      .toMatchObject({ name: names[0], stars: 175, observedAt: start + 4 * HOUR });
+  }
+  sourceResponses.set(linux, () => new Response(`<rss><channel><item><description>https://github.com/${names[0]}</description></item></channel></rss>`));
+  failedIds.add("R_0");
+  await run(start + 6 * HOUR); // One repository failure affects both project records.
+  for (const type of ["github", "linux.do"]) {
+    const result = await list(`?type=${type}`);
+    expect(result.status.collection.failed).toBe(1);
+    expect(result.items.find((item: any) => item.repoId === "R_0"))
+      .toMatchObject({ stars: 175, observedAt: start + 4 * HOUR, error: "GitHub repository unavailable" });
+  }
 });

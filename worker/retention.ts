@@ -1,4 +1,4 @@
-import { WINDOWS, type CleanupResult } from "./contracts";
+import { WINDOWS, PROJECT_TYPES, type ProjectType, type CleanupResult } from "./contracts";
 import { projects, samplingPolicy, setState, state, type ProjectRow } from "./store";
 import { DAY, HOUR, RETENTION } from "./trends";
 import { isStale, type SamplingPolicy } from "./schedule";
@@ -14,13 +14,21 @@ export async function prune(db: D1Database, now: number) {
 export async function cleanup(db: D1Database, now: number, policy?: SamplingPolicy) {
   // Most recent 04:00 Asia/Shanghai, including catch-up after a missed tick.
   const at = Math.floor((now + 4 * HOUR) / DAY) * DAY - 4 * HOUR;
-  const previous = await state<CleanupResult>(db, "cleanup");
-  if (previous && previous.at >= at) return false;
-  policy ??= await samplingPolicy(db);
-  const rows = (await db.prepare("SELECT * FROM projects").all<ProjectRow>())
-    .results;
+  let changed = false;
+  for (const type of PROJECT_TYPES) {
+    const previous = await state<CleanupResult>(db, `cleanup:${type}`)
+      ?? (type === "github" ? await state<CleanupResult>(db, "cleanup") : null);
+    if (previous && previous.at >= at) continue;
+    policy ??= await samplingPolicy(db);
+    await cleanupType(db, type, now, at, policy);
+    changed = true;
+  }
+  return changed;
+}
+async function cleanupType(db: D1Database, type: ProjectType, now: number, at: number, policy?: SamplingPolicy) {
+  const rows = (await db.prepare("SELECT * FROM projects WHERE type=?").bind(type).all<ProjectRow>()).results;
   if (rows.length <= PROJECT_TARGET) {
-    await setState(db, "cleanup", {
+    await setState(db, `cleanup:${type}`, {
       at,
       removed: 0,
       remaining: rows.length,
@@ -67,7 +75,7 @@ export async function cleanup(db: D1Database, now: number, policy?: SamplingPoli
       .bind(row.id, row.cycle, now - DAY),
   );
   statements.push(
-    setState(db, "cleanup", {
+    setState(db, `cleanup:${type}`, {
       at,
       removed: victims.length,
       remaining: rows.length - victims.length,

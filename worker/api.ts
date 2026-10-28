@@ -1,5 +1,7 @@
 import {
   WINDOWS,
+  PROJECT_TYPES,
+  type ProjectType,
   type ListResult,
   type Project,
   type WindowHours,
@@ -18,6 +20,7 @@ function parameters(url: URL) {
     "sort",
     "direction",
     "page",
+    "type",
   ]);
   for (const [key, value] of url.searchParams) {
     if (
@@ -33,10 +36,11 @@ function parameters(url: URL) {
   const sort = url.searchParams.get("sort") ?? "24";
   const direction = url.searchParams.get("direction") ?? "desc";
   const pageText = url.searchParams.get("page") ?? "1";
+  const type = (url.searchParams.get("type") ?? "github") as ProjectType;
   if (
     !["name", "stars", ...WINDOWS.map(String)].includes(sort) ||
     !["asc", "desc"].includes(direction) ||
-    !/^[1-9]\d{0,5}$/.test(pageText)
+    !/^[1-9]\d{0,5}$/.test(pageText) || !PROJECT_TYPES.includes(type)
   )
     throw new ParameterError("排序或页码无效");
   return {
@@ -46,6 +50,7 @@ function parameters(url: URL) {
     sort,
     direction,
     page: Number(pageText),
+    type,
   };
 }
 async function list(env: Env, url: URL, now: number): Promise<ListResult> {
@@ -56,9 +61,10 @@ async function list(env: Env, url: URL, now: number): Promise<ListResult> {
     sort,
     direction,
     page: requested,
+    type,
   } = parameters(url);
   const rows = (
-    await env.DB.prepare("SELECT * FROM projects").all<ProjectRow>()
+    await env.DB.prepare("SELECT * FROM projects WHERE type=?").bind(type).all<ProjectRow>()
   ).results;
   const projects = await projectViews(env.DB, rows, now);
   const languages = [
@@ -105,9 +111,15 @@ async function list(env: Env, url: URL, now: number): Promise<ListResult> {
   const page = Math.min(requested, pages);
   const states = (
     await env.DB.prepare(
-      "SELECT key,value FROM system_state WHERE key IN ('discovery','collection','cleanup','scheduler')",
-    ).all<{ key: string; value: string }>()
+      "SELECT key,value FROM system_state WHERE key IN ('scheduler',?,?,?,'discovery','collection','cleanup')",
+    ).bind(`discovery:${type}`, `collection:${type}`, `cleanup:${type}`).all<{ key: string; value: string }>()
   ).results;
+  const status: ListResult["status"] = {};
+  for (const key of ["discovery", "collection", "cleanup", "scheduler"]) {
+    const row = states.find((row) => row.key === `${key}:${type}`)
+      ?? (key === "scheduler" || type === "github" ? states.find((row) => row.key === key) : undefined);
+    if (row) status[key] = JSON.parse(row.value);
+  }
   return {
     items: filtered.slice((page - 1) * pageSize, page * pageSize),
     total: filtered.length,
@@ -125,9 +137,7 @@ async function list(env: Env, url: URL, now: number): Promise<ListResult> {
         : null,
       comparable24: comparable.length,
     },
-    status: Object.fromEntries(
-      states.map((row) => [row.key, JSON.parse(row.value)]),
-    ),
+    status,
     asOf: now,
   };
 }
@@ -161,7 +171,7 @@ export async function query(request: Request, env: Env): Promise<Response> {
           ? (caches as CacheStorage & { default: Cache }).default
           : undefined;
       const cacheUrl = new URL(url);
-      cacheUrl.searchParams.set("_schema", "scheduled-sampling-v2-page100");
+      cacheUrl.searchParams.set("_schema", "tracking-types-v3");
       const cacheKey = new Request(cacheUrl.toString());
       const cached = await cache?.match(cacheKey);
       if (cached) {

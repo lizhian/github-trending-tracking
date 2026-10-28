@@ -1,6 +1,9 @@
 export const WINDOWS = [24, 72, 168, 720] as const;
 export type WindowHours = (typeof WINDOWS)[number];
 export type Point = [time: number, stars: number];
+export const PROJECT_TYPES = ["github", "linux.do"] as const;
+export type ProjectType = (typeof PROJECT_TYPES)[number];
+export const projectId = (type: ProjectType, repoId: string) => `${type}:${repoId}`;
 export interface TrendSummary {
   delta: number | null;
   state: "accumulating" | "partial" | "complete";
@@ -13,6 +16,8 @@ export interface Trend extends TrendSummary {
 }
 export interface Project {
   id: string;
+  type: ProjectType;
+  repoId: string;
   name: string;
   description: string | null;
   language: string | null;

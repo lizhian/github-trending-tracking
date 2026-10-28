@@ -1,9 +1,11 @@
-import { WINDOWS, type Project, type Point, type WindowHours } from "./contracts";
+import { WINDOWS, projectId, type ProjectType, type Project, type Point, type WindowHours } from "./contracts";
 import { summarize, DAY, HOUR, RETENTION } from "./trends";
 import { type Repository, type RepositoryStars } from "./github";
 import { completeWindow, isStale, missedSampling, type SamplingPolicy } from "./schedule";
 export interface ProjectRow {
   id: string;
+  type: ProjectType;
+  repo_id: string;
   cycle: string;
   name: string;
   description: string | null;
@@ -131,6 +133,8 @@ export function project(row: ProjectRow, now: number, policy?: SamplingPolicy): 
   }])) as Project["trends"];
   return {
     id: row.id,
+    type: row.type,
+    repoId: row.repo_id,
     name: row.name,
     description: row.description,
     language: row.language,
@@ -173,6 +177,9 @@ export async function saveObservations(
     repo: Repository | RepositoryStars;
     previous?: ProjectRow;
     listedAt: number | null;
+    type?: ProjectType;
+    observedAt?: number;
+    metadataAt?: number;
   }[],
   now: number,
   policy?: SamplingPolicy,
@@ -180,34 +187,39 @@ export async function saveObservations(
   policy ??= await samplingPolicy(db);
   const firstPoints = await baselines(
     db,
-    observations.flatMap((o) => o.previous ? [{ cycle: o.previous.cycle, end: now }] : []),
+    observations.flatMap((o) => o.previous ? [{ cycle: o.previous.cycle, end: o.observedAt ?? now }] : []),
     now,
     true,
   );
   const statements: D1PreparedStatement[] = [];
-  for (const { repo, previous, listedAt } of observations) {
+  for (const observation of observations) {
+    const { repo, previous, listedAt } = observation;
+    const type = observation.type ?? previous?.type ?? "github";
+    const id = projectId(type, repo.id);
+    const observedAt = observation.observedAt ?? now;
     const cycle = previous?.cycle ?? crypto.randomUUID();
-    const hour = Math.floor(now / HOUR);
+    const hour = Math.floor(observedAt / HOUR);
     const gaps: [number, number][] = previous ? JSON.parse(previous.trends)[720].gaps : [];
-    if (previous && previous.observed_at < now) {
+    if (previous && previous.observed_at < observedAt) {
       if (Math.floor(previous.observed_at / HOUR) === hour) {
         const lastGap = gaps.at(-1);
-        if (lastGap?.[1] === previous.observed_at) lastGap[1] = now;
-      } else if (missedSampling(previous.observed_at, now, policy)) {
-        gaps.push([previous.observed_at, now]);
+        if (lastGap?.[1] === previous.observed_at) lastGap[1] = observedAt;
+      } else if (missedSampling(previous.observed_at, observedAt, policy)) {
+        gaps.push([previous.observed_at, observedAt]);
       }
     }
     const metadata = "nameWithOwner" in repo;
     if (!previous && !metadata) throw new Error("New repository requires metadata");
+    const metadataAt = observation.metadataAt ?? (metadata ? observedAt : previous!.metadata_at);
     const values = [
       metadata ? repo.nameWithOwner : previous!.name,
       metadata ? repo.description ?? null : previous!.description,
       metadata ? repo.primaryLanguage?.name ?? null : previous!.language,
       metadata ? JSON.stringify(repo.repositoryTopics.nodes.map((n) => n.topic.name)) : previous!.topics,
-      now,
-      now,
+      observedAt,
+      observedAt,
       repo.stargazerCount,
-      JSON.stringify(summarize(firstPoints.get(cycle) ?? {}, [now, repo.stargazerCount], gaps, policy)),
+      JSON.stringify(summarize(firstPoints.get(cycle) ?? {}, [observedAt, repo.stargazerCount], gaps, policy)),
     ];
     if (previous) {
       statements.push(
@@ -215,15 +227,15 @@ export async function saveObservations(
           .prepare(
             `UPDATE projects SET name=?,description=?,language=?,topics=?,observed_at=?,attempted_at=?,stars=?,trends=?,error=NULL,metadata_at=?,listed_at=MAX(listed_at,?) WHERE id=? AND cycle=? AND observed_at < ?`,
           )
-          .bind(...values, metadata ? now : previous.metadata_at, listedAt ?? previous.listed_at, repo.id, cycle, now),
+          .bind(...values, metadataAt, listedAt ?? previous.listed_at, id, cycle, observedAt),
       );
     } else {
       statements.push(
         db
           .prepare(
-            `INSERT INTO projects(id,cycle,name,description,language,topics,observed_at,attempted_at,stars,trends,entered_at,listed_at,metadata_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
+            `INSERT INTO projects(id,type,repo_id,cycle,name,description,language,topics,observed_at,attempted_at,stars,trends,entered_at,listed_at,metadata_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`,
           )
-          .bind(repo.id, cycle, ...values, now, listedAt ?? now, now),
+          .bind(id, type, repo.id, cycle, ...values, now, listedAt ?? now, metadataAt),
       );
     }
     const path = `$."${hour}"`;
@@ -236,16 +248,16 @@ export async function saveObservations(
         )
         .bind(
           cycle,
-          Math.floor(now / DAY),
+          Math.floor(observedAt / DAY),
           String(hour),
-          JSON.stringify([now, repo.stargazerCount]),
-          repo.id,
+          JSON.stringify([observedAt, repo.stargazerCount]),
+          id,
           cycle,
-          now,
+          observedAt,
           path,
-          JSON.stringify([now, repo.stargazerCount]),
+          JSON.stringify([observedAt, repo.stargazerCount]),
           path,
-          now,
+          observedAt,
         ),
     );
   }
