@@ -40,6 +40,9 @@ func run(args []string) error {
 		fmt.Printf("%s %s\n", version, revision)
 		return nil
 	}
+	if handled, err := backupCommand(command, args); handled {
+		return err
+	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	path := flags.String("db", filepath.Join(env("DATA_DIR", "data"), tracking.DatabaseName), "existing SQLite database path")
 	listen := flags.String("listen", env("LISTEN_ADDR", ":8080"), "HTTP listen address")
@@ -93,6 +96,11 @@ func run(args []string) error {
 		defer store.Close()
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		stopBackups, err := startBackupLoop(ctx, store)
+		if err != nil {
+			return err
+		}
+		defer stopBackups()
 		server := &http.Server{Addr: *listen, Handler: tracking.Handler(store, tracking.HTTPOptions{AllowedOrigin: os.Getenv("ALLOWED_ORIGIN"), StaticDir: *static}), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 		go func() {
 			<-ctx.Done()
@@ -106,6 +114,6 @@ func run(args []string) error {
 		}
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q (use serve, init, import, verify, version)", command)
+		return fmt.Errorf("unknown command %q (use serve, init, import, verify, backup, restore, version)", command)
 	}
 }
