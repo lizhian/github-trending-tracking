@@ -172,3 +172,9 @@ GitHub RSS 只读取条目的 link/guid。HelloGithub 进入内容页，仅读�
 19 项测试、类型检查、前后端构建和 Hallmark 渲染检查通过。线上核对资源哈希、项目联动、四窗口排序、独立滚动、移动吸顶、可搜索筛选、无请求的 Linux.do 占位页及旧 `view` 参数返回 400。列表仅在 Worker Cache API 内缓存 10 分钟，浏览器收到 `no-store`，避免域名浏览器缓存设置把数据陈旧时间延长为四小时。
 
 北京时间 12:00 的新版本 Cron（`* * * * *`）实际成功采集 30 项、失败 0，同时更新 30 项元数据；scheduler 与 discovery 也有新的成功时间。Tail 记录 outcome 为 `ok`、CPU **34 ms**、wall time 约 7.76 秒。该轮包含发现与首次元数据刷新，当前实际追踪 100 项；成功执行不代表满足 Workers Free 的 10 ms 目标，更不能证明 1000 项、完整 30 天下稳定可用。后续优化仍按 [ADR 0002](docs/adr/0002-zero-charge-runtime.md) 的免费约束处理。发布结果见 [#9](https://github.com/lizhian/github-trending-tracking/issues/9)。
+
+## 分时采样发布验证
+
+2026-10-28 已提交并推送 `7390885` 至 main，发布 500 项软目标、100 项分页与批次、每天 9 个北京时间采样时段。Pages 为 [9060202d](https://9060202d.github-trending-tracking.pages.dev)，Worker 版本为 `9908fddd-2590-417e-a0c9-38d628ca900a`；沿用现有资源，无待执行数据库迁移。27 项测试、类型检查、前后端构建、线上资源哈希、同域列表及详情接口均通过；浏览器核验每页 100 项、项目详情图表及新数据说明通过。
+
+14:59 的首次自动调度持久化策略版本 2 及生效时间。15:00 自动采集 100 项、失败 0，日榜发现 11 项；采集、发现和调度均有新的成功时间，数据库确认全部 100 项已更新，日榜下次执行时间为 17:00。该轮 outcome 为 `ok`、CPU **72 ms**、wall time 3754 ms。部署和本轮采集成功，但 CPU 超过 Free 的 10 ms 标称额度，尚不能视为免费稳定运行达标。发布记录见 [#13](https://github.com/lizhian/github-trending-tracking/issues/13)。
