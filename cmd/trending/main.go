@@ -42,6 +42,9 @@ func run(args []string) error {
 		fmt.Printf("%s %s\n", version, revision)
 		return nil
 	}
+	if handled, err := backupCommand(command, args); handled {
+		return err
+	}
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	path := flags.String("db", filepath.Join(env("DATA_DIR", "data"), tracking.DatabaseName), "existing SQLite database path")
 	listen := flags.String("listen", env("LISTEN_ADDR", ":8080"), "HTTP listen address")
@@ -103,6 +106,11 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		stopBackups, err := startBackupLoop(ctx, store)
+		if err != nil {
+			return err
+		}
+		defer stopBackups()
 		scheduler := tracking.NewScheduler(store, tracking.SchedulerOptions{Token: token, FallbackURL: fallback, StartedAt: startedAt})
 		scheduled := make(chan struct{})
 		go func() { defer close(scheduled); scheduler.Run(ctx) }()
@@ -121,7 +129,7 @@ func run(args []string) error {
 		}
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q (use serve, init, import, verify, version)", command)
+		return fmt.Errorf("unknown command %q (use serve, init, import, verify, backup, restore, version)", command)
 	}
 }
 
