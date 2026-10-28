@@ -1,5 +1,7 @@
 # GitHub 趋势追踪
 
+Go + SQLite 迁移版的本地运行、离线全量导入及校验见 [运行说明](docs/go-runtime.md)。原 Cloudflare 部分保留供切换前生产及回退使用。
+
 [线上站点](https://github.lizhian.cc.cd/)
 
 无需登录的中文只读趋势站，从 GitHub Trending、HelloGithub 和 OpenGithubs 发现项目，持续记录真实 Star 变化。

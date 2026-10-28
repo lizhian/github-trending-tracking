@@ -4,6 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:go": "go run ./cmd/trending serve",
+    "test:go": "go test ./...",
     "dev:worker": "wrangler dev --test-scheduled",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
