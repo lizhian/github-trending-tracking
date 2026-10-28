@@ -22,7 +22,7 @@ npm run dev
 
 ## 冻结导出与导入
 
-正式迁移前停止旧 Cron，确认正在执行的写入已结束。按 `docs/agents/deployment.md` 复用本机 Cloudflare 配置导出；本节命令的 source、report 均为私有文件，不提交仓库或公开 Issue。
+正式迁移前停止旧 Cron，确认正在执行的写入已结束。按 [生产切流步骤](production-cutover.md#停写导入与验收) 停写后，复用本机 Cloudflare 配置导出；本节命令的 source、report 均为私有文件，不提交仓库或公开 Issue。
 
 ```sh
 npx wrangler d1 export DB --remote --config .wrangler/deploy.json --output /private/path/d1-frozen.sql
@@ -61,7 +61,7 @@ docker run -d --name github-trending-tracking \
 
 镜像只包含静态前端、Go 二进制和 HTTPS 根证书，运行时不需要 Node。整个 `/data` 挂载持久目录；删除重建应用容器不会删除历史。宿主 HTTPS 反向代理应把页面和 `/api/*` 一起转发到该应用。采集 Token 和备用 RSS 只能在运行时注入，不能用构建参数或 `VITE_*` 传入。
 
-采集运行和运行时凭据见 [Go 采集说明](go-collection.md)。正式镜像发布、备份恢复和生产切流说明随对应任务完善；本地运行不能代替生产切换验收。
+采集和运行时凭据见 [Go 采集说明](go-collection.md)，镜像更新见 [版本镜像](image-release.md)，实际迁移与回退见 [生产运行手册](production-cutover.md)。本地运行不能代替生产切换验收。
 
 ## 每日同机备份
 
@@ -101,4 +101,4 @@ go run ./cmd/trending verify --db /private/path/restored-data/tracking.sqlite \
 4. 核对报告中的项目/追踪周期数量、全部历史点及时间范围、`sampling_policy.effectiveAt`、pending 的 `nextAt` 和主机 `blockedUntil`。将应用的数据挂载切到恢复目录，备份仍挂独立目录，启动同一兼容版本。
 5. 立即经同源列表与详情读取恢复数据；恢复后的采集仍等待严格晚于启动时间的下一应采时段，不补造停机历史。在下一轮核对新的真实采集成功后再完成恢复验收。
 
-本任务已通过真实 WAL 并发事务一致快照、停止应用后恢复到空目录、完整审计等价及 HTTP 历史查询验证；生产恢复与下一轮真实采集在最终切流任务核验。
+实现已通过真实 WAL 并发事务一致快照、停止应用后恢复到空目录、完整审计等价及 HTTP 历史查询验证；生产恢复与下一轮真实采集证据记录在 [#26](https://github.com/lizhian/github-trending-tracking/issues/26)。

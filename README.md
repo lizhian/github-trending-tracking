@@ -1,64 +1,52 @@
 # GitHub 趋势追踪
 
-Go + SQLite 迁移版的本地运行、离线全量导入及校验见 [运行说明](docs/go-runtime.md)。原 Cloudflare 部分保留供切换前生产及回退使用。
+[线上站点](https://github.lizhian.cc.cd/) · [实施与迁移记录](https://github.com/lizhian/github-trending-tracking/issues/21)
 
-[线上站点](https://github.lizhian.cc.cd/)
+无需登录的中文只读趋势站，从 GitHub Trending、HelloGithub、OpenGithubs 与 Linux.do 发现项目，记录真实 Star 变化。可切换 GitHub / Linux.do 追踪类型，搜索筛选、排序分页，查看 24 小时、3 天、7 天和 30 天趋势。保留移动端、浅深色主题、键盘操作和 URL 状态恢复。
 
-无需登录的中文只读趋势站，从 GitHub Trending、HelloGithub 和 OpenGithubs 发现项目，持续记录真实 Star 变化。
-
-- 比较 24 小时、3 天、7 天和 30 天的 Star 净增量，查看实际观测曲线。
-- 按名称、简介、语言和 Topics 搜索筛选，支持排序、分页和 URL 状态恢复。
-- 桌面列表与详情联动，支持移动端、浅深色主题及键盘操作。
-
-前端使用 React / TypeScript / Vite，部署于 Cloudflare Pages；Worker 负责采集与只读 API，D1 保存所有访客共享的观测数据。
+单个 Go 应用容器提供 React/TypeScript 静态前端、同源只读 API 和串行采集循环，SQLite 整个数据目录挂载本地磁盘。镜像同时支持 `linux/amd64` 与 `linux/arm64`，服务器手动按 digest 更新；部署进度和七天后备期见 [#26](https://github.com/lizhian/github-trending-tracking/issues/26)。
 
 ## 本地运行
 
-需要 Node.js 22.12+（或 24+）、npm，以及可查询 GitHub GraphQL 的 Personal Access Token。
+使用 `go.mod` 所需 Go 版本、Node.js 26 和 npm。先构建前端，再显式初始化新的开发库：
 
-```bash
+```sh
 npm ci
-cp .dev.vars.example .dev.vars
-# 在 .dev.vars 中填写 GITHUB_TOKEN。
-npm run db:migrate
-npm run dev:worker
+npm run build
+mkdir -p data backups
+# 仅适用于没有历史数据的新开发环境。生产使用全量导入或恢复。
+go run ./cmd/trending init --db data/tracking.sqlite
+BACKUP_DIR="$PWD/backups" ALLOWED_ORIGIN=http://localhost:8080 npm run dev:go
 ```
 
-另开终端运行 `npm run dev`，访问 `http://localhost:5173`。Vite 将 `/api` 代理至本地 Worker。
+访问 `http://localhost:8080`。前端热更新可另开 `npm run dev`，Vite 将 `/api` 代理到 Go 的 8080 端口；使用热更新时将允许来源配置为 `http://localhost:5173`。采集 Token 和可选 RSS 备用地址只在运行时提供，推荐 `_FILE` 秘密文件，见 [采集配置](docs/go-collection.md)。无 Token 时仍可读取已有数据。
 
-首次采集通过 Wrangler 本地调试入口触发：
+启动后 HTTP 立即可读，采集等到严格晚于启动时间的下一应采时段；没有公开手动采集入口。浏览和刷新只查询已保存的数据。
 
-```bash
-curl 'http://localhost:8787/__scheduled?cron=*+*+*+*+*'
-```
+## 数据与维护
 
-新项目从首个真实快照开始积累；下一个应采时段再触发调度后，才能比较净增量。GitHub Token 仅用于 Worker，本地配置由 Git 忽略。
+两种类型独立收录和淘汰，同仓库共享一次 Star 请求，各自保留周期和历史。每类型目标 500 项，24 小时保护期和可靠观测要求优先，允许暂时超额。查询严格取最近 30 天真实观测，负净增量照常显示，缺测不补零或插值；不足两个有效快照显示“积累中”。列表最多缓存 10 分钟。
 
-## 数据说明
-
-查询保留最近 30 天的实际观测，窗口以项目最新成功快照为终点。负净增量原样展示，缺测不补零或插值；不足两个有效快照显示“积累中”。项目按计划分批采样，页面刷新只读取已有数据。
-
-目标保留 500 项，24 小时保护期和可靠观测条件优先，因此允许暂时超额。列表最多有 10 分钟缓存延迟。具体采样时段、窗口规则和容量取舍见[架构决策](docs/adr/)。
+每天一次同机全量一致备份，保留三天；备份和活动数据库使用独立持久目录。恢复需停应用、保留故障文件并校验备份，重启仍等待下一轮。具体时段、趋势和淘汰规则见 [采集说明](docs/go-collection.md)、[术语表](GLOSSARY.md) 与 [架构决策](docs/adr/)。
 
 ## 检查
 
-```bash
+```sh
+go test ./...
 npm run typecheck
-npm test
 npm run build
-npm run build:worker
+npm test -- tests/go-parity.test.ts
 ```
 
-集成测试使用隔离的真实本地 D1。`build:worker` 仅打包，不部署。
+Go 测试使用真实临时 SQLite；parity 测试把同一冻结数据和时钟交给旧 Worker/D1 与新 Go/SQLite，经公开 HTTP 比较代表性结果。旧 Worker、D1 测试和共享契约保留作迁移基线。
 
-## 部署与维护
+## 部署
 
-- 发布双平台镜像与按 digest 手动更新：[版本镜像](docs/image-release.md)。
-- 创建新资源：[首次部署](docs/agents/deployment.md#首次部署)。
-- 更新已有站点、验证或排查发布失败：[Cloudflare 部署流程](docs/agents/deployment.md)。
-- 理解领域概念：[术语表](GLOSSARY.md)。
-- 评估免费运行条件：[资源预算与生产测量](docs/research/free-tier-storage.md)。本地验证不代表生产 CPU 已达标。
-- 查阅实施规格和发布结果：[GitHub Issues](https://github.com/lizhian/github-trending-tracking/issues)。
+- [本地容器、全量导入、备份与恢复](docs/go-runtime.md)
+- [双平台 GHCR 版本镜像与手动更新](docs/image-release.md)
+- [加州服务器切流、回退及七天收尾](docs/production-cutover.md)
+- [旧 Cloudflare 流程（仅迁移与临时回退）](docs/legacy/cloudflare-deployment.md)
 
-## 相关链接
-[Linux.do](https://linux.do/): 连接开发者与 AI 爱好者的社区。
+使用既有服务器及批准的固定费用，继续禁止新增自动按量扣费。旧 Cloudflare 部署脚本仅用于迁移和后备期回退，常规更新使用 Go 镜像及 SQLite 备份。
+
+[Linux.do](https://linux.do/)：连接开发者与 AI 爱好者的社区。
