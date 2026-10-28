@@ -108,6 +108,7 @@ beforeAll(async () => {
 });
 beforeEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.stubGlobal("fetch", external);
   vi.spyOn(upstreamClock, "sleep").mockResolvedValue();
   external.mockClear();
@@ -301,6 +302,39 @@ test("samples only stars between daily metadata refreshes and keeps same-hour ga
   expect((await list()).items.find((item: any) => item.id === "R_0").name).toBe(
     names[0],
   );
+});
+
+test("keeps the ten-minute edge snapshot out of browser caches on misses and hits", async () => {
+  await run();
+  const stored = new Map<string, Response>();
+  vi.stubGlobal("caches", {
+    default: {
+      match: async (request: Request) => stored.get(request.url)?.clone(),
+      put: async (request: Request, response: Response) => {
+        stored.set(request.url, response.clone());
+      },
+    },
+  });
+  const first = await api("/api/projects");
+  expect(first.headers.get("Cache-Control")).toBe("no-store");
+  const original = (await first.json()) as any;
+  expect([...stored.values()][0].headers.get("Cache-Control")).toBe(
+    "public, max-age=600",
+  );
+  stars[0] = 450;
+  await run(now + 3_600_000);
+  const hit = await api("/api/projects");
+  expect(hit.headers.get("Cache-Control")).toBe("no-store");
+  expect(await hit.json()).toEqual(original);
+  stored.clear(); // The next read after the edge snapshot expires uses current observations.
+  const fresh = await api("/api/projects");
+  expect(fresh.headers.get("Cache-Control")).toBe("no-store");
+  expect(((await fresh.json()) as any).items[0].stars).toBe(450);
+  expect(
+    (await api("/api/projects/R_0/history?window=24")).headers.get(
+      "Cache-Control",
+    ),
+  ).toBe("no-store");
 });
 
 test("aggregates known partial deltas and negative values across all tracked projects", async () => {

@@ -133,6 +133,7 @@ function useApi<T>(
       try {
         const response = await fetch(`${apiBase}${path}`, {
           signal: controller.signal,
+          cache: "no-store",
         });
         if (!response.ok) {
           const body = (await response.json().catch(() => null)) as {

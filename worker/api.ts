@@ -136,6 +136,7 @@ export async function query(request: Request, env: Env): Promise<Response> {
   const headers = new Headers({
     Vary: "Origin",
     "X-Content-Type-Options": "nosniff",
+    "Cache-Control": "no-store",
   });
   if (origin) headers.set("Access-Control-Allow-Origin", origin);
   const json = (value: unknown, status = 200) =>
@@ -163,13 +164,19 @@ export async function query(request: Request, env: Env): Promise<Response> {
       const cached = await cache?.match(cacheKey);
       if (cached) {
         const response = new Response(cached.body, cached);
+        response.headers.set("Cache-Control", "no-store");
         response.headers.delete("Access-Control-Allow-Origin");
         if (origin) response.headers.set("Access-Control-Allow-Origin", origin);
         return response;
       }
-      headers.set("Cache-Control", "public, max-age=600");
       const response = json(await list(env, url, now));
-      if (cache) await cache.put(cacheKey, response.clone());
+      if (cache) {
+        // Cache only within this Worker. Zone browser-TTL settings must not
+        // extend the visible age beyond the ten-minute observation snapshot.
+        const stored = response.clone();
+        stored.headers.set("Cache-Control", "public, max-age=600");
+        await cache.put(cacheKey, stored);
+      }
       return response;
     }
     const match = url.pathname.match(/^\/api\/projects\/([^/]+)\/history$/);
