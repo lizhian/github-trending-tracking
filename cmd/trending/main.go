@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -32,6 +33,7 @@ func main() {
 	}
 }
 func run(args []string) error {
+	startedAt := time.Now().UnixMilli()
 	command := "serve"
 	if len(args) > 0 {
 		command, args = args[0], args[1:]
@@ -96,11 +98,24 @@ func run(args []string) error {
 		defer store.Close()
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
+		token, err := runtimeSecret("GITHUB_TOKEN")
+		if err != nil {
+			return err
+		}
+		fallback, err := runtimeSecret("LINUXDO_RSS_FALLBACK_URL")
+		if err != nil {
+			return err
+		}
 		stopBackups, err := startBackupLoop(ctx, store)
 		if err != nil {
 			return err
 		}
 		defer stopBackups()
+		scheduler := tracking.NewScheduler(store, tracking.SchedulerOptions{Token: token, FallbackURL: fallback, StartedAt: startedAt})
+		scheduled := make(chan struct{})
+		go func() { defer close(scheduled); scheduler.Run(ctx) }()
+		defer func() { stop(); <-scheduled }()
+		log.Printf("collection waits until %s", time.UnixMilli(tracking.NextSlot(startedAt)).UTC().Format(time.RFC3339))
 		server := &http.Server{Addr: *listen, Handler: tracking.Handler(store, tracking.HTTPOptions{AllowedOrigin: os.Getenv("ALLOWED_ORIGIN"), StaticDir: *static}), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 		go func() {
 			<-ctx.Done()
@@ -116,4 +131,19 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("unknown command %q (use serve, init, import, verify, backup, restore, version)", command)
 	}
+}
+
+// Runtime secrets are never passed to frontend builds or included in logs.
+func runtimeSecret(name string) (string, error) {
+	if value := os.Getenv(name); value != "" {
+		return strings.TrimSpace(value), nil
+	}
+	if path := os.Getenv(name + "_FILE"); path != "" {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("cannot read runtime secret %s", name)
+		}
+		return strings.TrimSpace(string(raw)), nil
+	}
+	return "", nil
 }
