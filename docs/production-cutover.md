@@ -65,7 +65,7 @@ image='ghcr.io/lizhian/github-trending-tracking@sha256:88a4eec656e404b3439421527
    docker compose -f /root/docker-compose.yml exec -T caddy caddy reload --config /etc/caddy/Caddyfile --address unix//run/caddy-admin.sock
    ```
 
-   先核对源站 HTTPS 页面、静态资源、两类型列表与代表性详情，再把原域名 DNS 入口切到加州服务器，同时移除旧 `github.lizhian.cc.cd/api/*` Worker 路由。Pages 的旧绑定作为七天回退资料保留，但页面与 API 的实际请求都必须到新应用。验证同域请求返回正确 JSON，不以 HTTP 200 的 HTML 错误页算通过。
+   先核对源站 HTTPS 页面、静态资源、两类型列表与代表性详情，再把原域名 DNS 入口切到加州服务器，同时移除旧 `github.lizhian.cc.cd/api/*` Worker 路由。Pages 的旧项目和自定义域名资源保留七天；DNS 从 CNAME 改为 A 可能使 Pages 绑定变为 `deactivated`，回退时需重新验证。页面与 API 的实际请求都必须到新应用。验证同域请求返回正确 JSON，不以 HTTP 200 的 HTML 错误页算通过。
 
 5. **验证真实运行。** 对公开域名检查类型切换、筛选排序分页、四窗口详情、URL 恢复及主题。首次 HTTP 读取已有历史只完成查询验收；等待严格晚于进程启动的下一应采时段，通过新的成功时间、Star 观测点与查询结果验收采集。停机缺测照实保留。确认服务器有新的完整备份；按 [恢复流程](go-runtime.md#停机恢复) 在空目录演练恢复、核对全量审计及 HTTP，并验收恢复后下一轮真实采集。停止当前应用后才能启动恢复副本的采集，保持单活。
 
@@ -82,8 +82,8 @@ image='ghcr.io/lizhian/github-trending-tracking@sha256:88a4eec656e404b3439421527
    docker compose -f /root/docker-compose.yml run --rm --no-deps github-trending-tracking backup
    ```
 
-2. 从已保存配置恢复旧 Pages 页面入口、DNS 和 `/api/*` Worker 路由；先保持旧 Cron 关闭，核对旧页面/API 确实读取 D1、新容器没有运行。
-3. 最后恢复旧 Cron，等待传播并核对一次旧调度成功。记录唯一活跃库已变为 D1。旧站暂缺切换后的新 SQLite 观测；新库及备份继续保留，不做反向同步，不称为无损切回。
+2. 从已保存配置恢复旧 Pages 页面入口、DNS CNAME 和 `/api/*` Worker 路由，保持旧 Cron 关闭、Go 容器停止。本次环境中，恢复 CNAME 后 Pages 自定义域名仍为 `deactivated`；在 Pages 控制台重试验证，或调用官方 [Retry custom domain validation](https://developers.cloudflare.com/api/resources/pages/subresources/projects/subresources/domains/methods/edit/)：`PATCH /accounts/{account_id}/pages/projects/github-trending-tracking/domains/github.lizhian.cc.cd`。等待绑定状态变为 `active`；重试后的短暂 `error` 也不算恢复完成。
+3. 绑定恢复后，通过公开域名确认旧 HTML/静态资源、两类型列表和代表性详情均可用、API 确实读取 D1，并再次确认 Go 容器停止。全部通过后才恢复旧 Cron，等待传播并核对一次旧调度成功。记录唯一活跃库已变为 D1。旧站暂缺切换后的新 SQLite 观测；新库及备份继续保留，不做反向同步，不称为无损切回。
 
 回退演练至少核对停止/启动顺序、实际路由和数据库去向；未实际执行的步骤在 Issue 标为待验收。
 
