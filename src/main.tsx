@@ -234,16 +234,76 @@ function Icon({
     </svg>
   );
 }
+function ChartPlaceholder() {
+  return (
+    <div className="chart-placeholder">
+      <svg
+        className="chart chart-skeleton"
+        viewBox="0 0 288 145"
+        aria-hidden="true"
+      >
+        {[29, 67.5, 106].map((y) => (
+          <g key={y}>
+            <line className="chart-grid" x1="4" x2="232" y1={y} y2={y} />
+            <rect
+              className="skeleton-mark"
+              x="240"
+              y={y - 3}
+              width="28"
+              height="6"
+              rx="2"
+            />
+          </g>
+        ))}
+        <rect
+          className="skeleton-mark"
+          x="4"
+          y="129"
+          width="32"
+          height="6"
+          rx="2"
+        />
+        <rect
+          className="skeleton-mark"
+          x="200"
+          y="129"
+          width="32"
+          height="6"
+          rx="2"
+        />
+      </svg>
+      <p className="chart-loading-label" role="status">
+        正在加载趋势
+      </p>
+    </div>
+  );
+}
 function Chart({ trend }: { trend: Trend }) {
   const points = trend.points;
   const min = Math.min(...points.map((point) => point[1]));
   const max = Math.max(...points.map((point) => point[1]));
+  const ticks = [max, (max + min) / 2, min].map(Math.round);
+  const distinct = [...new Set(ticks)];
+  const format = (value: number, precision: number) =>
+    value > 1000 ? `${(value / 1000).toFixed(precision)}k` : number(value);
+  let precision = 1;
+  while (
+    precision < 3 &&
+    new Set(distinct.map((value) => format(value, precision))).size <
+      distinct.length
+  )
+    precision++;
+  const tickLabels = ticks.map((value) => format(value, precision));
+  const viewWidth = Math.max(
+    288,
+    248 + Math.max(...tickLabels.map((label) => label.length)) * 7,
+  );
   const first = points[0]?.[0] ?? 0;
   const last = points.at(-1)?.[0] ?? first;
   const range = max - min || 1;
   const xy = ([at, stars]: Point) => [
     first === last ? 232 : 4 + ((at - first) / (last - first)) * 228,
-    106 - ((stars - min) / range) * 77,
+    min === max ? 67.5 : 106 - ((stars - min) / range) * 77,
   ];
   const segments: Point[][] = [];
   for (const point of points) {
@@ -258,19 +318,19 @@ function Chart({ trend }: { trend: Trend }) {
   return (
     <svg
       className="chart"
-      viewBox="0 0 270 145"
+      viewBox={`0 0 ${viewWidth} 145`}
       role="img"
       aria-label={`Star 总数曲线，${stateLabel(trend)}，净增量 ${signed(trend.delta)}，${trend.gaps.length} 段缺测`}
     >
       {[29, 67.5, 106].map((y, index) => (
         <g key={y}>
           <line className="chart-grid" x1="4" x2="232" y1={y} y2={y} />
-          <text x="240" y={y + 3}>
-            {new Intl.NumberFormat("zh-CN", {
-              notation: "compact",
-              maximumFractionDigits: 1,
-            }).format(max - ((max - min) * index) / 2)}
-          </text>
+          {(min === max ? index === 1 : ticks.indexOf(ticks[index]) === index) && (
+            <text className="chart-tick" x="240" y={y + 3}>
+              <title>{number(ticks[index])} Star</title>
+              {tickLabels[index]}
+            </text>
+          )}
         </g>
       ))}
       {segments.map((segment, index) => (
@@ -417,42 +477,45 @@ function Details({
         </div>
       </div>
       <div className="history-region" aria-busy={history.loading}>
-        {history.loading ? (
-          <p className="chart-message" role="status">
-            加载中…
-          </p>
-        ) : history.error ? (
-          <div className="chart-message" role="alert">
-            <p>{history.error}</p>
-            <button
-              type="button"
-              onClick={() => setRetry((value) => value + 1)}
-            >
-              重试历史查询
-            </button>
-            <button type="button" onClick={onRefresh}>
-              刷新项目列表
-            </button>
-          </div>
-        ) : trend && current ? (
-          <>
-            <div className="chart-heading">
-              <span>Star 总数</span>
-              <span>局部纵轴</span>
+        <div className="chart-heading">
+          <span>Star 总数</span>
+          <span>局部纵轴</span>
+        </div>
+        <div className="chart-stage">
+          {history.loading ? (
+            <ChartPlaceholder />
+          ) : history.error ? (
+            <div className="chart-message" role="alert">
+              <p>{history.error}</p>
+              <button
+                type="button"
+                onClick={() => setRetry((value) => value + 1)}
+              >
+                重试历史查询
+              </button>
+              <button type="button" onClick={onRefresh}>
+                刷新项目列表
+              </button>
             </div>
-            {trend.points.length ? (
+          ) : trend && current ? (
+            trend.points.length ? (
               <Chart trend={trend} />
             ) : (
               <p className="chart-message">积累中</p>
-            )}
-            {(current.gaps.length > 0 || current.stale) && (
+            )
+          ) : null}
+        </div>
+        <div className="chart-feedback">
+          {!history.loading &&
+            !history.error &&
+            current &&
+            (current.gaps.length > 0 || current.stale) && (
               <p className="chart-note" role="status">
                 {current.gaps.length ? `缺测 ${current.gaps.length} 段` : ""}
                 {current.stale ? " 历史数据过期" : ""}
               </p>
             )}
-          </>
-        ) : null}
+        </div>
       </div>
       <div className="periods" aria-label="趋势窗口">
         {WINDOWS.map((hours) => (
@@ -627,8 +690,15 @@ function App() {
   }, [listPath]);
   useLayoutEffect(() => {
     const alignHeader = () => {
-      if (tableScroll.current && headerScroll.current)
-        headerScroll.current.style.width = `${tableScroll.current.clientWidth}px`;
+      const viewport = tableScroll.current;
+      if (viewport && headerScroll.current) {
+        const style = getComputedStyle(viewport);
+        const width =
+          viewport.clientWidth -
+          parseFloat(style.paddingInlineStart) -
+          parseFloat(style.paddingInlineEnd);
+        headerScroll.current.style.width = `${Math.max(0, width)}px`;
+      }
     };
     const observer = new ResizeObserver(alignHeader);
     if (tableScroll.current) observer.observe(tableScroll.current);

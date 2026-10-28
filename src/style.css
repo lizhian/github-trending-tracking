@@ -1827,3 +1827,62 @@ html {
     min-width: 608px;
   }
 }
+
+/* Physical safe space also protects content under overlay scrollbars. */
+.table-wrap {
+  padding-inline-end: var(--space-md);
+  padding-block-end: var(--space-md);
+}
+@media (min-width: 761px) {
+  .inspector {
+    padding-inline-end: var(--space-md);
+    scrollbar-gutter: stable;
+  }
+}
+:root {
+  --chart-height: 148px;
+}
+.chart-stage {
+  height: var(--chart-height);
+  margin-top: var(--space-xs);
+}
+.chart-stage .chart {
+  height: 100%;
+  margin-top: 0;
+  overflow: clip;
+}
+.chart-stage .chart-message {
+  min-height: 0;
+  height: 100%;
+}
+.chart-placeholder {
+  position: relative;
+  height: 100%;
+}
+.skeleton-mark {
+  fill: var(--color-paper-3);
+}
+.chart-loading-label {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: fit-content;
+  height: fit-content;
+  padding: var(--space-2xs) var(--space-xs);
+  color: var(--color-muted);
+  background: var(--color-paper);
+  border-radius: var(--radius-control);
+  font-size: 12px;
+}
+.chart-feedback {
+  min-height: 28px;
+  padding-block: var(--space-2xs);
+}
+.chart-feedback .chart-note {
+  margin: 0;
+}
+@media (max-width: 760px) {
+  :root {
+    --chart-height: 180px;
+  }
+}
