@@ -1290,9 +1290,24 @@ td.numeric {
 
 .repo-button {
   width: 100%;
+  white-space: normal;
+}
+.repo-name {
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: middle;
   white-space: nowrap;
   overflow: clip;
   text-overflow: ellipsis;
+}
+.new-admission {
+  display: inline-block;
+  margin-left: var(--space-xs);
+  vertical-align: middle;
+  white-space: nowrap;
+  color: var(--color-muted);
+  font-size: 11px;
+  font-weight: 400;
 }
 .table-wrap .repo-description {
   font-size: 12px;

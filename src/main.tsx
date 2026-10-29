@@ -42,6 +42,13 @@ const time = (value: number | null | undefined) =>
   value
     ? new Date(value).toLocaleString("zh-CN", { hour12: false })
     : "尚无成功记录";
+const newAdmissionLabel = (enteredAt: number, now: number) => {
+  const elapsed = now - enteredAt;
+  if (!Number.isFinite(enteredAt) || elapsed < 0 || elapsed >= 24 * 3_600_000)
+    return null;
+  const hours = Math.floor(elapsed / 3_600_000);
+  return hours === 0 ? "🌟 just now" : `🌟 ${hours}h ago`;
+};
 const stateLabel = (trend: TrendSummary) =>
   trend.state === "accumulating"
     ? "积累中"
@@ -642,6 +649,11 @@ function Details({
 }
 function App() {
   const [query, setQuery] = useState(readLocation);
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const [draft, setDraft] = useState(query.q);
   const [refresh, setRefresh] = useState(0);
   const [submissionOpen, setSubmissionOpen] = useState(false);
@@ -1180,6 +1192,7 @@ function App() {
                       {data?.items.length ? (
                         data.items.map((project, index) => {
                           const [owner, ...name] = project.name.split("/");
+                          const admissionLabel = newAdmissionLabel(project.enteredAt, now);
                           return (
                             <tr
                               key={project.id}
@@ -1198,12 +1211,19 @@ function App() {
                                   type="button"
                                   className="repo-button"
                                   aria-pressed={selected?.id === project.id}
-                                  aria-label={`查看 ${project.name} 趋势`}
+                                  aria-label={`查看 ${project.name} 趋势${admissionLabel ? `，新入库 ${admissionLabel}` : ""}`}
                                   title={project.name}
                                 >
-                                  <span className="owner">{owner}</span>
-                                  <span className="slash">/</span>
-                                  {name.join("/")}
+                                  <span className="repo-name">
+                                    <span className="owner">{owner}</span>
+                                    <span className="slash">/</span>
+                                    {name.join("/")}
+                                  </span>
+                                  {admissionLabel && (
+                                    <span className="new-admission" title={`新入库：${time(project.enteredAt)}`}>
+                                      {admissionLabel}
+                                    </span>
+                                  )}
                                 </button>
                                 <p
                                   className="repo-description"
