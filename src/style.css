@@ -1720,7 +1720,9 @@ html {
     min-width: min(100%, 572px);
   }
   .list-controls .heading-scroll {
-    flex: 0 0 100%;
+    /* Let alignHeader's measured width account for body padding and scrollbar. */
+    flex: 0 0 auto;
+    width: 100%;
     min-width: 0;
   }
 }
