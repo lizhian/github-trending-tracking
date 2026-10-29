@@ -55,7 +55,8 @@ func (l *submissionLimiter) allow(ip string, now int64) (bool, int) {
 	return true, 0
 }
 
-func parseProxyNetworks(raw string) ([]netip.Prefix, error) {
+// ParseProxyNetworks validates the optional comma-separated trusted CIDRs.
+func ParseProxyNetworks(raw string) ([]netip.Prefix, error) {
 	var networks []netip.Prefix
 	for _, part := range strings.Split(raw, ",") {
 		if strings.TrimSpace(part) == "" {
@@ -69,9 +70,6 @@ func parseProxyNetworks(raw string) ([]netip.Prefix, error) {
 	}
 	return networks, nil
 }
-
-// ParseProxyNetworks validates the optional comma-separated trusted CIDRs.
-func ParseProxyNetworks(raw string) ([]netip.Prefix, error) { return parseProxyNetworks(raw) }
 
 func clientAddress(r *http.Request, networks []netip.Prefix) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)

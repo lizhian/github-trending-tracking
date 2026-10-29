@@ -82,3 +82,7 @@ go run ./cmd/trending verify --db /private/path/restored-data/tracking.sqlite \
 5. 立即经同源列表与详情读取恢复数据；恢复后的采集仍等待严格晚于启动时间的下一应采时段，不补造停机历史。在下一轮核对新的真实采集成功后再完成恢复验收。
 
 实现已通过真实 WAL 并发事务一致快照、停止应用后恢复到空目录、完整审计等价及 HTTP 历史查询验证；生产恢复与下一轮真实采集证据记录在 [#26](https://github.com/lizhian/github-trending-tracking/issues/26)。
+
+## 投稿版本升级
+
+投稿功能使用 schema 4，旧 schema 3 备份仍可验证和恢复，但运行前必须在停机状态执行 `trending migrate --db /data/tracking.sqlite`。命令不会创建缺失数据库。先制作一致备份，再停止服务、迁移并启动兼容镜像；完整流程及可信代理限流配置见[仓库投稿](submissions.md)。

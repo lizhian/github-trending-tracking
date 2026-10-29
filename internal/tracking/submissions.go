@@ -143,15 +143,3 @@ func updateSubmission(ctx context.Context, tx *sql.Tx, sub *Submission) error {
 	_, err := tx.ExecContext(ctx, `UPDATE submissions SET name=?,repo_id=?,phase=?,github=?,linuxdo=?,repository_attempts=?,readme_attempts=?,next_at=?,finished_at=?,message=?,merged_into=? WHERE id=?`, sub.Name, sub.RepoID, sub.Phase, sub.GitHub, sub.Linuxdo, sub.RepositoryAttempts, sub.ReadmeAttempts, sub.NextAt, sub.FinishedAt, sub.Message, sub.MergedInto, sub.ID)
 	return err
 }
-
-func (s *Store) saveSubmission(ctx context.Context, sub *Submission) error {
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if err = updateSubmission(ctx, tx, sub); err != nil {
-		return err
-	}
-	return tx.Commit()
-}

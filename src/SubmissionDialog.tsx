@@ -82,7 +82,7 @@ export function SubmissionDialog({
           signal: controller.signal,
           cache: "no-store",
         });
-        const value = await response.json();
+        const value = await response.json().catch(() => { throw new Error("服务暂时不可用，请稍后重试"); });
         if (!response.ok) {
           if (response.status === 404) {
             setID("");
@@ -122,7 +122,7 @@ export function SubmissionDialog({
         signal: controller.signal,
         cache: "no-store",
       });
-      const value = await response.json();
+      const value = await response.json().catch(() => { throw new Error("服务暂时不可用，请稍后重试"); });
       if (!response.ok) throw new Error(value.error || "投稿失败，请稍后重试");
       if (controller.signal.aborted) return;
       const next = value as Submission;

@@ -54,23 +54,14 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 func (s *Scheduler) Tick(ctx context.Context) (err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	now := s.upstream.clock.Now()
-	hosts := map[string]*hostState{}
-	if _, err = s.store.State("upstream", &hosts); err != nil {
+	finish, err := s.lockUpstream()
+	if err != nil {
 		return err
 	}
-	if hosts == nil {
-		hosts = map[string]*hostState{}
-	}
-	s.upstream.hosts = hosts
-	priorHosts := jsonText(hosts)
+	now := s.upstream.clock.Now()
 	defer func() {
-		if jsonText(hosts) != priorHosts {
-			if e := s.store.SetState("upstream", hosts); err == nil {
-				err = e
-			}
+		if e := finish(); err == nil {
+			err = e
 		}
 		if err != nil && ctx.Err() == nil {
 			_ = s.store.SetState("scheduler", runState{AttemptedAt: now, Failed: 1, Error: strptr("采集或数据库任务失败")})
@@ -557,4 +548,26 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		}
 	}
 	return d.changed || pendingChanged || len(changes) > 0, nil
+}
+
+// Both sampling and submission stages use one owner for host state and persistence.
+func (s *Scheduler) lockUpstream() (func() error, error) {
+	s.mu.Lock()
+	hosts := map[string]*hostState{}
+	if _, err := s.store.State("upstream", &hosts); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	if hosts == nil {
+		hosts = map[string]*hostState{}
+	}
+	s.upstream.hosts = hosts
+	before := jsonText(hosts)
+	return func() error {
+		defer s.mu.Unlock()
+		if jsonText(hosts) != before {
+			return s.store.SetState("upstream", hosts)
+		}
+		return nil
+	}, nil
 }

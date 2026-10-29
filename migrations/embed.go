@@ -2,7 +2,7 @@ package migrations
 
 import "embed"
 
-// Files is the unchanged business schema shared by offline initialization and import.
+// Files contains the ordered SQLite schema migrations used by initialization and offline upgrades.
 //
 //go:embed *.sql
 var Files embed.FS

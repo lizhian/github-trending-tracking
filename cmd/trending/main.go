@@ -108,7 +108,15 @@ func run(args []string) error {
 			return err
 		}
 		defer stopBackups()
+		proxies, err := tracking.ParseProxyNetworks(os.Getenv("TRUSTED_PROXY_CIDRS"))
+		if err != nil {
+			return fmt.Errorf("invalid TRUSTED_PROXY_CIDRS: %w", err)
+		}
 		scheduler := tracking.NewScheduler(store, tracking.SchedulerOptions{Token: token, FallbackURL: fallback, StartedAt: startedAt, LinuxdoCleanup: *linuxdoCleanup, BackupDir: env("BACKUP_DIR", "")})
+		submissions := tracking.NewSubmissionWorker(scheduler)
+		submitted := make(chan struct{})
+		go func() { defer close(submitted); submissions.Run(ctx) }()
+		defer func() { stop(); <-submitted }()
 		scheduled := make(chan struct{})
 		go func() { defer close(scheduled); scheduler.Run(ctx) }()
 		defer func() { stop(); <-scheduled }()
@@ -117,7 +125,7 @@ func run(args []string) error {
 		} else {
 			log.Printf("collection requires Linux.do cleanup clearance and waits until %s", time.UnixMilli(tracking.NextSlot(startedAt)).UTC().Format(time.RFC3339))
 		}
-		server := &http.Server{Addr: *listen, Handler: tracking.Handler(store, tracking.HTTPOptions{AllowedOrigin: os.Getenv("ALLOWED_ORIGIN"), StaticDir: *static}), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
+		server := &http.Server{Addr: *listen, Handler: tracking.Handler(store, tracking.HTTPOptions{AllowedOrigin: os.Getenv("ALLOWED_ORIGIN"), StaticDir: *static, Submissions: submissions, TrustedProxies: proxies}), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 		go func() {
 			<-ctx.Done()
 			shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)

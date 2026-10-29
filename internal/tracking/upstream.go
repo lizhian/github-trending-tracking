@@ -46,9 +46,10 @@ func (d *deferredRequest) Error() string {
 }
 
 type upstream struct {
-	hosts  map[string]*hostState
-	clock  Clock
-	client *http.Client
+	hosts       map[string]*hostState
+	clock       Clock
+	client      *http.Client
+	rateLimited bool
 }
 
 func (u *upstream) host(raw string) *hostState {
@@ -146,6 +147,7 @@ func (u *upstream) text(ctx context.Context, raw, label string, body []byte, tok
 	defer res.Body.Close()
 	limited := res.StatusCode == 429 || res.Header.Get("Retry-After") != "" || res.Header.Get("X-RateLimit-Remaining") == "0"
 	if limited {
+		u.rateLimited = true
 		u.cooldown(raw, res.Header, Hour)
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 || (label == "GitHub" && res.StatusCode != http.StatusOK) {
@@ -156,6 +158,7 @@ func (u *upstream) text(ctx context.Context, raw, label string, body []byte, tok
 			}
 			lower := strings.ToLower(b)
 			if strings.Contains(lower, "secondary rate limit") || strings.Contains(lower, "api rate limit exceeded") {
+				u.rateLimited = true
 				u.cooldown(raw, res.Header, Hour)
 			}
 		}
@@ -197,15 +200,16 @@ type repository struct {
 			} `json:"topic"`
 		} `json:"nodes"`
 	} `json:"repositoryTopics"`
-	Stars *int64 `json:"stargazerCount"`
+	Stars   *int64 `json:"stargazerCount"`
+	Private *bool  `json:"isPrivate"`
 }
 
 func (u *upstream) repositories(ctx context.Context, token string, targets []string, byID bool, mode string) (repos []*repository, err error) {
 	const endpoint = "https://api.github.com/graphql"
 	defer func() {
-		if err != nil {
+		if err != nil && ctx.Err() == nil {
 			var deferred *deferredRequest
-			if !errors.As(err, &deferred) {
+			if !errors.As(err, &deferred) && !errors.Is(err, errSubmissionRepositoryMissing) {
 				u.cooldown(endpoint, nil, 30*60_000)
 			}
 		}
@@ -213,8 +217,11 @@ func (u *upstream) repositories(ctx context.Context, token string, targets []str
 	fields := "id stargazerCount"
 	if mode == "identity" {
 		fields = "id nameWithOwner"
-	} else if mode == "metadata" {
+	} else if mode == "metadata" || mode == "submission" {
 		fields = "id nameWithOwner description primaryLanguage { name } repositoryTopics(first:100) { nodes { topic { name } } } stargazerCount"
+	}
+	if mode == "submission" {
+		fields += " isPrivate"
 	}
 	query := ""
 	if byID {
@@ -250,7 +257,15 @@ func (u *upstream) repositories(ctx context.Context, token string, targets []str
 	}
 	for _, problem := range result.Errors {
 		if problem.Type == "RATE_LIMITED" || problem.Extensions.Code == "RATE_LIMITED" || strings.Contains(strings.ToLower(problem.Message), "rate limit") {
+			u.rateLimited = true
 			u.cooldown(endpoint, nil, Hour)
+		}
+	}
+	if mode == "submission" && len(result.Errors) > 0 {
+		for _, problem := range result.Errors {
+			if problem.Type != "NOT_FOUND" && problem.Extensions.Code != "NOT_FOUND" {
+				return nil, errors.New("GitHub GraphQL unavailable")
+			}
 		}
 	}
 	if result.Data == nil {
@@ -286,10 +301,13 @@ func (u *upstream) repositories(ctx context.Context, token string, targets []str
 		if r.Stars == nil || *r.Stars < 0 || *r.Stars > 9_007_199_254_740_991 {
 			continue
 		}
-		if mode == "metadata" && (!repoNamePattern.MatchString(r.Name) || (r.Topics == nil || r.Topics.Nodes == nil)) {
+		if (mode == "metadata" || mode == "submission") && (!repoNamePattern.MatchString(r.Name) || (r.Topics == nil || r.Topics.Nodes == nil)) {
 			continue
 		}
 		repos[i] = &r
+	}
+	if mode == "submission" && len(repos) == 1 && repos[0] == nil && len(result.Errors) > 0 {
+		return nil, errSubmissionRepositoryMissing
 	}
 	return repos, nil
 }
