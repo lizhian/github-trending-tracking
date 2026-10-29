@@ -39,7 +39,7 @@ docker run -d --name github-trending-tracking \
   github-trending-tracking:local
 ```
 
-镜像只包含静态前端、Go 二进制和 HTTPS 根证书，运行时不需要 Node。整个 `/data` 挂载持久目录；重建容器继续读取原数据。HTTPS 入口把页面和 `/api/*` 一起转发到应用。采集 Token 和备用 RSS 仅在运行时提供，不能使用构建参数或 `VITE_*`。
+镜像只包含静态前端、Go 二进制和 HTTPS 根证书，运行时不需要 Node。整个 `/data` 挂载持久目录；重建容器继续读取原数据。HTTPS 入口把页面和 `/api/*` 一起转发到应用。采集 Token 仅在运行时提供，不能使用构建参数或 `VITE_*`。
 
 采集和凭据配置见 [Go 采集说明](go-collection.md)，镜像发布、更新与兼容版本回退见 [版本镜像](image-release.md)。
 

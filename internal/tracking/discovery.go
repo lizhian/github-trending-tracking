@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"fmt"
 	"io"
 	"regexp"
 	"slices"
@@ -53,6 +54,16 @@ type source struct {
 	scheduled          bool
 }
 
+var linuxRSSURLs = []string{
+	"https://linux.do/c/develop/4.rss",
+	"https://linux.do/tag/2234-tag/2234.rss",
+	"https://linux.do/c/domestic/98.rss",
+	"https://linux.do/tag/1451-tag/1451.rss",
+	"https://rss.yicai-tech.com/rss/from/https://linux.do/c/develop/4.rss",
+	"https://rss.yicai-tech.com/rss/from/https://linux.do/tag/2234-tag/2234.rss",
+	"https://rss.yicai-tech.com/rss/from/https://linux.do/c/domestic/98.rss",
+}
+
 var sources = []source{
 	{"github-daily", "github", "https://rsshub-balancer.virworks.moe/github/trending/daily/any", "github", true},
 	{"github-weekly", "github", "https://rsshub-balancer.virworks.moe/github/trending/weekly/any", "github", false},
@@ -62,7 +73,7 @@ var sources = []source{
 	{"opengithubs-daily", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-daily-rank/refs/heads/main/README.md", "github", false},
 	{"opengithubs-weekly", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-weekly-rank/refs/heads/main/README.md", "github", false},
 	{"opengithubs-monthly", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-monthly-rank/refs/heads/main/README.md", "github", false},
-	{"linuxdo", "linuxdo", "https://linux.do/c/develop/4.rss", "linux.do", true},
+	{"linuxdo", "linuxdo", linuxRSSURLs[0], "linux.do", true},
 }
 var projectTypes = []string{"github", "linux.do"}
 
@@ -233,53 +244,56 @@ func parseSource(text, kind string) ([]string, error) {
 	return values, nil
 }
 
-type linuxFailure struct {
-	message string
-	retryAt int64
+type linuxDiscovery struct {
+	names     []string
+	failure   string
+	retryAt   int64
+	attempted bool
+	complete  bool
 }
 
-func (e *linuxFailure) Error() string { return e.message }
-func (u *upstream) linuxRepositories(ctx context.Context, primary, fallback string, deadline int64) ([]string, error) {
-	if fallback == "" {
-		text, e := u.text(ctx, primary, "RSS", nil, "", deadline)
-		if e != nil {
-			return nil, e
-		}
-		return parseSource(text, "linuxdo")
-	}
+func (u *upstream) linuxRepositories(ctx context.Context, deadline int64) linuxDiscovery {
+	result := linuxDiscovery{complete: true}
 	messages := []string{}
-	ready := []int64{}
-	attempted := false
-	for i, raw := range []string{primary, fallback} {
-		text, e := u.text(ctx, raw, "RSS", nil, "", deadline)
-		if e == nil {
-			var names []string
-			names, e = parseSource(text, "linuxdo")
-			if e == nil {
-				return names, nil
-			}
+	seen := map[string]bool{}
+	for i, raw := range linuxRSSURLs {
+		text, err := u.text(ctx, raw, "RSS", nil, "", deadline)
+		var names []string
+		if err == nil {
+			names, err = parseSource(text, "linuxdo")
 		}
 		var deferred *deferredRequest
-		if errors.As(e, &deferred) {
+		if errors.As(err, &deferred) {
+			result.complete = false
 			if deferred.retryAt == 0 {
-				return nil, e
+				break
 			}
-			ready = append(ready, deferred.retryAt)
-		} else {
-			attempted = true
-			ready = append(ready, u.blocked(raw))
+			continue
 		}
-		role := "primary"
-		if i == 1 {
-			role = "fallback"
+		result.attempted = true
+		if err != nil {
+			result.complete = false
+			messages = append(messages, fmt.Sprintf("RSS %d: %s", i+1, safeError(err)))
+			continue
 		}
-		messages = append(messages, role+": "+safeError(e))
+		for _, name := range names {
+			key := strings.ToLower(name)
+			if !seen[key] {
+				seen[key] = true
+				result.names = append(result.names, name)
+			}
+		}
 	}
-	earliest := slices.Min(ready)
-	if !attempted {
-		return nil, &deferredRequest{earliest}
+	result.failure = strings.Join(messages, "; ")
+	if !result.complete {
+		// A cooling host must not delay another host that can still be queried.
+		ready := u.blocked(linuxRSSURLs[0])
+		for _, raw := range linuxRSSURLs[1:] {
+			ready = min(ready, u.blocked(raw))
+		}
+		result.retryAt = max(u.clock.Now()+retryInterval, ready)
 	}
-	return nil, &linuxFailure{strings.Join(messages, "; "), max(u.clock.Now()+retryInterval, earliest)}
+	return result
 }
 
 type discoveryResult struct {
@@ -354,20 +368,14 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 	}
 	attempted, succeeded := false, false
 	attemptedTypes, succeededTypes := map[string]bool{}, map[string]bool{}
-	fallback := strings.TrimSpace(s.options.FallbackURL)
 	for _, source := range sources {
 		previous := state.Sources[source.id]
 		next := int64(0)
 		if previous != nil {
 			next = previous.NextAt
-			if source.kind == "linuxdo" && fallback != "" && previous.Failed > 0 {
-				retry := previous.RetryAfter
-				if retry == 0 {
-					// Old states without RetryAfter used the three-minute discovery
-					// budget plus a thirty-minute backoff. Keep that existing wait.
-					retry = previous.AttemptedAt + 3*60_000 + 30*60_000
-				}
-				next = min(next, retry)
+			if source.kind == "linuxdo" && previous.Failed > 0 && previous.RetryAfter > 0 {
+				// Older NextAt values may include only the direct host's cooldown.
+				next = min(next, previous.RetryAfter)
 			}
 		}
 		if next > now {
@@ -376,7 +384,29 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 		var values []string
 		var err error
 		if source.kind == "linuxdo" {
-			values, err = u.linuxRepositories(ctx, source.url, fallback, deadline)
+			result := u.linuxRepositories(ctx, deadline)
+			values = result.names
+			if !result.complete {
+				for _, name := range values {
+					add(name, source.typ)
+				}
+				st := sourceState{}
+				if previous != nil {
+					st = *previous
+				}
+				st.NextAt, st.RetryAfter = result.retryAt, result.retryAt
+				if result.attempted {
+					attempted = true
+					attemptedTypes[source.typ] = true
+					st.AttemptedAt, st.Succeeded = now, len(values)
+				}
+				if result.failure != "" {
+					st.Failed, st.Error = 1, strptr(result.failure)
+				}
+				state.Sources[source.id] = &st
+				changed = true
+				continue
+			}
 		} else {
 			label := "RSS"
 			if source.kind == "markdown" {
@@ -404,11 +434,6 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 			}
 			message := safeError(err)
 			retryAt := max(u.clock.Now()+retryInterval, u.blocked(source.url))
-			var linux *linuxFailure
-			if errors.As(err, &linux) {
-				message = linux.message
-				retryAt = linux.retryAt
-			}
 			state.Sources[source.id] = &sourceState{runState: runState{AttemptedAt: now, SucceededAt: successAt, Failed: 1, Error: strptr(message)}, NextAt: retryAt, RetryAfter: u.clock.Now() + retryInterval}
 			continue
 		}

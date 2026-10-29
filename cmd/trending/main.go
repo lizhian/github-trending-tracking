@@ -99,10 +99,6 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		fallback, err := runtimeSecret("LINUXDO_RSS_FALLBACK_URL")
-		if err != nil {
-			return err
-		}
 		stopBackups, err := startBackupLoop(ctx, store)
 		if err != nil {
 			return err
@@ -112,7 +108,7 @@ func run(args []string) error {
 		if err != nil {
 			return fmt.Errorf("invalid TRUSTED_PROXY_CIDRS: %w", err)
 		}
-		scheduler := tracking.NewScheduler(store, tracking.SchedulerOptions{Token: token, FallbackURL: fallback, StartedAt: startedAt, LinuxdoCleanup: *linuxdoCleanup, BackupDir: env("BACKUP_DIR", "")})
+		scheduler := tracking.NewScheduler(store, tracking.SchedulerOptions{Token: token, StartedAt: startedAt, LinuxdoCleanup: *linuxdoCleanup, BackupDir: env("BACKUP_DIR", "")})
 		submissions := tracking.NewSubmissionWorker(scheduler)
 		submitted := make(chan struct{})
 		go func() { defer close(submitted); submissions.Run(ctx) }()

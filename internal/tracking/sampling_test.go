@@ -82,17 +82,17 @@ func TestScheduleUpgradeReplansBothSourcesAndPreservesCooldowns(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	daily, primary, fallback := 0, 0, 0
+	daily, direct, proxy := 0, 0, 0
 	h.sources["https://rsshub-balancer.virworks.moe/github/trending/daily/any"] = func() *http.Response { daily++; return response(`<rss><channel/></rss>`) }
-	h.sources["https://linux.do/c/develop/4.rss"] = func() *http.Response { primary++; return response(`<rss><channel/></rss>`) }
-	h.sources["https://fallback.example/rss?secret=private"] = func() *http.Response { fallback++; return response(`<rss><channel/></rss>`) }
+	h.sources["https://linux.do/c/develop/4.rss"] = func() *http.Response { direct++; return response(`<rss><channel/></rss>`) }
+	h.sources["https://rss.yicai-tech.com/rss/from/https://linux.do/c/develop/4.rss"] = func() *http.Response { proxy++; return response(`<rss><channel/></rss>`) }
 	h.tick(first - 1)
-	if daily+primary+fallback != 0 {
+	if daily+direct+proxy != 0 {
 		t.Fatal("upgrade bypassed the restart gate")
 	}
 	h.tick(first)
-	if daily != 1 || primary != 0 || fallback != 1 {
-		t.Fatal("sources retained their old timetable or bypassed cooling", daily, primary, fallback)
+	if daily != 1 || direct != 0 || proxy != 1 {
+		t.Fatal("sources retained their old timetable or bypassed cooling", daily, direct, proxy)
 	}
 	policy, err := h.store.Policy()
 	if err != nil || policy.Version != 3 || policy.EffectiveAt != effective || policy.HourlyDaytimeAt != first {
@@ -105,8 +105,8 @@ func TestScheduleUpgradeReplansBothSourcesAndPreservesCooldowns(t *testing.T) {
 		t.Fatal("upgrade shortened an existing cooldown", hosts, err)
 	}
 	h.tick(first + tracking.Hour)
-	if daily != 2 || primary != 1 || fallback != 1 {
-		t.Fatal("new schedule did not return to the primary source", daily, primary, fallback)
+	if daily != 2 || direct != 1 || proxy != 2 {
+		t.Fatal("new schedule did not traverse both hosts", daily, direct, proxy)
 	}
 	policy, _ = h.store.Policy()
 	if policy.HourlyDaytimeAt != first {

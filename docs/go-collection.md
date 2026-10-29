@@ -7,13 +7,24 @@
 ## 运行时配置
 
 - `GITHUB_TOKEN`：仅供服务器请求 GitHub GraphQL 和 README REST API，不传给前端或镜像构建；也可使用 `GITHUB_TOKEN_FILE` 指向运行时挂载的秘密文件。读取 README 需要 Contents 读取权限；公开仓库的 404 会匿名复核，不能因 Token 缺少内容权限就判定无 README。
-- `LINUXDO_RSS_FALLBACK_URL`：可选 RSS 备用入口；也可通过 `LINUXDO_RSS_FALLBACK_URL_FILE` 提供。主入口失败或冷却时才使用，合法空 RSS 算成功，下次到期仍优先主入口。实际地址不能写入版本库、公开配置或日志。
 
 变量值优先于对应 `_FILE`。可用宿主权限为 0600 的私有 env 文件经 `docker run --env-file /private/runtime.env …` 注入，或把秘密文件只读挂载到容器。不要在命令行打印秘密。缺少 Token 不妨碍 HTTP 读取，下一轮上游失败会以安全诊断保存，已有有效观测不会被清零。
 
 ## 保持的业务规则
 
-Linux.do 主 RSS 为 `https://linux.do/c/develop/4.rss`，只读取当次 RSS，不额外抓取帖子或回溯历史。Linux.do 仅收录默认分支主 README 原始内容包含大小写敏感字面字符串 `https://linux.do` 的仓库；仅在 RSS 中出现不足以收录，代码块与注释中的标识也算。确认无 README 或无标识的结果按稳定仓库 ID 缓存 24 小时，到期且 RSS 再次发现才重查。在库不持续复查，淘汰后重收录须重新校验。失败待确认，Linux.do 候选单独保存 `readmeNextAt`，不阻塞同仓库的 GitHub 候选；主机冷却仍共享。上线前先完成[存量清洗](linuxdo-cleanup.md)。
+Linux.do 按顺序遍历以下七个固定公开 RSS 入口，成功后仍继续后续入口；只读取当次 RSS，不额外抓取帖子或回溯历史：
+
+1. https://linux.do/c/develop/4.rss
+2. https://linux.do/tag/2234-tag/2234.rss
+3. https://linux.do/c/domestic/98.rss
+4. https://linux.do/tag/1451-tag/1451.rss
+5. https://rss.yicai-tech.com/rss/from/https://linux.do/c/develop/4.rss
+6. https://rss.yicai-tech.com/rss/from/https://linux.do/tag/2234-tag/2234.rss
+7. https://rss.yicai-tech.com/rss/from/https://linux.do/c/domestic/98.rss
+
+七个入口属于一个 Linux.do 趋势源，提取 `description` 和 `content:encoded` 的 GitHub 仓库链接，归一化子路径、去除 `.git` 并忽略大小写去重，保留首次出现的顺序，遍历结束后统一进入候选收录。主备回退及其配置已删除，旧 `LINUXDO_RSS_FALLBACK_URL` 和 `_FILE` 变量不再生效，也不提供自定义列表配置。
+
+Linux.do 仅收录默认分支主 README 原始内容包含大小写敏感字面字符串 `https://linux.do` 的仓库；仅在 RSS 中出现不足以收录，代码块与注释中的标识也算。确认无 README 或无标识的结果按稳定仓库 ID 缓存 24 小时，到期且 RSS 再次发现才重查。在库不持续复查，淘汰后重收录须重新校验。失败待确认，Linux.do 候选单独保存 `readmeNextAt`，不阻塞同仓库的 GitHub 候选；主机冷却仍共享。上线前先完成[存量清洗](linuxdo-cleanup.md)。
 
 GitHub 日榜、Linux.do 与 Star 按上述 18 时段发现/采样（09:00–21:00 每小时，其余时间每两小时）；GitHub 周月榜、HelloGithub all/featured、OpenGithubs 日周月榜仍每日北京时间 09 点到期。每 tick 解析最多 20 条待收录身份，采样最多 100 个不同仓库；同仓库两类型共享一次结果和 24 小时元数据刷新，各自保存独立周期和历史。新类型收录只可复用本轮已成功的单个真实观测，其入库时间和保护期仍从本次收录开始。
 
@@ -21,7 +32,7 @@ GitHub 日榜、Linux.do 与 Star 按上述 18 时段发现/采样（09:00–21:
 
 采样策略版本 3 保留原小时制切换时间 `effectiveAt`，另存 `hourlyDaytimeAt`，以升级进程可采集的下一时段为新计划生效边界。旧历史继续按当时的小时制或九时段计划判断缺测及窗口完整性，新计划沿用 10 分钟过期宽限；不重写快照。GitHub 日榜与 Linux.do 的正常来源下一执行时间同步重排；已有失败重试截止时间及主机 `blockedUntil` 原样保留到期，之后新失败才使用 5 分钟规则。
 
-每次发现共用 3 分钟预算，HelloGithub 详情最多 20 次；预算不足延后，不计来源失败。Linux.do 主备共享预算、各自主机冷却独立，日志和 HTTP 只保存安全诊断。
+每次发现共用 3 分钟预算，HelloGithub 详情最多 20 次；预算不足延后，不计来源失败。Linux.do 七个入口共享预算，按域名共用冷却；直连域名冷却不阻止代理域名。部分失败仍处理成功候选，同时按一个来源记录入口编号及安全错误，至少 5 分钟后重试整组。全部入口解析成功（包括全部为空）才刷新整组成功时间并恢复正常调度；部分完成保留上次成功时间。冷却跳过或预算耗尽不新增请求失败，也不清除已有真实失败，已发现候选仍保留。预算耗尽至少 5 分钟后重试；两域名都冷却时不早于最早可请求时间。不保存逐入口重试状态，每次从列表开头遍历。日志和 HTTP 只保存安全诊断。
 
 GitHub 的 `user-attachments` 路径属于附件，发现与投稿共用的链接解析器会直接排除；每次进入收录处理时也复验已持久化的 pending，将此类旧候选移出队列并保存，即使本轮没有新的发现。
 
@@ -33,7 +44,7 @@ GitHub 的 `user-attachments` 路径属于附件，发现与投稿共用的链�
 
 ## 验证
 
-`go test ./...` 在真实临时 SQLite 上通过调度入口和公开 HTTP 验证启动门槛、跨午夜及更长冷却、共享类型独立历史与重试、100 仓库批次、最新轮次与缺测、主备/解析/预算、保护期淘汰和重收录，以及旧周期结果隔离。采集变更在生产以新的成功时间和真实观测验收；历史数据可读只证明查询正常。
+`go test ./...` 在真实临时 SQLite 上通过调度入口和公开 HTTP 验证启动门槛、跨午夜及更长冷却、共享类型独立历史与重试、100 仓库批次、最新轮次与缺测、多入口遍历、去重、部分失败与整组重试、冷却/解析/预算、保护期淘汰和重收录，以及旧周期结果隔离。采集变更在生产以新的成功时间和真实观测验收；历史数据可读只证明查询正常。
 
 ## 项目网站
 

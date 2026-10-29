@@ -217,7 +217,7 @@ func newCollectionHarness(t *testing.T, start int64) *collectionHarness {
 		return response(mustJSON(map[string]any{"data": data})), nil
 	})}
 	h.client = client
-	h.scheduler = tracking.NewScheduler(h.store, tracking.SchedulerOptions{Clock: h.clock, Client: client, StartedAt: start, Token: "private-token-secret", FallbackURL: "https://fallback.example/rss?secret=private"})
+	h.scheduler = tracking.NewScheduler(h.store, tracking.SchedulerOptions{Clock: h.clock, Client: client, StartedAt: start, Token: "private-token-secret"})
 	return h
 }
 func (h *collectionHarness) tick(at int64) {
@@ -333,10 +333,8 @@ func TestSharedObservationKeepsIndependentHistoryAndAdmissionTime(t *testing.T) 
 	h := newCollectionHarness(t, start)
 	h.homepages = map[int]any{0: "https://example.com/one", 1: "https://example.com/two"}
 	linux := "https://linux.do/c/develop/4.rss"
-	fallback := "https://fallback.example/rss?secret=private"
 	unavailable := func() *http.Response { r := response("private-source-body"); r.StatusCode = 503; return r }
 	h.sources[linux] = unavailable
-	h.sources[fallback] = unavailable
 	h.tick(beijing("2026-10-01T09:00:00"))
 	h.stars[0] = 150
 	h.tick(beijing("2026-10-01T11:00:00"))
@@ -602,21 +600,33 @@ func TestCleanupOrdersByScoreDeltaStarsEntryTimeAndID(t *testing.T) {
 	}
 }
 
-func TestLinuxPrimaryFallbackAndAuthoritativeSourceParsing(t *testing.T) {
+func TestLinuxMultipleFeedsAndAuthoritativeSourceParsing(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	h.names = []string{"acme/one", "acme/two", "acme/dependency", "acme/detail"}
 	h.stars = []int64{100, 200, 300, 400}
-	primary := "https://linux.do/c/develop/4.rss"
-	fallback := "https://fallback.example/rss?secret=private"
-	h.sources[primary] = func() *http.Response {
-		res := response("private-body")
-		res.StatusCode = 429
-		res.Header.Set("Retry-After", "7200")
-		return res
+	reads := 0
+	for i, feed := range linuxFeeds {
+		h.sources[feed] = func() *http.Response {
+			if reads%len(linuxFeeds) != i {
+				t.Fatal("feeds requested out of order", i, reads)
+			}
+			reads++
+			if i == 0 && reads <= len(linuxFeeds) {
+				return response(`<rss><channel><item><description>https://github.com/acme/one/tree/main https://github.com.evil.com/no/repo</description></item></channel></rss>`)
+			}
+			if i == len(linuxFeeds)-1 {
+				return response(`<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item><description>https://github.com/ACME/one.git</description><content:encoded>&lt;a href=&quot;https://github.com/acme/dependency/issues/1&quot;&gt;Dependency&lt;/a&gt;</content:encoded></item></channel></rss>`)
+			}
+			return response(`<rss><channel/></rss>`)
+		}
 	}
-	h.sources[fallback] = func() *http.Response {
-		return response(`<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item><link>https://linux.do/t/topic/123</link><description><![CDATA[https://github.com/acme/one/tree/main https://github.com.evil.com/no/repo]]></description><content:encoded>&lt;a href=&quot;https://github.com/acme/dependency/issues/1&quot;&gt;Dependency&lt;/a&gt;</content:encoded></item></channel></rss>`)
-	}
+	transport := h.client.Transport
+	h.client.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "api.github.com" && (reads == 0 || reads%len(linuxFeeds) != 0) {
+			t.Fatal("repository processing started before RSS traversal finished", reads)
+		}
+		return transport.RoundTrip(r)
+	})
 	h.sources["https://rsshub-balancer.virworks.moe/github/trending/daily/any"] = func() *http.Response {
 		return response(`<rss><channel><item><link>https://github.com/acme/one</link><description>https://github.com/acme/dependency</description></item></channel></rss>`)
 	}
@@ -636,16 +646,22 @@ func TestLinuxPrimaryFallbackAndAuthoritativeSourceParsing(t *testing.T) {
 	if github["total"] != float64(2) {
 		t.Fatal(github)
 	}
-	if strings.Contains(mustJSON(linux), "secret") || strings.Contains(mustJSON(linux), "fallback.example") {
-		t.Fatal("RSS configuration leaked")
+	if reads != len(linuxFeeds) {
+		t.Fatal("successful feed ended traversal early", reads)
 	}
-	// A valid empty primary is success and must not read the populated fallback.
-	h.sources[primary] = func() *http.Response { return response(`<rss><channel/></rss>`) }
-	h.sources[fallback] = func() *http.Response { t.Fatal("fallback ran despite valid primary"); return nil }
+	lookups := 0
+	for _, q := range h.seenQueries {
+		lookups += strings.Count(q, `repository(owner:"acme",name:"one")`)
+		lookups += strings.Count(q, `repository(owner:"ACME",name:"one")`)
+	}
+	if lookups != 1 {
+		t.Fatal("duplicate repositories were queried", lookups, h.seenQueries)
+	}
+	// On the next round the first feed is empty, but later feeds still run.
 	h.tick(beijing("2026-10-01T11:01:00"))
 	status := h.list("linux.do")["status"].(map[string]any)["discovery"].(map[string]any)
-	if status["failed"] != float64(0) {
-		t.Fatal(status)
+	if reads != 2*len(linuxFeeds) || status["failed"] != float64(0) {
+		t.Fatal(reads, status)
 	}
 }
 func TestDiscoveryBudgetDefersHelloDetailsWithoutFailures(t *testing.T) {

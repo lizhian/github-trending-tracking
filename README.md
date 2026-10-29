@@ -19,7 +19,7 @@ go run ./cmd/trending init --db data/tracking.sqlite
 BACKUP_DIR="$PWD/backups" ALLOWED_ORIGIN=http://localhost:8080 npm run dev:go
 ```
 
-访问 `http://localhost:8080`。前端热更新可另开 `npm run dev`，Vite 将 `/api` 代理到 Go 的 8080 端口；使用热更新时将允许来源配置为 `http://localhost:5173`。采集 Token 和可选 RSS 备用地址只在运行时提供，推荐 `_FILE` 秘密文件，见 [采集配置](docs/go-collection.md)。无 Token 时仍可读取已有数据。
+访问 `http://localhost:8080`。前端热更新可另开 `npm run dev`，Vite 将 `/api` 代理到 Go 的 8080 端口；使用热更新时将允许来源配置为 `http://localhost:5173`。采集 Token 只在运行时提供，推荐 `_FILE` 秘密文件，见 [采集配置](docs/go-collection.md)。无 Token 时仍可读取已有数据。
 
 启动后 HTTP 立即可读，采集等到严格晚于启动时间的下一应采时段；没有公开手动采集入口。浏览和刷新只查询已保存的数据。
 

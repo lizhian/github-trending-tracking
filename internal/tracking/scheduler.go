@@ -12,12 +12,12 @@ import (
 )
 
 type SchedulerOptions struct {
-	Token, FallbackURL string
-	Clock              Clock
-	Client             *http.Client
-	StartedAt          int64
-	LinuxdoCleanup     bool
-	BackupDir          string
+	Token          string
+	Clock          Clock
+	Client         *http.Client
+	StartedAt      int64
+	LinuxdoCleanup bool
+	BackupDir      string
 }
 type Scheduler struct {
 	store      *Store

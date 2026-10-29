@@ -31,7 +31,7 @@ rm -rf "$anonymous_config"
 
 先按 [Go 运行与恢复](go-runtime.md) 准备有效 SQLite 并校验；既有生产目录不得用空库初始化。以下路径为示例，实际目录由部署环境确定。数据和备份必须是不同的本地持久目录，权限允许容器用户 `10001:10001` 写入。
 
-运行时私密文件 `/opt/github-trending-tracking/runtime.env` 仅由维护者读写，包含 `GITHUB_TOKEN`、可选 `LINUXDO_RSS_FALLBACK_URL`、`ALLOWED_ORIGIN` 及备份配置。不要提交该文件，不用 `VITE_*`、构建参数或公开 issue 传递秘密。
+运行时私密文件 `/opt/github-trending-tracking/runtime.env` 仅由维护者读写，包含 `GITHUB_TOKEN`、`ALLOWED_ORIGIN` 及备份配置。不要提交该文件，不用 `VITE_*`、构建参数或公开 issue 传递秘密。
 
 ```sh
 image='ghcr.io/lizhian/github-trending-tracking@sha256:REPLACE_WITH_RELEASE_DIGEST'

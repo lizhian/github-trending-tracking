@@ -4,6 +4,8 @@ status: accepted
 
 # 按发现体系独立追踪，共享仓库采集
 
+2026-10-29 后续调整：[#37](https://github.com/lizhian/github-trending-tracking/issues/37) 将 Linux.do 改为[七个固定公开 RSS 入口](../go-collection.md#保持的业务规则)，全部遍历、合并去重后统一收录，删除主备回退及其配置。七个地址允许进入源码、镜像和公开文档，替代原备用地址保密约束。部分失败保留成功候选，至少五分钟后整组重试；保留域名冷却和发现预算，全部解析成功才刷新整组成功时间。下文主备相关内容仅保留历史背景，其他独立追踪、共享采集、采样及准入规则继续有效。
+
 [ADR-0011](0011-remove-listing-time.md) 删除了下文的最近上榜时间及刷新规则；独立追踪和共享采集规则继续有效。
 
 采样时段、重试下限及 Linux.do 主 RSS 的后续调整见 [ADR-0009](0009-hourly-daytime-sampling-and-five-minute-retries.md)；下文保留原决策背景。
