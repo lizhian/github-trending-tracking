@@ -88,7 +88,7 @@ func auditSnapshot(path string) (DatabaseAudit, error) {
 	if err = validateColumns(db); err != nil {
 		return DatabaseAudit{}, err
 	}
-	return Audit(db, false)
+	return Audit(db)
 }
 func syncFile(path string) error {
 	file, err := os.OpenFile(path, os.O_RDWR, 0)
@@ -283,4 +283,10 @@ func (r *BackupRunner) Tick(now time.Time) (*BackupResult, error) {
 	}
 	r.lastSlot = due
 	return &result, nil
+}
+
+func removeSQLite(path string) {
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		_ = os.Remove(path + suffix)
+	}
 }

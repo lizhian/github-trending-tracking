@@ -1,12 +1,10 @@
-# 部署与生产迁移
+# Go / SQLite / Docker 部署
 
-生产运行以单个 Go + SQLite 容器为准。部署前读取对应流程：
+生产使用单个 Go 应用容器和本地 SQLite。部署前读取对应流程：
 
-- 构建、发布或手动更新镜像：[版本镜像](../image-release.md)。使用明确 digest，发布流水线只构建，不连接服务器。
-- 首次迁移、域名切流、紧急回退或七天收尾：[生产运行手册](../production-cutover.md)。完成相应步骤的验收条件后再继续，任何阶段只保留一个采集写入者。
-- 本地运行、全量导入、备份或恢复：[Go 运行说明](../go-runtime.md)。已有生产库使用导入或恢复，空库 init 仅用于明确的新开发环境。
-- 旧 Worker/D1 导出、后备期 Cloudflare 回退或旧部署故障：[归档 Cloudflare 流程](../legacy/cloudflare-deployment.md)。旧 deploy scripts 仅服务迁移和回退。
+- 构建、发布、手动更新和兼容版本回退：[版本镜像](../image-release.md)。使用明确 digest，发布流水线只构建，不连接服务器。
+- 本地运行、SQLite 备份与恢复：[Go 运行说明](../go-runtime.md)。已有生产库使用备份恢复，空库 init 仅用于明确的新开发环境。
 
-服务器操作先读取 `/Users/lizhian/Documents/lizhian-github/vps/AGENTS.md`，复用既有服务器、Compose 项目、HTTPS 入口及持久目录。秘密从运行时文件或环境提供，证据中的源导出和状态报告按私有文件保存。
+服务器操作先读取 `/Users/lizhian/Documents/lizhian-github/vps/AGENTS.md`，复用既有服务器、Compose 项目、HTTPS 入口及持久目录。当前生产为 `vps-tencent-ca`，Compose 服务 `github-trending-tracking`。运行时秘密通过受限文件或环境提供。
 
-完成部署需验证同域页面、列表、详情与挂载持久性；涉及采集的版本还需下一应采时段新的真实成功观测。旧数据可读只完成查询验收。#26 和父规格 #21 保持打开，直到切流满七天且采集、备份恢复、回退验收通过；观察期后退役旧运行入口，资源物理删除另按维护者指令执行。
+完成部署需验证同域页面、列表、详情和持久挂载；涉及采集的变更还需下一应采时段新的真实成功观测。回退使用兼容的 Go 镜像和 SQLite 备份，保持单一写入者。维护者已确认迁移结果并结束临时后备期，见 [ADR-0006](../adr/0006-go-only-operations.md)。

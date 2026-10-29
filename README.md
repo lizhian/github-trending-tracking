@@ -4,7 +4,7 @@
 
 无需登录的中文只读趋势站，从 GitHub Trending、HelloGithub、OpenGithubs 与 Linux.do 发现项目，记录真实 Star 变化。可切换 GitHub / Linux.do 追踪类型，搜索筛选、排序分页，查看 24 小时、3 天、7 天和 30 天趋势。保留移动端、浅深色主题、键盘操作和 URL 状态恢复。
 
-单个 Go 应用容器提供 React/TypeScript 静态前端、同源只读 API 和串行采集循环，SQLite 整个数据目录挂载本地磁盘。镜像同时支持 `linux/amd64` 与 `linux/arm64`，服务器手动按 digest 更新；部署进度和七天后备期见 [#26](https://github.com/lizhian/github-trending-tracking/issues/26)。
+单个 Go 应用容器提供 React/TypeScript 静态前端、同源只读 API 和串行采集循环，SQLite 整个数据目录挂载本地磁盘。镜像同时支持 `linux/amd64` 与 `linux/arm64`，服务器手动按 digest 更新。后续运行、发布与恢复统一使用 Go、SQLite 和 Docker。
 
 ## 本地运行
 
@@ -14,7 +14,7 @@
 npm ci
 npm run build
 mkdir -p data backups
-# 仅适用于没有历史数据的新开发环境。生产使用全量导入或恢复。
+# 仅适用于没有历史数据的新开发环境。已有生产数据使用备份恢复。
 go run ./cmd/trending init --db data/tracking.sqlite
 BACKUP_DIR="$PWD/backups" ALLOWED_ORIGIN=http://localhost:8080 npm run dev:go
 ```
@@ -35,18 +35,16 @@ BACKUP_DIR="$PWD/backups" ALLOWED_ORIGIN=http://localhost:8080 npm run dev:go
 go test ./...
 npm run typecheck
 npm run build
-npm test -- tests/go-parity.test.ts
 ```
 
-Go 测试使用真实临时 SQLite；parity 测试把同一冻结数据和时钟交给旧 Worker/D1 与新 Go/SQLite，经公开 HTTP 比较代表性结果。旧 Worker、D1 测试和共享契约保留作迁移基线。
+Go 测试使用真实临时 SQLite，经调度入口和公开 HTTP 验证采集、趋势、淘汰、持久化与备份恢复。前端契约位于 `shared/contracts.ts`。
 
 ## 部署
 
-- [本地容器、全量导入、备份与恢复](docs/go-runtime.md)
+- [本地容器、SQLite 备份与恢复](docs/go-runtime.md)
 - [双平台 GHCR 版本镜像与手动更新](docs/image-release.md)
-- [加州服务器切流、回退及七天收尾](docs/production-cutover.md)
-- [旧 Cloudflare 流程（仅迁移与临时回退）](docs/legacy/cloudflare-deployment.md)
+- [部署约定](docs/agents/deployment.md)
 
-使用既有服务器及批准的固定费用，继续禁止新增自动按量扣费。旧 Cloudflare 部署脚本仅用于迁移和后备期回退，常规更新使用 Go 镜像及 SQLite 备份。
+使用既有服务器及批准的固定费用，继续禁止新增自动按量扣费。迁移与旧入口退役记录见 [#26](https://github.com/lizhian/github-trending-tracking/issues/26)。
 
 [Linux.do](https://linux.do/)：连接开发者与 AI 爱好者的社区。

@@ -29,7 +29,7 @@ rm -rf "$anonymous_config"
 
 ## 手动启动与更新
 
-先按 [Go 运行与迁移](go-runtime.md) 完成存量数据库导入及校验；既有生产目录不得用空库初始化。以下路径为示例，实际目录由部署环境确定。数据和备份必须是不同的本地持久目录，权限允许容器用户 `10001:10001` 写入。
+先按 [Go 运行与恢复](go-runtime.md) 准备有效 SQLite 并校验；既有生产目录不得用空库初始化。以下路径为示例，实际目录由部署环境确定。数据和备份必须是不同的本地持久目录，权限允许容器用户 `10001:10001` 写入。
 
 运行时私密文件 `/opt/github-trending-tracking/runtime.env` 仅由维护者读写，包含 `GITHUB_TOKEN`、可选 `LINUXDO_RSS_FALLBACK_URL`、`ALLOWED_ORIGIN` 及备份配置。不要提交该文件，不用 `VITE_*`、构建参数或公开 issue 传递秘密。
 
@@ -51,7 +51,9 @@ curl --fail http://127.0.0.1:8080/api/projects
 
 首次启动省略停止/删除旧容器的三条命令。HTTPS 入口将页面和 `/api/*` 一起转发到本机应用；不要暴露另一个采集实例。重建容器继续挂载原数据目录，HTTP 立即可读，采集统一等待严格晚于启动的下一应采时段。验证同域页面、列表与详情，并以下一轮新的成功采集判断后台是否正常。
 
-回退 Go 镜像时，先确认旧版本兼容当前 SQLite schema 与状态，再按同样停止、重建步骤改用已记录的旧 digest；不能同时运行两个写入实例。若数据库也须恢复，按备份恢复流程停应用、保留故障文件，再恢复有效副本。不要让旧版以空库掩盖不兼容错误。七天内切回 Cloudflare 的流程见 [生产运行手册](production-cutover.md#回退)：先停新调度并保留 SQLite 及备份，旧 D1 暂缺切换后的新观测，不宣称无损回退。
+回退 Go 镜像时，先确认旧版本兼容当前 SQLite schema 与状态，再按同样停止、重建步骤改用已记录的旧 digest；不能同时运行两个写入实例。若数据库也须恢复，按备份恢复流程停应用、保留故障文件，再恢复有效副本。不要让旧版以空库掩盖不兼容错误。
+
+加州生产已纳入 `vps-tencent-ca` 的 `/root/docker-compose.yml`，服务名 `github-trending-tracking`。维护该服务器时先读取 VPS 仓库的 `AGENTS.md`，备份配置、修改该服务的镜像 digest，执行 `docker compose config --quiet` 后只更新该服务。沿用既有数据、备份、秘密文件挂载和 Caddy 入口；共享配置修改后同步回 VPS 仓库并核验 SHA-256。
 
 本流程使用既有服务器、标准 GitHub runner 和 GHCR，不引入付费 runner 或新增自动按量扣费。
 

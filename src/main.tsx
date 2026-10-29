@@ -16,7 +16,7 @@ import {
   type Trend,
   type TrendSummary,
   type WindowHours,
-} from "../worker/contracts";
+} from "../shared/contracts";
 import { SearchSelect } from "./SearchSelect";
 import "./style.css";
 

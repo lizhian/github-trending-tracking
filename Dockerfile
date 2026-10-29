@@ -6,7 +6,7 @@ RUN npm ci
 COPY index.html vite.config.ts tsconfig.json ./
 COPY src ./src
 COPY public ./public
-COPY worker/contracts.ts ./worker/contracts.ts
+COPY shared ./shared
 RUN VITE_API_URL= npm run build
 
 FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS backend

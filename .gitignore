@@ -4,8 +4,6 @@ dist/
 .dev.vars*
 .env*
 !.env.example
-!.env.deploy.example
-!.dev.vars.example
 coverage/
 data/
 backups/

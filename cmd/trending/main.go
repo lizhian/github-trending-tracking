@@ -49,9 +49,7 @@ func run(args []string) error {
 	path := flags.String("db", filepath.Join(env("DATA_DIR", "data"), tracking.DatabaseName), "existing SQLite database path")
 	listen := flags.String("listen", env("LISTEN_ADDR", ":8080"), "HTTP listen address")
 	static := flags.String("static", env("STATIC_DIR", "dist"), "built frontend directory")
-	source := flags.String("source", "", "frozen Wrangler D1 SQL export")
 	report := flags.String("report", "", "private JSON report path")
-	stopped := flags.Bool("old-writer-stopped", false, "acknowledge old scheduler and in-flight writes have stopped (allows clearing legacy lease)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -61,20 +59,13 @@ func run(args []string) error {
 	switch command {
 	case "init":
 		return tracking.Initialize(*path)
-	case "import":
-		result, err := tracking.ImportD1(*source, *path, *report, *stopped)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("import validated: projects=%d snapshots=%d leaseCleared=%t; private report saved\n", result.Target.Tables["projects"].Rows, result.Target.SnapshotPoints, result.LeaseCleared)
-		return nil
 	case "verify":
 		store, err := tracking.Open(*path)
 		if err != nil {
 			return err
 		}
 		defer store.Close()
-		result, err := tracking.Audit(store.DB, false)
+		result, err := tracking.Audit(store.DB)
 		if err != nil {
 			return err
 		}
@@ -129,7 +120,7 @@ func run(args []string) error {
 		}
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q (use serve, init, import, verify, backup, restore, version)", command)
+		return fmt.Errorf("unknown command %q (use serve, init, verify, backup, restore, version)", command)
 	}
 }
 

@@ -14,4 +14,4 @@ Star 与 GitHub Trending 日榜按北京时间每日 01、05、09、11、13、15
 
 在现有 system_state 保存一次性的策略版本与生效时间，生效前的历史保留原小时缺测与端点容差，之后使用新计划；不重写原始快照，也不新增表或项目字段。沿用日记录和小时 key，始终记录真实采集时间。生效时归一旧日榜计时状态并保留有效冷却，列表缓存切换版本；边缘最多缓存 10 分钟，浏览器仍 no-store。
 
-减少每日采样总量不代表单次 Worker CPU 已满足免费限制；资源测量与运行限制见[免费资源研究](../research/free-tier-storage.md)。
+原 Worker 资源约束属于迁移前的运行背景；当前运行形态与维护路径以 [ADR-0005](0005-go-sqlite-docker-runtime.md) 和 [ADR-0006](0006-go-only-operations.md) 为准。

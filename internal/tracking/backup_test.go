@@ -55,7 +55,7 @@ func fmtInt(n int64) string { raw, _ := json.Marshal(n); return string(raw) }
 func TestConsistentBackupRestoresHistoryAndStateWithoutReplacingExistingFiles(t *testing.T) {
 	store, path, now := backupFixture(t)
 	directory := t.TempDir()
-	before, err := tracking.Audit(store.DB, false)
+	before, err := tracking.Audit(store.DB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestConsistentBackupRestoresHistoryAndStateWithoutReplacingExistingFiles(t 
 		t.Fatal(err)
 	}
 	defer recovered.Close()
-	after, err := tracking.Audit(recovered.DB, false)
+	after, err := tracking.Audit(recovered.DB)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,6 +4,8 @@ status: accepted
 
 # 将生产运行迁至自有服务器的 Go + SQLite + Docker
 
+2026-10-29，维护者确认新站运行正常，临时七天后备期及旧部署维护安排由 [ADR-0006](0006-go-only-operations.md) 替代；本 ADR 的 Go、SQLite、Docker 运行决策继续有效。
+
 2026-10-28，用户已确定以 Go 后端、SQLite 和自有服务器 Docker 取代 Workers + D1，并通过 `v` 版本 tag 触发 GitHub Actions 构建双平台镜像。迁移保持现有前端界面、交互和业务行为，优先兼容现有 HTTP 契约，只允许必要的连接和构建部署调整。这样将计算与持久数据的运行责任收回自有服务器，同时避免把运行环境迁移扩大为业务重设计。
 
 用户已确认：全量保留生产三表、全部存量历史和持久化调度状态；以一个 Go 应用容器同时提供静态前端、现有 HTTP 查询和单个调度循环，SQLite 数据目录挂载服务器本地磁盘，沿用现有域名，接受单机故障期间暂时不可用。版本发布采用 `vMAJOR.MINOR.PATCH` tag 自动构建 `linux/amd64`、`linux/arm64` 并发布 ghcr.io 公开镜像，生产由维护者手动更新。
@@ -16,4 +18,4 @@ status: accepted
 
 允许直接停站迁移：停旧调度并等待在途写入结束，最终导出、导入和校验，切换同域页面及API，新采集从下一轮开始；不用双写或零停机编排。旧 Worker/Pages/D1 保留7天、Cron关闭；回退先停新调度、保存SQLite和备份，再恢复旧站及旧调度。用户接受旧站暂缺切换后新观测，不开发自动反向同步，也不删除这些新增记录。观察期及必要验收通过后退役旧运行入口，保留离线导出，资源删除另行执行。
 
-2026-10-28，用户要求将已确认的迁移方案整理为规格并发布至 GitHub Issues，本 ADR 据此接受。实施规格见 [#21](https://github.com/lizhian/github-trending-tracking/issues/21)，事实依据、具体恢复语义及验收条件见[迁移调查与讨论](../research/go-sqlite-docker-migration.md)。本轮仅发布规格及定稿文档，不改写业务代码、迁移生产或部署。
+2026-10-28，本决策接受。实施规格与迁移记录见 [#21](https://github.com/lizhian/github-trending-tracking/issues/21)。
