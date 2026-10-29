@@ -267,9 +267,7 @@ func (w *SubmissionWorker) admit(ctx context.Context, sub *Submission, repo *rep
 	if err != nil {
 		return err
 	}
-	if policy == nil {
-		policy = &SamplingPolicy{Version: 2, EffectiveAt: now}
-	}
+	policy = s.upgradeSamplingPolicy(policy, now)
 	items := []observation{}
 	tracked := false
 	for _, row := range rows {

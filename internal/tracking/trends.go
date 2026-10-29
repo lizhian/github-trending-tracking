@@ -12,11 +12,13 @@ const Retention int64 = 30 * Day
 const SamplingGrace int64 = 10 * 60_000
 
 var Windows = []int{24, 72, 168, 720}
-var SamplingHours = []int64{1, 5, 9, 11, 13, 15, 17, 19, 21}
+var SamplingHours = []int64{1, 3, 5, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23}
+var legacySamplingHours = []int64{1, 5, 9, 11, 13, 15, 17, 19, 21}
 
 type SamplingPolicy struct {
-	Version     int   `json:"version"`
-	EffectiveAt int64 `json:"effectiveAt"`
+	Version         int   `json:"version"`
+	EffectiveAt     int64 `json:"effectiveAt"`
+	HourlyDaytimeAt int64 `json:"hourlyDaytimeAt,omitempty"`
 }
 type Point [2]int64
 type Gap [2]int64
@@ -35,36 +37,49 @@ type Trend struct {
 func ptr(n int64) *int64        { return &n }
 func floorDiv(a, b int64) int64 { return int64(math.Floor(float64(a) / float64(b))) }
 func LatestSlot(at int64) int64 {
+	return latestSlot(at, SamplingHours)
+}
+func latestSlot(at int64, hours []int64) int64 {
 	day := floorDiv(at+8*Hour, Day)*Day - 8*Hour
-	for i := len(SamplingHours) - 1; i >= 0; i-- {
-		slot := day + SamplingHours[i]*Hour
+	for i := len(hours) - 1; i >= 0; i-- {
+		slot := day + hours[i]*Hour
 		if slot <= at {
 			return slot
 		}
 	}
-	return day - Day + 21*Hour
+	return day - Day + hours[len(hours)-1]*Hour
 }
 func NextSlot(at int64) int64 {
+	return nextSlot(at, SamplingHours)
+}
+func nextSlot(at int64, hours []int64) int64 {
 	day := floorDiv(at+8*Hour, Day)*Day - 8*Hour
-	for _, hour := range SamplingHours {
+	for _, hour := range hours {
 		slot := day + hour*Hour
 		if slot > at {
 			return slot
 		}
 	}
-	return day + Day + Hour
+	return day + Day + hours[0]*Hour
 }
 func SamplingSlot(at int64, p *SamplingPolicy) int64 {
 	if p == nil || at < p.EffectiveAt {
 		return floorDiv(at, Hour) * Hour
 	}
-	return LatestSlot(at)
+	return observationSlot(at, p)
 }
 func observationSlot(at int64, p *SamplingPolicy) int64 {
 	if p == nil || at < p.EffectiveAt {
 		return floorDiv(at, Hour) * Hour
 	}
-	slot := LatestSlot(at)
+	if p.HourlyDaytimeAt > 0 && at >= p.HourlyDaytimeAt {
+		slot := LatestSlot(at)
+		if slot >= p.HourlyDaytimeAt {
+			return slot
+		}
+		return observationSlot(p.HourlyDaytimeAt-1, p)
+	}
+	slot := latestSlot(at, legacySamplingHours)
 	if slot >= p.EffectiveAt {
 		return slot
 	}
@@ -75,7 +90,14 @@ func nextExpected(at int64, p *SamplingPolicy) int64 {
 	if p == nil || hourly < p.EffectiveAt {
 		return hourly
 	}
-	return NextSlot(max(at, p.EffectiveAt-1))
+	if p.HourlyDaytimeAt > 0 && at >= p.HourlyDaytimeAt {
+		return NextSlot(at)
+	}
+	next := nextSlot(max(at, p.EffectiveAt-1), legacySamplingHours)
+	if p.HourlyDaytimeAt > 0 && next >= p.HourlyDaytimeAt {
+		return NextSlot(p.HourlyDaytimeAt - 1)
+	}
+	return next
 }
 func MissedSampling(from, to int64, p *SamplingPolicy) bool {
 	return nextExpected(observationSlot(from, p), p) < observationSlot(to, p)
@@ -87,13 +109,13 @@ func IsStale(observedAt, now int64, p *SamplingPolicy) bool {
 	if observedAt+2*Hour < p.EffectiveAt {
 		return true
 	}
-	return now > NextSlot(observedAt)+SamplingGrace
+	return now > nextExpected(max(observedAt, p.EffectiveAt-1), p)+SamplingGrace
 }
 func CompleteWindow(start, end int64, hours int, p *SamplingPolicy) bool {
 	boundary := end - int64(hours)*Hour
 	latestStart := boundary + Hour
 	if p != nil && boundary >= p.EffectiveAt {
-		latestStart = NextSlot(boundary-1) + SamplingGrace
+		latestStart = nextExpected(boundary-1, p) + SamplingGrace
 	}
 	return start <= latestStart
 }

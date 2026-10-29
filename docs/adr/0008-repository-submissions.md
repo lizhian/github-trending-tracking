@@ -4,6 +4,8 @@ status: accepted
 
 # 通过持久化队列异步处理仓库投稿
 
+采样时段、重试下限及 Linux.do 主 RSS 的后续调整见 [ADR-0009](0009-hourly-daytime-sampling-and-five-minute-retries.md)；下文保留原决策背景。
+
 2026-10-29，用户要求允许匿名访客提交 GitHub 仓库地址，无需登录或人工审核，经过基本频率限制后自动处理。用户已确认面向 Go + SQLite 版本：HTTP 请求先将投稿写入独立持久化队列表，再由后台 goroutine 获取仓库资料并处理收录，避免请求响应依赖 GitHub 请求完成。此决定补充 ADR-0005 原先“不引入队列”的范围；普通采集的重启恢复语义不因此改变。
 
 投稿目标是进入 GitHub 追踪类型，并在符合 Linux.do 收录资格时进入 Linux.do 追踪类型。README 资格校验、缓存与存量清洗由关联对话“校验并清洗 Linux.do 项目”负责，遵循 ADR-0007；本次只负责投稿入口、队列消费和对该能力的集成。

@@ -7,7 +7,7 @@
 1. 按既有版本流程构建、验证并发布包含本功能的双平台 Go 镜像，记录旧、新 digest。
 2. 停止旧应用并等待退出。将该服务镜像更新为新 digest，临时将 Compose `command` 设为 `["serve", "--linuxdo-cleanup"]`，保留整个数据目录、备份目录、HTTP 入口和运行时凭据；只启动本服务。不能同时启动离线清洗命令或第二个写入实例。
 3. 维护模式继续提供页面、列表、详情和每日备份，暂停发现、Star 采样、普通淘汰和历史裁剪。清洗先调用现有 `VACUUM INTO` 一致备份并校验，存放在 `BACKUP_DIR/linuxdo-cleanup-v1/`，不被上层每日 72 小时轮转删除。备份失败不创建处理进度、不删除任何项目。
-4. 日志输出 `linux.do cleanup: kept=… removed=… pending=… complete=…`。每轮最多处理 20 项，错误至少 30 分钟后重试，并遵守更长主机冷却。清单、备份路径、单项状态和安全错误保存在 `system_state.linuxdo_cleanup_v1`；重启同一维护模式可继续，不要手工清除此状态。
+4. 日志输出 `linux.do cleanup: kept=… removed=… pending=… complete=…`。每轮最多处理 20 项，错误至少 5 分钟后重试，并遵守更长主机冷却。清单、备份路径、单项状态和安全错误保存在 `system_state.linuxdo_cleanup_v1`；重启同一维护模式可继续，不要手工清除此状态。
 5. 只有 `pending=0 complete=true` 才完成。即使完成，维护模式仍暂停采集。核对保留和删除数量、同仓库 GitHub 数据和历史仍在，以及同域页面与查询正常。
 6. 停止维护进程，使用同版本 `verify --report /private/report.json` 导出完整私有审计；`stateCheckpoints.linuxdo_cleanup_v1` 包含备份路径、完成时间和各项目结果。检查完整性、外键及结果。不在运行中的服务旁另开 `verify`，它同样需要目录写入锁。
 7. 移除临时 `command`，重启普通 `serve`。采集按既有重启规则等下一应采时段；验证新的成功时间和真实快照后再完成生产验收。同步远程 Compose 配置并保留清洗报告。

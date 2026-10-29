@@ -87,14 +87,14 @@ func TestSchedulerWaitsForNextSlotAndAdmitsWithActualObservation(t *testing.T) {
 	if got := requestJSON(t, s, c, "/api/projects"); got["total"] != float64(0) {
 		t.Fatal(got)
 	}
-	c.at = beijing("2026-10-01T12:59:59")
+	c.at = beijing("2026-10-01T11:59:59")
 	if e := scheduler.Tick(context.Background()); e != nil {
 		t.Fatal(e)
 	}
 	if got := requestJSON(t, s, c, "/api/projects"); got["total"] != float64(0) {
 		t.Fatal(got)
 	}
-	c.at = beijing("2026-10-01T13:00:00")
+	c.at = beijing("2026-10-01T12:00:00")
 	tick := c.at
 	if e := scheduler.Tick(context.Background()); e != nil {
 		t.Fatal(e)
@@ -236,7 +236,7 @@ func (h *collectionHarness) history(id string) map[string]any {
 
 func TestAttachmentLinksNeverBecomeCandidatesAndOldPendingIsPersistentlyRemoved(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
-	h.sources["https://linux.do/tag/2234-tag/2234.rss"] = func() *http.Response {
+	h.sources["https://linux.do/c/develop/4.rss"] = func() *http.Response {
 		return response(`<rss><channel><item><description>https://github.com/user-attachments/assets/image-id https://github.com/acme/one</description></item></channel></rss>`)
 	}
 	first := beijing("2026-10-01T09:00:00")
@@ -288,7 +288,7 @@ func TestCandidateAndSamplingFailuresHaveIndependentStatus(t *testing.T) {
 		t.Fatal("sampling recovery cleared the candidate failure or retained its own error", status)
 	}
 	var pending []map[string]any
-	if _, err := h.store.State("pending", &pending); err != nil || len(pending) != 1 || pending[0]["nextAt"].(float64) < float64(retryAt+30*60_000) {
+	if _, err := h.store.State("pending", &pending); err != nil || len(pending) != 1 || pending[0]["nextAt"].(float64) < float64(retryAt+5*60_000) {
 		t.Fatal("missing candidate lost its retry", pending, err)
 	}
 }
@@ -332,7 +332,7 @@ func TestSharedObservationKeepsIndependentHistoryAndAdmissionTime(t *testing.T) 
 	start := beijing("2026-10-01T08:50:00")
 	h := newCollectionHarness(t, start)
 	h.homepages = map[int]any{0: "https://example.com/one", 1: "https://example.com/two"}
-	linux := "https://linux.do/tag/2234-tag/2234.rss"
+	linux := "https://linux.do/c/develop/4.rss"
 	fallback := "https://fallback.example/rss?secret=private"
 	unavailable := func() *http.Response { r := response("private-source-body"); r.StatusCode = 503; return r }
 	h.sources[linux] = unavailable
@@ -343,9 +343,9 @@ func TestSharedObservationKeepsIndependentHistoryAndAdmissionTime(t *testing.T) 
 	h.sources[linux] = func() *http.Response {
 		return response(`<rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item><description><![CDATA[https://github.com/acme/one/tree/main https://github.com/ACME/one.git]]></description><content:encoded>https://github.com/acme/one#readme</content:encoded></item></channel></rss>`)
 	}
-	h.tick(beijing("2026-10-01T12:00:00"))
+	h.tick(beijing("2026-10-01T11:30:00"))
 	item := h.list("linux.do")["items"].([]any)[0].(map[string]any)
-	if item["enteredAt"] != float64(beijing("2026-10-01T12:00:00")) || item["observedAt"] != float64(beijing("2026-10-01T11:00:00")) {
+	if item["enteredAt"] != float64(beijing("2026-10-01T11:30:00")) || item["observedAt"] != float64(beijing("2026-10-01T11:00:00")) {
 		t.Fatal(item)
 	}
 	points := h.history("linux.do:R_0")["points"].([]any)
@@ -469,11 +469,11 @@ func TestNewestOnlyCollectionKeepsGapAndFailuresKeepGoodObservations(t *testing.
 	}
 	h.graphqlFailure = false
 	h.stars[0] = 140
-	h.tick(beijing("2026-10-01T17:29:00"))
+	h.tick(beijing("2026-10-01T17:04:00"))
 	if mustJSON(h.history("github:R_0")["points"]) != before {
 		t.Fatal("ignored backoff")
 	}
-	h.tick(beijing("2026-10-01T17:30:00"))
+	h.tick(beijing("2026-10-01T17:06:00"))
 	if len(h.history("github:R_0")["points"].([]any)) != 3 {
 		t.Fatal("retry failed")
 	}
@@ -556,7 +556,7 @@ func TestLinuxPrimaryFallbackAndAuthoritativeSourceParsing(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	h.names = []string{"acme/one", "acme/two", "acme/dependency", "acme/detail"}
 	h.stars = []int64{100, 200, 300, 400}
-	primary := "https://linux.do/tag/2234-tag/2234.rss"
+	primary := "https://linux.do/c/develop/4.rss"
 	fallback := "https://fallback.example/rss?secret=private"
 	h.sources[primary] = func() *http.Response {
 		res := response("private-body")

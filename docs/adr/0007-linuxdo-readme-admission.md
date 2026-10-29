@@ -4,6 +4,8 @@ status: accepted
 
 # 以主 README 判断 Linux.do 收录资格
 
+采样时段、重试下限及 Linux.do 主 RSS 的后续调整见 [ADR-0009](0009-hourly-daytime-sampling-and-five-minute-retries.md)；下文保留原决策背景。
+
 2026-10-29，用户确认以 GitHub 默认分支上被 GitHub 识别的主 README 判断 Linux.do 收录资格，避免把帖子中的依赖和示例误认作社区开源项目。RSS 仍提取所有仓库链接作为候选，但原始 README 必须包含大小写敏感的字面字符串 `https://linux.do` 才允许收录；代码块和注释中的出现同样算数，不扩展检查其他语言版本或文件。本决策补充 ADR-0004，实施任务为 [#27](https://github.com/lizhian/github-trending-tracking/issues/27)。
 
 成功读取但未包含标识，或确认仓库公开可读而主 README 缺失，均不符合资格。README 404 通过匿名仓库和 README 请求复核，确认稳定仓库 ID 一致，避免 Token 权限造成的伪 404。网络、权限、限流、服务错误及无法确认仓库可访问的 404 均待确认，不能因此删除存量；新项目暂不收录，至少 30 分钟后重试并服从更长主机冷却。

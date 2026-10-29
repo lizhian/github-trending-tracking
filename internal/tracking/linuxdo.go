@@ -80,7 +80,7 @@ func (s *Scheduler) linuxdoReadme(ctx context.Context, repoID string) (readmeRes
 }
 
 func (s *Scheduler) readmeRetryAt() int64 {
-	return max(s.upstream.clock.Now()+30*60_000, s.upstream.blocked("https://api.github.com/graphql"))
+	return max(s.upstream.clock.Now()+retryInterval, s.upstream.blocked("https://api.github.com/graphql"))
 }
 
 func (s *Scheduler) expireReadmeCache(ctx context.Context, now int64) error {

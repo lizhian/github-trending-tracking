@@ -36,6 +36,9 @@ type hostState struct {
 	StartedAt    int64 `json:"startedAt"`
 	BlockedUntil int64 `json:"blockedUntil"`
 }
+
+const retryInterval int64 = 5 * 60_000
+
 type deferredRequest struct{ retryAt int64 }
 
 func (d *deferredRequest) Error() string {
@@ -148,7 +151,7 @@ func (u *upstream) text(ctx context.Context, raw, label string, body []byte, tok
 	limited := res.StatusCode == 429 || res.Header.Get("Retry-After") != "" || res.Header.Get("X-RateLimit-Remaining") == "0"
 	if limited {
 		u.rateLimited = true
-		u.cooldown(raw, res.Header, Hour)
+		u.cooldown(raw, res.Header, retryInterval)
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 || (label == "GitHub" && res.StatusCode != http.StatusOK) {
 		if label == "GitHub" && res.StatusCode == 403 && !limited {
@@ -159,7 +162,7 @@ func (u *upstream) text(ctx context.Context, raw, label string, body []byte, tok
 			lower := strings.ToLower(b)
 			if strings.Contains(lower, "secondary rate limit") || strings.Contains(lower, "api rate limit exceeded") {
 				u.rateLimited = true
-				u.cooldown(raw, res.Header, Hour)
+				u.cooldown(raw, res.Header, retryInterval)
 			}
 		}
 		return "", &upstreamHTTPError{label: label, status: res.StatusCode}
@@ -211,7 +214,7 @@ func (u *upstream) repositories(ctx context.Context, token string, targets []str
 		if err != nil && ctx.Err() == nil {
 			var deferred *deferredRequest
 			if !errors.As(err, &deferred) && !errors.Is(err, errSubmissionRepositoryMissing) {
-				u.cooldown(endpoint, nil, 30*60_000)
+				u.cooldown(endpoint, nil, retryInterval)
 			}
 		}
 	}()
@@ -259,7 +262,7 @@ func (u *upstream) repositories(ctx context.Context, token string, targets []str
 	for _, problem := range result.Errors {
 		if problem.Type == "RATE_LIMITED" || problem.Extensions.Code == "RATE_LIMITED" || strings.Contains(strings.ToLower(problem.Message), "rate limit") {
 			u.rateLimited = true
-			u.cooldown(endpoint, nil, Hour)
+			u.cooldown(endpoint, nil, retryInterval)
 		}
 	}
 	if mode == "submission" && len(result.Errors) > 0 {

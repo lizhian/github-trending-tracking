@@ -78,11 +78,12 @@ func (s *Scheduler) Tick(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	if policy == nil {
-		policy = &SamplingPolicy{Version: 2, EffectiveAt: now}
+	if policy == nil || policy.Version < 3 {
+		policy = s.upgradeSamplingPolicy(policy, now)
 		if err = s.store.SetState("sampling_policy", policy); err != nil {
 			return err
 		}
+		s.store.listRevision.Add(1)
 	}
 	result, err := s.store.DB.ExecContext(ctx, "DELETE FROM snapshot_days WHERE day<?", floorDiv(now-Retention, Day))
 	if err != nil {
@@ -104,6 +105,19 @@ func (s *Scheduler) Tick(ctx context.Context) (err error) {
 		return s.store.SetState("scheduler", runState{AttemptedAt: now, SucceededAt: ptr(now), Succeeded: 1})
 	}
 	return nil
+}
+
+// Preserve the first policy boundary; the new timetable starts at the first
+// slot this process can collect, including when submissions initialize it.
+func (s *Scheduler) upgradeSamplingPolicy(policy *SamplingPolicy, now int64) *SamplingPolicy {
+	if policy == nil {
+		policy = &SamplingPolicy{EffectiveAt: now}
+	}
+	if policy.Version < 3 {
+		policy.Version = 3
+		policy.HourlyDaytimeAt = s.startAt
+	}
+	return policy
 }
 func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPolicy) (bool, error) {
 	d, e := s.discover(ctx, now, policy)
@@ -262,7 +276,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 					}
 				}
 			} else {
-				entry.NextAt = max(s.upstream.clock.Now()+30*60_000, s.upstream.blocked("https://api.github.com/graphql"))
+				entry.NextAt = max(s.upstream.clock.Now()+retryInterval, s.upstream.blocked("https://api.github.com/graphql"))
 				record("admission", entry.Type, false, message)
 			}
 		}
@@ -326,8 +340,8 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			if latest == nil || row.ObservedAt > latest.ObservedAt {
 				latest = row
 			}
-			if row.Error != nil && row.AttemptedAt > now-30*60_000 {
-				retryAt = max(retryAt, row.AttemptedAt+30*60_000)
+			if row.Error != nil && row.AttemptedAt > now-retryInterval {
+				retryAt = max(retryAt, row.AttemptedAt+retryInterval)
 			}
 		}
 		if tracked != nil {
@@ -380,7 +394,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		}
 	}
 	if readyGitHub() {
-		due, e := s.store.DB.QueryContext(ctx, `SELECT repo_id FROM projects WHERE observed_at<? AND (error IS NULL OR attempted_at<=?) GROUP BY repo_id ORDER BY MIN(attempted_at),repo_id LIMIT 100`, slot, now-30*60_000)
+		due, e := s.store.DB.QueryContext(ctx, `SELECT repo_id FROM projects WHERE observed_at<? AND (error IS NULL OR attempted_at<=?) GROUP BY repo_id ORDER BY MIN(attempted_at),repo_id LIMIT 100`, slot, now-retryInterval)
 		if e != nil {
 			return false, e
 		}
@@ -508,7 +522,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 					record("collection", row.Type, false, message)
 				}
 				for _, entry := range additions {
-					entry.NextAt = max(s.upstream.clock.Now()+30*60_000, s.upstream.blocked("https://api.github.com/graphql"))
+					entry.NextAt = max(s.upstream.clock.Now()+retryInterval, s.upstream.blocked("https://api.github.com/graphql"))
 					record("admission", entry.Type, false, message)
 				}
 			}

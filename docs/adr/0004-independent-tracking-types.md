@@ -4,6 +4,8 @@ status: accepted
 
 # 按发现体系独立追踪，共享仓库采集
 
+采样时段、重试下限及 Linux.do 主 RSS 的后续调整见 [ADR-0009](0009-hourly-daytime-sampling-and-five-minute-retries.md)；下文保留原决策背景。
+
 Linux.do 候选仓库的收录资格及上线前存量清洗由 [ADR-0007](0007-linuxdo-readme-admission.md) 补充：RSS 中的依赖和示例链接仅构成候选，须通过主 README 校验后才能入库。独立追踪与共享观测语义继续有效。
 
 本决策的独立追踪及共享采集语义继续有效；[ADR-0005](0005-go-sqlite-docker-runtime.md) 接受迁移至 Go + SQLite + Docker，届时下述 Worker Secret 配置改由容器运行时环境或秘密文件提供，实际备用 RSS 地址仍不得进入源码、镜像或公开配置。

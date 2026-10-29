@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -260,7 +261,7 @@ func TestSubmissionNegativeCacheAndPartialReadmeFailure(t *testing.T) {
 			h.step(t)
 			current := h.result(t, sub.ID)
 			if i < 2 {
-				if current.Status != "retrying" || current.NextAt < h.clock.Now()+30*60_000 {
+				if current.Status != "retrying" || current.NextAt != h.clock.Now()+5*60_000 {
 					t.Fatal(current)
 				}
 				h.clock.advance(current.NextAt)
@@ -355,6 +356,52 @@ func TestSubmissionPrivacyFailuresAndRateLimitRecovery(t *testing.T) {
 				if len(rows) != 0 {
 					t.Fatal("inaccessible/private project admitted")
 				}
+			}
+		})
+	}
+}
+
+func TestSubmissionFiveMinuteRetriesAndUpstreamReset(t *testing.T) {
+	for _, kind := range []string{"unavailable", "http-limit", "secondary-limit", "graphql-limit", "reset"} {
+		t.Run(kind, func(t *testing.T) {
+			h := newSubmissionHarness(t)
+			now := h.clock.Now()
+			wait := int64(5 * 60_000)
+			attempts := 0
+			h.response = func(r *http.Request) (*http.Response, error) {
+				switch kind {
+				case "unavailable":
+					attempts = 1
+					return submissionResponse(503, "unavailable"), nil
+				case "secondary-limit":
+					return submissionResponse(403, "secondary rate limit"), nil
+				case "graphql-limit":
+					return submissionResponse(200, `{"errors":[{"type":"RATE_LIMITED"}]}`), nil
+				case "reset":
+					wait = 20 * 60_000
+					res := submissionResponse(403, "limited")
+					res.Header.Set("X-RateLimit-Remaining", "0")
+					res.Header.Set("X-RateLimit-Reset", fmt.Sprint((now+wait)/1000))
+					return res, nil
+				default:
+					return submissionResponse(429, "limited"), nil
+				}
+			}
+			sub := h.enqueue(t, "acme/tool")
+			h.step(t)
+			got := h.result(t, sub.ID)
+			if got.NextAt != now+wait || got.RepositoryAttempts != attempts {
+				t.Fatal("incorrect retry or consumed a rate-limited attempt", got)
+			}
+			h.clock.advance(got.NextAt - 1)
+			if worked, err := h.worker.ProcessNext(context.Background()); err != nil || worked {
+				t.Fatal("retried before deadline", worked, err)
+			}
+			h.response = nil
+			h.clock.advance(got.NextAt)
+			h.step(t)
+			if got := h.result(t, sub.ID); got.GitHub != "tracked" {
+				t.Fatal("did not recover at retry deadline", got)
 			}
 		})
 	}

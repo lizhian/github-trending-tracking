@@ -15,7 +15,7 @@ import (
 	"github.com/lizhian/github-trending-tracking/internal/tracking"
 )
 
-const linuxRSS = "https://linux.do/tag/2234-tag/2234.rss"
+const linuxRSS = "https://linux.do/c/develop/4.rss"
 const readmeURL = "https://api.github.com/repos/acme/one/readme"
 const cleanupKey = "linuxdo_cleanup_v1"
 
@@ -226,7 +226,7 @@ func TestLinuxdoReadmeFailuresAndAnonymous404Confirmation(t *testing.T) {
 						retry, _ = p["readmeNextAt"].(float64)
 					}
 				}
-				if retry < float64(lastReadmeAt+30*60_000) {
+				if retry < float64(lastReadmeAt+5*60_000) {
 					t.Fatal("missing retry", pending)
 				}
 				if test.rateLimit && retry < float64(lastReadmeAt+2*tracking.Hour) {
@@ -427,7 +427,7 @@ func TestLinuxdoCleanupBackupIsolationResumeAndStartupGate(t *testing.T) {
 		t.Fatal("cleanup report missing from audit")
 	}
 	h.scheduler = tracking.NewScheduler(h.store, tracking.SchedulerOptions{Clock: h.clock, Client: h.client, StartedAt: h.clock.at})
-	h.tick(beijing("2026-10-01T16:59:59"))
+	h.tick(beijing("2026-10-01T15:59:59"))
 	still, err := h.store.ProjectRows("WHERE type='github' ORDER BY id")
 	if err != nil {
 		t.Fatal(err)
@@ -435,8 +435,8 @@ func TestLinuxdoCleanupBackupIsolationResumeAndStartupGate(t *testing.T) {
 	if !reflect.DeepEqual(githubBefore, still) {
 		t.Fatal("normal restart ignored next-slot gate")
 	}
-	h.tick(beijing("2026-10-01T17:00:00"))
-	if row, _ := h.store.ProjectRows("WHERE id='github:R_0'"); len(row) != 1 || row[0].ObservedAt < beijing("2026-10-01T17:00:00") {
+	h.tick(beijing("2026-10-01T16:00:00"))
+	if row, _ := h.store.ProjectRows("WHERE id='github:R_0'"); len(row) != 1 || row[0].ObservedAt < beijing("2026-10-01T16:00:00") {
 		t.Fatal("collection did not resume")
 	}
 }

@@ -4,6 +4,8 @@ status: accepted
 
 # 将生产运行迁至自有服务器的 Go + SQLite + Docker
 
+采样时段、重试下限及 Linux.do 主 RSS 的后续调整见 [ADR-0009](0009-hourly-daytime-sampling-and-five-minute-retries.md)；下文保留原决策背景。
+
 2026-10-29，维护者确认新站运行正常，临时七天后备期及旧部署维护安排由 [ADR-0006](0006-go-only-operations.md) 替代；本 ADR 的 Go、SQLite、Docker 运行决策继续有效。
 
 2026-10-28，用户已确定以 Go 后端、SQLite 和自有服务器 Docker 取代 Workers + D1，并通过 `v` 版本 tag 触发 GitHub Actions 构建双平台镜像。迁移保持现有前端界面、交互和业务行为，优先兼容现有 HTTP 契约，只允许必要的连接和构建部署调整。这样将计算与持久数据的运行责任收回自有服务器，同时避免把运行环境迁移扩大为业务重设计。

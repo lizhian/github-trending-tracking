@@ -63,7 +63,7 @@ var sources = []source{
 	{"opengithubs-daily", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-daily-rank/refs/heads/main/README.md", "github", false},
 	{"opengithubs-weekly", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-weekly-rank/refs/heads/main/README.md", "github", false},
 	{"opengithubs-monthly", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-monthly-rank/refs/heads/main/README.md", "github", false},
-	{"linuxdo", "linuxdo", "https://linux.do/tag/2234-tag/2234.rss", "linux.do", true},
+	{"linuxdo", "linuxdo", "https://linux.do/c/develop/4.rss", "linux.do", true},
 }
 var projectTypes = []string{"github", "linux.do"}
 
@@ -280,7 +280,7 @@ func (u *upstream) linuxRepositories(ctx context.Context, primary, fallback stri
 	if !attempted {
 		return nil, &deferredRequest{earliest}
 	}
-	return nil, &linuxFailure{strings.Join(messages, "; "), max(u.clock.Now()+30*60_000, earliest)}
+	return nil, &linuxFailure{strings.Join(messages, "; "), max(u.clock.Now()+retryInterval, earliest)}
 }
 
 type discoveryResult struct {
@@ -321,16 +321,20 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 	deadline := u.clock.Now() + 3*60_000
 	changed := false
 	if policy != nil && now >= policy.EffectiveAt && state.ScheduleVersion != policy.Version {
-		if daily := state.Sources["github-daily"]; daily != nil {
-			next := LatestSlot(now)
-			if daily.SucceededAt != nil {
-				next = NextSlot(*daily.SucceededAt)
+		for _, source := range sources {
+			previous := state.Sources[source.id]
+			if !source.scheduled || previous == nil {
+				continue
+			}
+			next := SamplingSlot(now, policy)
+			if previous.SucceededAt != nil {
+				next = nextExpected(*previous.SucceededAt, policy)
 			}
 			backoff := int64(0)
-			if daily.Failed > 0 {
-				backoff = daily.NextAt
+			if previous.Failed > 0 {
+				backoff = previous.NextAt
 			}
-			daily.NextAt = max(next, backoff, u.blocked(sources[0].url))
+			previous.NextAt = max(next, backoff)
 		}
 		state.ScheduleVersion = policy.Version
 		changed = true
@@ -362,6 +366,8 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 			if source.kind == "linuxdo" && fallback != "" && previous.Failed > 0 {
 				retry := previous.RetryAfter
 				if retry == 0 {
+					// Old states without RetryAfter used the three-minute discovery
+					// budget plus a thirty-minute backoff. Keep that existing wait.
 					retry = previous.AttemptedAt + 3*60_000 + 30*60_000
 				}
 				next = min(next, retry)
@@ -400,13 +406,13 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 				successAt = previous.SucceededAt
 			}
 			message := safeError(err)
-			retryAt := max(u.clock.Now()+30*60_000, u.blocked(source.url))
+			retryAt := max(u.clock.Now()+retryInterval, u.blocked(source.url))
 			var linux *linuxFailure
 			if errors.As(err, &linux) {
 				message = linux.message
 				retryAt = linux.retryAt
 			}
-			state.Sources[source.id] = &sourceState{runState: runState{AttemptedAt: now, SucceededAt: successAt, Failed: 1, Error: strptr(message)}, NextAt: retryAt, RetryAfter: u.clock.Now() + 30*60_000}
+			state.Sources[source.id] = &sourceState{runState: runState{AttemptedAt: now, SucceededAt: successAt, Failed: 1, Error: strptr(message)}, NextAt: retryAt, RetryAfter: u.clock.Now() + retryInterval}
 			continue
 		}
 		attempted = true
@@ -427,7 +433,7 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 		next = (floorDiv(u.clock.Now()-Hour, Day)+1)*Day + Hour
 		if source.scheduled {
 			if policy != nil && u.clock.Now() >= policy.EffectiveAt {
-				next = NextSlot(u.clock.Now())
+				next = nextExpected(u.clock.Now(), policy)
 			} else {
 				next = (floorDiv(u.clock.Now(), Hour) + 1) * Hour
 			}
@@ -462,7 +468,7 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 			attempted = true
 			attemptedTypes["github"] = true
 			task.Error = strptr(safeError(err))
-			task.NextAt = max(u.clock.Now()+30*60_000, u.blocked(task.URL))
+			task.NextAt = max(u.clock.Now()+retryInterval, u.blocked(task.URL))
 			continue
 		}
 		attempted = true
