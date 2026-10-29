@@ -6,12 +6,14 @@
 
 ## 运行时配置
 
-- `GITHUB_TOKEN`：仅供服务器请求 GitHub GraphQL，不传给前端或镜像构建；也可使用 `GITHUB_TOKEN_FILE` 指向运行时挂载的秘密文件。
+- `GITHUB_TOKEN`：仅供服务器请求 GitHub GraphQL 和 README REST API，不传给前端或镜像构建；也可使用 `GITHUB_TOKEN_FILE` 指向运行时挂载的秘密文件。读取 README 需要 Contents 读取权限；公开仓库的 404 会匿名复核，不能因 Token 缺少内容权限就判定无 README。
 - `LINUXDO_RSS_FALLBACK_URL`：可选 RSS 备用入口；也可通过 `LINUXDO_RSS_FALLBACK_URL_FILE` 提供。主入口失败或冷却时才使用，合法空 RSS 算成功，下次到期仍优先主入口。实际地址不能写入版本库、公开配置或日志。
 
 变量值优先于对应 `_FILE`。可用宿主权限为 0600 的私有 env 文件经 `docker run --env-file /private/runtime.env …` 注入，或把秘密文件只读挂载到容器。不要在命令行打印秘密。缺少 Token 不妨碍 HTTP 读取，下一轮上游失败会以安全诊断保存，已有有效观测不会被清零。
 
 ## 保持的业务规则
+
+Linux.do 仅收录默认分支主 README 原始内容包含大小写敏感字面字符串 `https://linux.do` 的仓库；仅在 RSS 中出现不足以收录，代码块与注释中的标识也算。确认无 README 或无标识的结果按稳定仓库 ID 缓存 24 小时，到期且 RSS 再次发现才重查。在库不持续复查，淘汰后重收录须重新校验。失败待确认，Linux.do 候选单独保存 `readmeNextAt`，不阻塞同仓库的 GitHub 候选；主机冷却仍共享。上线前先完成[存量清洗](linuxdo-cleanup.md)。
 
 GitHub 日榜、Linux.do 与 Star 按九时段发现/采样；GitHub 周月榜、HelloGithub all/featured、OpenGithubs 日周月榜仍每日北京时间 09 点到期。每 tick 解析最多 20 条待收录身份，采样最多 100 个不同仓库；同仓库两类型共享一次结果和 24 小时元数据刷新，各自保存独立周期和历史。新类型收录只可复用本轮已成功的单个真实观测，其入库时间和保护期仍从本次收录开始。
 

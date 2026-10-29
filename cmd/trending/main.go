@@ -50,11 +50,15 @@ func run(args []string) error {
 	listen := flags.String("listen", env("LISTEN_ADDR", ":8080"), "HTTP listen address")
 	static := flags.String("static", env("STATIC_DIR", "dist"), "built frontend directory")
 	report := flags.String("report", "", "private JSON report path")
+	linuxdoCleanup := flags.Bool("linuxdo-cleanup", false, "serve queries and backups while cleaning Linux.do; keep collection paused")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 0 {
 		return errors.New("unexpected arguments")
+	}
+	if *linuxdoCleanup && command != "serve" {
+		return errors.New("--linuxdo-cleanup is only valid with serve")
 	}
 	switch command {
 	case "migrate":
@@ -104,11 +108,15 @@ func run(args []string) error {
 			return err
 		}
 		defer stopBackups()
-		scheduler := tracking.NewScheduler(store, tracking.SchedulerOptions{Token: token, FallbackURL: fallback, StartedAt: startedAt})
+		scheduler := tracking.NewScheduler(store, tracking.SchedulerOptions{Token: token, FallbackURL: fallback, StartedAt: startedAt, LinuxdoCleanup: *linuxdoCleanup, BackupDir: env("BACKUP_DIR", "")})
 		scheduled := make(chan struct{})
 		go func() { defer close(scheduled); scheduler.Run(ctx) }()
 		defer func() { stop(); <-scheduled }()
-		log.Printf("collection waits until %s", time.UnixMilli(tracking.NextSlot(startedAt)).UTC().Format(time.RFC3339))
+		if *linuxdoCleanup {
+			log.Print("Linux.do cleanup maintenance mode: collection and retention remain paused")
+		} else {
+			log.Printf("collection requires Linux.do cleanup clearance and waits until %s", time.UnixMilli(tracking.NextSlot(startedAt)).UTC().Format(time.RFC3339))
+		}
 		server := &http.Server{Addr: *listen, Handler: tracking.Handler(store, tracking.HTTPOptions{AllowedOrigin: os.Getenv("ALLOWED_ORIGIN"), StaticDir: *static}), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 		go func() {
 			<-ctx.Done()

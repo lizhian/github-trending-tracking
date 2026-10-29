@@ -133,11 +133,18 @@ type collectionHarness struct {
 
 func newCollectionHarness(t *testing.T, start int64) *collectionHarness {
 	h := &collectionHarness{t: t, store: newStore(t), clock: &testClock{start}, sources: map[string]func() *http.Response{}, names: []string{"acme/one", "acme/two"}, stars: []int64{100, 200}, failed: map[string]bool{}}
+	// Existing collection scenarios model a database already cleared for normal operation.
+	if err := h.store.SetState("linuxdo_cleanup_v1", map[string]any{"completedAt": start}); err != nil {
+		t.Fatal(err)
+	}
 	client := &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+		if f := h.sources[r.URL.String()]; f != nil {
+			return f(), nil
+		}
+		if r.URL.Host == "api.github.com" && strings.HasSuffix(r.URL.Path, "/readme") {
+			return response("Community: https://linux.do"), nil
+		}
 		if r.URL.Host != "api.github.com" {
-			if f := h.sources[r.URL.String()]; f != nil {
-				return f(), nil
-			}
 			if strings.Contains(r.URL.Path, "raw.githubusercontent") {
 				return response(""), nil
 			}

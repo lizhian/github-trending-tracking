@@ -188,6 +188,9 @@ func Audit(db *sql.DB) (DatabaseAudit, error) {
 			return report, err
 		}
 		auditStateCheckpoints(report.StateCheckpoints, key, value)
+		if key == linuxdoCleanupKey {
+			report.StateCheckpoints[key] = value
+		}
 	}
 	err = rows.Err()
 	rows.Close()
@@ -198,7 +201,7 @@ func auditStateCheckpoints(out map[string]any, path string, value any) {
 	case map[string]any:
 		for key, child := range value {
 			next := path + "." + key
-			if slices.Contains([]string{"effectiveAt", "nextAt", "blockedUntil"}, key) {
+			if slices.Contains([]string{"effectiveAt", "nextAt", "readmeNextAt", "blockedUntil"}, key) {
 				out[next] = child
 			}
 			auditStateCheckpoints(out, next, child)

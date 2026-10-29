@@ -40,11 +40,12 @@ type discoveryState struct {
 	Resolved        map[string]resolvedDetail `json:"resolved"`
 }
 type discoveryEntry struct {
-	Type     string `json:"type"`
-	Name     string `json:"name"`
-	ListedAt int64  `json:"listedAt"`
-	RepoID   string `json:"repoId,omitempty"`
-	NextAt   int64  `json:"nextAt,omitempty"`
+	Type         string `json:"type"`
+	Name         string `json:"name"`
+	ListedAt     int64  `json:"listedAt"`
+	RepoID       string `json:"repoId,omitempty"`
+	NextAt       int64  `json:"nextAt,omitempty"`
+	ReadmeNextAt int64  `json:"readmeNextAt,omitempty"`
 }
 type source struct {
 	id, kind, url, typ string
