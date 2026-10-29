@@ -44,10 +44,18 @@ func Audit(db *sql.DB) (DatabaseAudit, error) {
 	}
 	report.Integrity = "ok"
 	report.ForeignKeys = "ok"
-	for _, table := range []string{"projects", "snapshot_days", "system_state"} {
+	tables := []string{"projects", "snapshot_days", "system_state"}
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return report, err
+	}
+	if version >= 4 {
+		tables = append(tables, "submissions")
+	}
+	for _, table := range tables {
 		query := "SELECT " + strings.Join(tableColumns[table], ",") + " FROM " + table
 		switch table {
-		case "projects":
+		case "projects", "submissions":
 			query += " ORDER BY id"
 		case "snapshot_days":
 			query += " ORDER BY cycle,day"

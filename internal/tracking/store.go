@@ -11,21 +11,23 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/lizhian/github-trending-tracking/migrations"
 	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 3
+const SchemaVersion = 4
 const DatabaseName = "tracking.sqlite"
 
-var MigrationNames = []string{"0001_tracking.sql", "0002_free_tier.sql", "0003_tracking_types.sql"}
+var MigrationNames = []string{"0001_tracking.sql", "0002_free_tier.sql", "0003_tracking_types.sql", "0004_submissions.sql"}
 
 type Store struct {
-	DB        *sql.DB
-	lock      *os.File
-	closeOnce sync.Once
+	DB           *sql.DB
+	lock         *os.File
+	closeOnce    sync.Once
+	listRevision atomic.Uint64
 }
 
 func database(path, mode string) (*sql.DB, error) {
@@ -142,7 +144,7 @@ func initializeDB(db *sql.DB) error {
 			return err
 		}
 	}
-	if _, err = tx.Exec("PRAGMA user_version=3"); err != nil {
+	if _, err = tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", SchemaVersion)); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -180,10 +182,18 @@ var tableColumns = map[string][]string{
 	"projects":      {"id", "cycle", "name", "description", "language", "topics", "entered_at", "listed_at", "observed_at", "attempted_at", "error", "stars", "trends", "metadata_at", "type", "repo_id"},
 	"snapshot_days": {"cycle", "day", "hours"},
 	"system_state":  {"key", "value"},
+	"submissions":   {"id", "name", "repo_id", "phase", "github", "linuxdo", "repository_attempts", "readme_attempts", "next_at", "created_at", "finished_at", "message", "merged_into"},
 }
 
 func validateColumns(db *sql.DB) error {
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return err
+	}
 	for table, want := range tableColumns {
+		if table == "submissions" && version < 4 {
+			continue
+		}
 		rows, err := db.Query("PRAGMA table_info(" + table + ")")
 		if err != nil {
 			return err

@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"math"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -33,7 +34,7 @@ type Project struct {
 	Topics      []string             `json:"topics"`
 	Stars       int64                `json:"stars"`
 	EnteredAt   int64                `json:"enteredAt"`
-	ListedAt    int64                `json:"listedAt"`
+	ListedAt    *int64               `json:"listedAt"`
 	ObservedAt  int64                `json:"observedAt"`
 	AttemptedAt int64                `json:"attemptedAt"`
 	Error       *string              `json:"error"`
@@ -69,16 +70,20 @@ type HistoryResult struct {
 type HTTPOptions struct {
 	AllowedOrigin, StaticDir string
 	Now                      func() time.Time
+	Submissions              SubmissionControl
+	TrustedProxies           []netip.Prefix
 }
 type cacheEntry struct {
-	body    []byte
-	expires int64
+	body     []byte
+	expires  int64
+	revision uint64
 }
 type handler struct {
 	store   *Store
 	options HTTPOptions
 	mu      sync.Mutex
 	cache   map[string]cacheEntry
+	limiter submissionLimiter
 }
 
 func Handler(store *Store, options HTTPOptions) http.Handler {
@@ -269,6 +274,10 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 	}
 	fail := func(status int, message string) { writeJSON(w, status, map[string]string{"error": message}) }
+	if r.URL.Path == "/api/submissions" || strings.HasPrefix(r.URL.Path, "/api/submissions/") {
+		h.submissionAPI(w, r)
+		return
+	}
 	if r.Method != "GET" && r.Method != "OPTIONS" {
 		w.Header().Set("Allow", "GET, OPTIONS")
 		fail(405, "仅支持只读查询")
@@ -290,7 +299,8 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 			h.mu.Lock()
 			entry, ok := h.cache[key]
 			h.mu.Unlock()
-			if ok && entry.expires > now {
+			revision := h.store.listRevision.Load()
+			if ok && entry.expires > now && entry.revision == revision {
 				w.Header().Set("Content-Type", "application/json")
 				w.Write(entry.body)
 				return
@@ -314,7 +324,7 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 							break
 						}
 					}
-					h.cache[key] = cacheEntry{body: body, expires: now + 600_000}
+					h.cache[key] = cacheEntry{body: body, expires: now + 600_000, revision: revision}
 					h.mu.Unlock()
 				}
 			}

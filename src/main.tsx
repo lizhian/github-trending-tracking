@@ -17,6 +17,7 @@ import {
   type TrendSummary,
   type WindowHours,
 } from "../shared/contracts";
+import { SubmissionDialog } from "./SubmissionDialog";
 import { SearchSelect } from "./SearchSelect";
 import "./style.css";
 
@@ -575,7 +576,7 @@ function Details({
           <dt>本次入库</dt>
           <dd>{time(project.enteredAt)}</dd>
           <dt>最近上榜</dt>
-          <dd>{time(project.listedAt)}</dd>
+          <dd>{project.listedAt === null ? "尚未上榜" : time(project.listedAt)}</dd>
           <dt>最后成功观测</dt>
           <dd>{time(project.observedAt)}</dd>
         </dl>
@@ -601,6 +602,8 @@ function App() {
   const [query, setQuery] = useState(readLocation);
   const [draft, setDraft] = useState(query.q);
   const [refresh, setRefresh] = useState(0);
+  const [submissionOpen, setSubmissionOpen] = useState(false);
+  const submissionChanged = useCallback(() => setRefresh((value) => value + 1), []);
   const [dark, setDark] = useState(() => {
     try {
       return localStorage.getItem("theme") === "dark";
@@ -859,6 +862,7 @@ function App() {
             </div>
           </section>
           <div className="masthead-end">
+            <button type="button" className="submission-open" onClick={() => setSubmissionOpen(true)}>投稿</button>
             <button
               type="button"
               className="icon-button"
@@ -879,6 +883,7 @@ function App() {
           </div>
         </div>
       </header>
+      {submissionOpen && <SubmissionDialog apiBase={apiBase} onClose={() => setSubmissionOpen(false)} onChanged={submissionChanged} />}
       <main className="frame app-main">
         <h1 className="visually-hidden">开源趋势追踪</h1>
         {failure && (

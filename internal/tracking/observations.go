@@ -48,7 +48,12 @@ func rowRepository(row ProjectRow) (*repository, error) {
 }
 func jsonText(v any) string { b, _ := json.Marshal(v); return string(b) }
 func (s *Store) saveObservations(ctx context.Context, items []observation, now int64, policy *SamplingPolicy) error {
-	if len(items) == 0 {
+	return s.saveObservationsAnd(ctx, items, now, policy, nil)
+}
+
+// The hook commits an intake checkpoint with the observations it created.
+func (s *Store) saveObservationsAnd(ctx context.Context, items []observation, now int64, policy *SamplingPolicy, checkpoint func(*sql.Tx) error) error {
+	if len(items) == 0 && checkpoint == nil {
 		return nil
 	}
 	cycles := []string{}
@@ -177,6 +182,11 @@ func (s *Store) saveObservations(ctx context.Context, items []observation, now i
 		point := jsonText(Point{at, *o.repo.Stars})
 		_, e = tx.ExecContext(ctx, `INSERT INTO snapshot_days(cycle,day,hours) SELECT ?,?,json_object(?,json(?)) FROM projects WHERE id=? AND cycle=? AND observed_at=? ON CONFLICT(cycle,day) DO UPDATE SET hours=json_set(snapshot_days.hours,?,json(?)) WHERE COALESCE(json_extract(snapshot_days.hours,? || '[0]'),0) < ?`, cycle, floorDiv(at, Day), hour, point, id, cycle, at, path, point, path, at)
 		if e != nil {
+			return e
+		}
+	}
+	if checkpoint != nil {
+		if e = checkpoint(tx); e != nil {
 			return e
 		}
 	}

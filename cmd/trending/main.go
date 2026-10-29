@@ -57,6 +57,8 @@ func run(args []string) error {
 		return errors.New("unexpected arguments")
 	}
 	switch command {
+	case "migrate":
+		return tracking.Migrate(*path)
 	case "init":
 		return tracking.Initialize(*path)
 	case "verify":
@@ -120,7 +122,7 @@ func run(args []string) error {
 		}
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q (use serve, init, verify, backup, restore, version)", command)
+		return fmt.Errorf("unknown command %q (use serve, init, migrate, verify, backup, restore, version)", command)
 	}
 }
 

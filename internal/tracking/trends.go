@@ -174,7 +174,7 @@ func (s *Store) ProjectViews(rows []ProjectRow, now int64, policy *SamplingPolic
 		if topics == nil {
 			topics = []string{}
 		}
-		items = append(items, Project{ID: row.ID, Type: row.Type, RepoID: row.RepoID, Name: row.Name, Description: row.Description, Language: row.Language, Topics: topics, Stars: row.Stars, EnteredAt: row.EnteredAt, ListedAt: row.ListedAt, ObservedAt: row.ObservedAt, AttemptedAt: row.AttemptedAt, Error: row.Error, Stale: IsStale(row.ObservedAt, now, policy), Trends: trends})
+		items = append(items, Project{ID: row.ID, Type: row.Type, RepoID: row.RepoID, Name: row.Name, Description: row.Description, Language: row.Language, Topics: topics, Stars: row.Stars, EnteredAt: row.EnteredAt, ListedAt: optionalListedAt(row.ListedAt), ObservedAt: row.ObservedAt, AttemptedAt: row.AttemptedAt, Error: row.Error, Stale: IsStale(row.ObservedAt, now, policy), Trends: trends})
 		if needsHistory {
 			expired = append(expired, row.Cycle)
 		}
@@ -217,4 +217,11 @@ func (s *Store) ProjectViews(rows []ProjectRow, now int64, policy *SamplingPolic
 		}
 	}
 	return items, nil
+}
+
+func optionalListedAt(at int64) *int64 {
+	if at == 0 {
+		return nil
+	}
+	return &at
 }

@@ -1859,3 +1859,49 @@ html {
     --chart-height: 180px;
   }
 }
+
+.submission-open {
+  min-height: 36px;
+  padding-inline: 12px;
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-control);
+  white-space: nowrap;
+  font-size: 14px;
+}
+.submission-dialog {
+  width: min(520px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  margin: auto;
+  padding: 24px;
+  color: var(--color-ink);
+  background: var(--color-paper-2);
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-card);
+  box-shadow: 0 24px 80px #0003;
+}
+.submission-dialog::backdrop { background: #0007; }
+.submission-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.submission-heading h2 { margin: 0; font-size: 20px; }
+.submission-dialog p { color: var(--color-muted); font-size: 14px; line-height: 1.7; }
+.submission-dialog form { display: grid; gap: 12px; margin-top: 24px; }
+.submission-dialog label { font-size: 14px; }
+.submission-dialog input {
+  width: 100%; min-width: 0; padding: 12px;
+  border: 1px solid var(--color-rule); border-radius: var(--radius-control);
+  color: var(--color-ink); background: var(--color-paper); font-size: 16px;
+}
+.submission-button { padding: 12px 16px; background: var(--color-ink); color: var(--color-paper); border-radius: var(--radius-control); }
+.submission-dialog .submission-error { color: var(--color-negative); }
+.submission-result { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--color-rule); overflow-wrap: anywhere; }
+.submission-result h3 { margin: 0 0 12px; font-size: 16px; }
+.submission-result a { color: var(--color-accent); }
+.submission-result dl { display: grid; gap: 12px; margin-block: 20px; font-size: 14px; }
+.submission-result dl > div { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.submission-result dt { color: var(--color-muted); }
+.submission-result dd { margin: 0; }
+@media (max-width: 420px) {
+  .submission-dialog { padding: 20px; }
+  .masthead-end { gap: 4px; }
+  .submission-open { padding-inline: 8px; }
+}

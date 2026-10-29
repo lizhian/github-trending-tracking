@@ -1,0 +1,244 @@
+package tracking
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"github.com/lizhian/github-trending-tracking/migrations"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+func submissionStore(t *testing.T) (*Store, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), DatabaseName)
+	if err := Initialize(path); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { store.Close() })
+	return store, path
+}
+
+func TestSubmissionAddressRules(t *testing.T) {
+	for _, input := range []string{"https://github.com/Acme/Tool", "https://GITHUB.com/Acme/Tool.git/", " https://github.com/Acme/Tool/?tab=readme "} {
+		got, err := submissionName(input)
+		if err != nil || got != "acme/tool" {
+			t.Errorf("%q: %q %v", input, got, err)
+		}
+	}
+	for _, input := range []string{"http://github.com/a/b", "https://gitlab.com/a/b", "https://github.com/a/b/tree/main", "https://user@github.com/a/b", "https://github.com:444/a/b", "https://github.com/topics/go", "https://github.com/a/%62", "https://github.com/a/..", "https://github.com/a/b//", "https://github.com/a"} {
+		if name, err := submissionName(input); err == nil {
+			t.Errorf("accepted %q as %q", input, name)
+		}
+	}
+}
+
+func TestSubmissionConcurrentDedupCapacityAndExpiry(t *testing.T) {
+	store, _ := submissionStore(t)
+	ctx := context.Background()
+	now := int64(20 * Day)
+	var wg sync.WaitGroup
+	ids := make(chan string, 20)
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sub, err := store.EnqueueSubmission(ctx, "https://github.com/Acme/Tool.git", now)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			ids <- sub.ID
+		}()
+	}
+	wg.Wait()
+	close(ids)
+	id := ""
+	for got := range ids {
+		if id != "" && id != got {
+			t.Fatal("concurrent duplicate created a second task")
+		}
+		id = got
+	}
+	for i := 0; i < 99; i++ {
+		if _, err := store.EnqueueSubmission(ctx, fmt.Sprintf("https://github.com/a/r%d", i), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.EnqueueSubmission(ctx, "https://github.com/a/overflow", now); err != ErrSubmissionCapacity {
+		t.Fatal(err)
+	}
+	if sub, err := store.EnqueueSubmission(ctx, "https://github.com/ACME/TOOL", now); err != nil || sub.ID != id {
+		t.Fatal("full queue did not merge duplicate", err)
+	}
+	if _, err := store.DB.Exec("UPDATE submissions SET phase='done',github='tracked',linuxdo='ineligible',finished_at=? WHERE id=?", now, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Submission(id, now+7*Day-1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Submission(id, now+7*Day); err == nil {
+		t.Fatal("expired result remained queryable")
+	}
+	newer, err := store.EnqueueSubmission(ctx, "https://github.com/acme/tool", now+Day)
+	if err != nil || newer.ID == id {
+		t.Fatal("ended task was reused", err)
+	}
+}
+
+type testSubmissionControl struct{ paused bool }
+
+func (c *testSubmissionControl) Paused(context.Context) (bool, error) { return c.paused, nil }
+func (c *testSubmissionControl) Wake()                                {}
+
+func TestSubmissionHTTPBoundariesAndProxyLimits(t *testing.T) {
+	store, _ := submissionStore(t)
+	control := &testSubmissionControl{}
+	now := time.UnixMilli(20 * Day)
+	proxies, _ := ParseProxyNetworks("10.0.0.0/8")
+	h := Handler(store, HTTPOptions{AllowedOrigin: "https://site.test", Now: func() time.Time { return now }, Submissions: control, TrustedProxies: proxies})
+	request := func(method, path, body, remote, forwarded string) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.RemoteAddr = remote
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Origin", "https://site.test")
+		r.Header.Set("X-Forwarded-For", forwarded)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	w := request("POST", "/api/submissions", `{"url":"https://github.com/a/b"}`, "10.0.0.1:1234", "192.0.2.1")
+	if w.Code != 202 {
+		t.Fatal(w.Code, w.Body)
+	}
+	var sub Submission
+	if err := json.Unmarshal(w.Body.Bytes(), &sub); err != nil {
+		t.Fatal(err)
+	}
+	if sub.URL != "https://github.com/a/b" || sub.Status != "queued" {
+		t.Fatal(sub)
+	}
+	if w := request("GET", "/api/submissions/"+sub.ID, "", "203.0.113.1:1234", ""); w.Code != 200 {
+		t.Fatal(w.Code, w.Body)
+	}
+	// An untrusted peer cannot rotate its quota by spoofing forwarding headers.
+	for i := 0; i < 5; i++ {
+		if w := request("POST", "/api/submissions", `{"url":"https://github.com/a/b"}`, "203.0.113.5:12", fmt.Sprintf("192.0.2.%d", i)); w.Code != 202 {
+			t.Fatal(w.Code, w.Body)
+		}
+	}
+	if w := request("POST", "/api/submissions", `{"url":"https://github.com/a/b"}`, "203.0.113.5:12", "192.0.2.200"); w.Code != 429 || w.Header().Get("Retry-After") == "" {
+		t.Fatal(w.Code, w.Body)
+	}
+	// Distinct real clients behind a trusted proxy retain independent quotas.
+	if w := request("POST", "/api/submissions", `{"url":"https://github.com/a/b"}`, "10.0.0.1:12", "192.0.2.2"); w.Code != 202 {
+		t.Fatal(w.Code, w.Body)
+	}
+	now = now.Add(time.Minute)
+	if w := request("POST", "/api/submissions", `{"url":"https://github.com/a/b"}`, "203.0.113.5:12", ""); w.Code != 202 {
+		t.Fatal(w.Code, w.Body)
+	}
+	control.paused = true
+	if w := request("POST", "/api/submissions", `{"url":"https://github.com/a/b"}`, "203.0.113.6:12", ""); w.Code != 503 {
+		t.Fatal(w.Code)
+	}
+	if w := request("GET", "/api/submissions/"+sub.ID, "", "203.0.113.6:12", ""); w.Code != 200 {
+		t.Fatal(w.Code)
+	}
+	control.paused = false
+	if w := request("POST", "/api/submissions", `{"url":"https://github.com/a/b","extra":1}`, "203.0.113.7:12", ""); w.Code != 400 {
+		t.Fatal(w.Code, w.Body)
+	}
+	if w := request("POST", "/api/submissions", `{"url":"https://github.com/a/b"}`+strings.Repeat(" ", 4096), "203.0.113.8:12", ""); w.Code != 413 {
+		t.Fatal(w.Code, w.Body)
+	}
+	if w := request("OPTIONS", "/api/submissions", "", "203.0.113.9:12", ""); w.Code != 204 || !strings.Contains(w.Header().Get("Access-Control-Allow-Methods"), "POST") {
+		t.Fatal(w.Code)
+	}
+	r := httptest.NewRequest("POST", "/api/submissions", strings.NewReader(`{}`))
+	r.Header.Set("Origin", "https://other.test")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatal(w.Code)
+	}
+}
+
+func TestSubmissionMigrationPreservesExistingDataAndBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), DatabaseName)
+	db, err := database(path, "rwc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range MigrationNames[:3] {
+		source, _ := migrations.Files.ReadFile(name)
+		if _, err = db.Exec(string(source)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = db.Exec("PRAGMA user_version=3"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO projects(id,cycle,name,topics,entered_at,listed_at,observed_at,attempted_at,stars,trends,type,repo_id) VALUES('github:R1','old-cycle','a/b','[]',1,2,3,3,10,'{}','github','R1'); INSERT INTO snapshot_days VALUES('old-cycle',0,'{"0":[3,10]}'); INSERT INTO system_state VALUES('pending','[{"name":"a/c","nextAt":99}]')`); err != nil {
+		t.Fatal(err)
+	}
+	before, err := Audit(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if err = Migrate(path); err != nil {
+		t.Fatal(err)
+	}
+	if err = Migrate(path); err != nil {
+		t.Fatal("migration was not idempotent", err)
+	}
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	after, err := Audit(store.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for table, digest := range before.Tables {
+		if !reflect.DeepEqual(digest, after.Tables[table]) {
+			t.Fatalf("migration changed %s", table)
+		}
+	}
+	if err = Migrate(path); err == nil {
+		t.Fatal("migration allowed a live writer")
+	}
+	sub, err := store.EnqueueSubmission(context.Background(), "https://github.com/a/c", 20*Day)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := store.Backup(t.TempDir(), time.UnixMilli(20*Day))
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), DatabaseName)
+	if err = Restore(backup.Path, target); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := Open(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	if got, err := restored.Submission(sub.ID, 20*Day); err != nil || got.Name != sub.Name {
+		t.Fatal("queue missing after restore", err)
+	}
+}
