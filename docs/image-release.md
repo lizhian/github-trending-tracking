@@ -1,6 +1,6 @@
 # 版本镜像发布与手动更新
 
-推送严格的 `vMAJOR.MINOR.PATCH` tag 会运行 `.github/workflows/release-image.yml`，使用标准 GitHub 托管 runner 构建并发布 `ghcr.io/lizhian/github-trending-tracking` 的 `linux/amd64` 和 `linux/arm64` 镜像。镜像包含 Go、SQLite 驱动、原前端及 HTTPS 根证书；运行不需要 Node。构建仅使用工作流自带的 `GITHUB_TOKEN`，权限为 `contents: read`、`packages: write`，不使用采集 Token，也不连接生产服务器。
+推送严格的 `vMAJOR.MINOR.PATCH` tag 会运行 `.github/workflows/release-image.yml`，在标准 GitHub 托管 runner `ubuntu-24.04` 和 `ubuntu-24.04-arm` 上分别并行构建 `linux/amd64` 和 `linux/arm64`，按架构隔离构建缓存。两个构建均成功后，汇总各自 digest，合并并发布 `ghcr.io/lizhian/github-trending-tracking` 的同一版本多平台镜像。镜像包含 Go、SQLite 驱动、原前端及 HTTPS 根证书；运行不需要 Node。构建仅使用工作流自带的 `GITHUB_TOKEN`，权限为 `contents: read`、`packages: write`，不使用采集 Token，也不连接生产服务器。
 
 ```sh
 # 在完整业务版本检查通过后发布；不要移动已部署版本的 tag。
