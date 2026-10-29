@@ -1684,6 +1684,24 @@ html {
   .list-controls {
     position: relative;
     top: auto;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: var(--space-lg);
+  }
+  .list-controls .view-tabs {
+    flex-shrink: 0;
+  }
+  .list-controls .view-tabs button {
+    white-space: nowrap;
+  }
+  .list-controls .filters {
+    flex: 1 1 572px;
+    min-width: min(100%, 572px);
+  }
+  .list-controls .heading-scroll {
+    flex: 0 0 100%;
+    min-width: 0;
   }
 }
 
