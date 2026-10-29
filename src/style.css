@@ -1,7 +1,8 @@
 /* Hallmark · shape: app screen · genre: modern-minimal · theme: Furrow (deal 3/3, seed github-3a8e·0c2503a7·2026-10-28·r0) · nav: compact inline-metric masthead · signature: source tabs over a compact four-window ledger and linked observation pane · states: full, empty, accumulating, partial · axes: light/grotesk-sans/warm · posture: committed · data: real API · v2.0.0 */
-/* Hallmark · pre-emit critique: P4 H5 E4 S4 R5 V4 · weakest: E, compact mobile chrome; keep the metric header readable and the pinned name beside four horizontally accessible windows */
-/* Hallmark · finish-review: subagent ship · compact masthead, source tabs, linked owner/title hierarchy and numeric ledger · no required corrections */
-/* Hallmark · dismissed F4 · the view tabs use an underline and the period selector shows local chart state; only the repository link is a filled primary action */
+/* Hallmark · pre-emit critique: P4 H5 E4 S4 R5 V4 · weakest: E, competing toolbar outlines; unify warm control surfaces and give source selection one compact segmented rail */
+/* Hallmark · component: source and filter toolbar · theme: existing Furrow · scope: component · copy: verbatim · redesign: full (toolbar only) · v2.0.0 */
+/* Hallmark · finish-review: in-thread · fixed mobile filter widths; warm surfaces preserve field edges, immediate focus and existing handlers */
+/* Hallmark · dismissed F4 · source tabs select a tracking type and the period selector shows local chart state; only the repository link is a filled primary action */
 /* Hallmark · dismissed F25 · the project-name column stays pinned while the four trend windows scroll horizontally, as requested and checked at 320px and 375px */
 @import url("./tokens.css");
 @import url("./base.css");
@@ -14,6 +15,8 @@
   --color-negative: oklch(48% 0.15 30);
   --color-focus: oklch(48% 0.17 38);
   --radius-control: 4px;
+  --color-control: color-mix(in oklab, var(--color-paper-3) 55%, var(--color-paper));
+  --color-control-edge: color-mix(in oklab, var(--color-muted) 64%, var(--color-paper));
   --font-display:
     "Red Hat Display", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-body: "Red Hat Text", "PingFang SC", "Microsoft YaHei", sans-serif;
@@ -220,12 +223,17 @@ nav a[aria-current]::after {
 }
 .view-tabs {
   display: flex;
-  border-bottom: 1px solid var(--color-rule);
-  gap: var(--space-lg);
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-pill);
+  background: var(--color-control);
+  padding: var(--space-2xs);
+  gap: var(--space-2xs);
 }
 .view-tabs button {
-  min-height: 44px;
-  font-size: 14px;
+  min-height: 32px;
+  padding-inline: var(--space-sm);
+  border-radius: var(--radius-control);
+  font-size: 13px;
   position: relative;
   display: flex;
   gap: var(--space-xs);
@@ -234,6 +242,9 @@ nav a[aria-current]::after {
 }
 .view-tabs button[aria-pressed="true"] {
   color: var(--color-ink);
+  background: var(--color-paper);
+  box-shadow: inset 0 -2px var(--color-accent);
+  font-weight: 500;
 }
 .view-tabs button[aria-pressed="true"]::after {
   content: "";
@@ -1408,9 +1419,9 @@ html {
 .filter-trigger,
 .filters .icon-button {
   height: var(--control-height);
-  border: 1px solid var(--color-muted);
-  border-radius: var(--radius-control);
-  background: var(--color-paper-2);
+  border: 1px solid var(--color-control-edge);
+  border-radius: var(--radius-pill);
+  background: var(--color-control);
 }
 .search-field {
   gap: var(--space-xs);
@@ -1429,7 +1440,8 @@ html {
 }
 .search-field kbd {
   color: var(--color-muted);
-  background: var(--color-paper);
+  background: transparent;
+  border-color: var(--color-control-edge);
 }
 .filters .filter-select {
   flex: 0 1 144px;
@@ -1461,15 +1473,27 @@ html {
 }
 .filter-trigger[aria-expanded="true"] {
   background: var(--color-paper-3);
+  border-color: var(--color-muted);
 }
 .filters .icon-button {
   min-width: var(--control-height);
   color: var(--color-muted);
+  background: transparent;
+  border-color: transparent;
+}
+.filters .icon-button:disabled {
+  background: transparent;
+}
+.search-field:focus-within {
+  border-color: var(--color-muted);
 }
 @media (hover: hover) {
   .search-field:hover,
   .filter-trigger:hover,
   .filters .icon-button:hover {
+    background: var(--color-paper-3);
+  }
+  .view-tabs button:not([aria-pressed="true"]):hover {
     background: var(--color-paper-3);
   }
 }
@@ -1554,6 +1578,7 @@ html {
   display: none;
 }
 .view-indicator {
+  display: none;
   position: absolute;
   bottom: -1px;
   left: 0;
@@ -1652,6 +1677,22 @@ html {
     flex: 1 1 0;
     min-width: 0;
   }
+  .list-controls .filters {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+  .list-controls .search-field {
+    grid-column: span 4;
+    min-width: 0;
+  }
+  .list-controls .filter-select {
+    grid-column: span 3;
+    grid-row: 2;
+  }
+  .list-controls .filters .icon-button {
+    width: 100%;
+    min-width: 0;
+  }
   .filter-trigger {
     padding-inline: var(--space-sm);
     gap: var(--space-xs);
@@ -1681,7 +1722,7 @@ html {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    column-gap: var(--space-lg);
+    column-gap: var(--space-md);
   }
   .list-controls .view-tabs {
     flex-shrink: 0;
@@ -1790,7 +1831,7 @@ html {
     min-width: 632px;
   }
   .view-tabs {
-    gap: var(--space-lg);
+    gap: var(--space-2xs);
   }
   .view-tabs button {
     white-space: nowrap;

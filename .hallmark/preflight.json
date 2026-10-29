@@ -1,24 +1,22 @@
 {
-  "scanned": "2026-10-28",
-  "scope": "compact masthead, source tabs, owner/title and numeric ledger",
+  "scanned": "2026-10-29",
+  "scope": "source tabs and search/filter toolbar",
   "findings": {
     "framework": "React 19 / Vite 8 in package.json:18",
     "domain": "GLOSSARY.md:1; no new terms or decisions",
     "header": "src/main.tsx and src/style.css: inline metrics, 52px desktop header, compact two-row mobile header",
-    "controls": "src/SearchSelect.tsx shared searchable filter; src/style.css whole-surface focus and motion",
+    "controls": "src/main.tsx:1008; src/style.css:1407,1686: bright surfaces and heavy outlines compete with source tabs",
     "material": "Live API observations and existing Furrow tokens",
     "api": "worker/api.ts and worker/contracts.ts: removed view and views; Linux.do is a front-end-only placeholder"
   },
   "preserve": [
-    "Furrow palette and typography",
-    "Real API values and four windows",
-    "URL state and stable project IDs",
-    "Independent desktop scrolling and mobile pinned names"
+    "Existing Furrow palette and fonts (src/tokens.css:57)",
+    "Search, filters, source switching and reset/refresh handlers (src/main.tsx:1008)",
+    "Responsive layout and table scrolling"
   ],
   "introduce": [
-    "github趋势 and clickable Linux.do开源趋势 placeholder",
-    "Small owner beside linked large repository title; wrap only when space requires",
-    "64px language and number columns and one-decimal k above 1000 with exact accessible values"
+    "Warm, low-contrast shared control surface",
+    "Compact segmented source switch and quiet utility actions"
   ],
   "inferred": {
     "audience": "developers discovering open source",
