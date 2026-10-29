@@ -82,7 +82,7 @@ func auditSnapshot(path string) (DatabaseAudit, error) {
 	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return DatabaseAudit{}, err
 	}
-	if version != 3 && version != SchemaVersion {
+	if version < 3 || version > SchemaVersion {
 		return DatabaseAudit{}, fmt.Errorf("unsupported backup schema version %d", version)
 	}
 	if err = validateColumns(db); err != nil {

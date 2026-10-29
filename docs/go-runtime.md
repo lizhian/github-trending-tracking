@@ -85,4 +85,4 @@ go run ./cmd/trending verify --db /private/path/restored-data/tracking.sqlite \
 
 ## 投稿版本升级
 
-投稿功能使用 schema 4，旧 schema 3 备份仍可验证和恢复，但运行前必须在停机状态执行 `trending migrate --db /data/tracking.sqlite`。命令不会创建缺失数据库。先制作一致备份，再停止服务、迁移并启动兼容镜像；完整流程及可信代理限流配置见[仓库投稿](submissions.md)。
+当前 schema 为 5，在投稿表（schema 4）基础上为项目增加 Homepage；旧 schema 3、4 备份仍可验证和恢复，但运行前必须在停机状态执行 `trending migrate --db /data/tracking.sqlite`。命令不会创建缺失数据库。先制作一致备份，再停止服务、迁移并启动兼容镜像；完整流程及可信代理限流配置见[仓库投稿](submissions.md)。

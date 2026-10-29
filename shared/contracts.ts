@@ -20,6 +20,7 @@ export interface Project {
   repoId: string;
   name: string;
   description: string | null;
+  homepage: string | null;
   language: string | null;
   topics: string[];
   stars: number;

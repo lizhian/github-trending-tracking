@@ -180,71 +180,96 @@ func TestSubmissionHTTPBoundariesAndProxyLimits(t *testing.T) {
 	}
 }
 
-func TestSubmissionMigrationPreservesExistingDataAndBackup(t *testing.T) {
-	path := filepath.Join(t.TempDir(), DatabaseName)
-	db, err := database(path, "rwc")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, name := range MigrationNames[:3] {
-		source, _ := migrations.Files.ReadFile(name)
-		if _, err = db.Exec(string(source)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err = db.Exec("PRAGMA user_version=3"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err = db.Exec(`INSERT INTO projects(id,cycle,name,topics,entered_at,listed_at,observed_at,attempted_at,stars,trends,type,repo_id) VALUES('github:R1','old-cycle','a/b','[]',1,2,3,3,10,'{}','github','R1'); INSERT INTO snapshot_days VALUES('old-cycle',0,'{"0":[3,10]}'); INSERT INTO system_state VALUES('pending','[{"name":"a/c","nextAt":99}]')`); err != nil {
-		t.Fatal(err)
-	}
-	before, err := Audit(db)
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-	if err = Migrate(path); err != nil {
-		t.Fatal(err)
-	}
-	if err = Migrate(path); err != nil {
-		t.Fatal("migration was not idempotent", err)
-	}
-	store, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	after, err := Audit(store.DB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for table, digest := range before.Tables {
-		if !reflect.DeepEqual(digest, after.Tables[table]) {
-			t.Fatalf("migration changed %s", table)
-		}
-	}
-	if err = Migrate(path); err == nil {
-		t.Fatal("migration allowed a live writer")
-	}
-	sub, err := store.EnqueueSubmission(context.Background(), "https://github.com/a/c", 20*Day)
-	if err != nil {
-		t.Fatal(err)
-	}
-	backup, err := store.Backup(t.TempDir(), time.UnixMilli(20*Day))
-	if err != nil {
-		t.Fatal(err)
-	}
-	target := filepath.Join(t.TempDir(), DatabaseName)
-	if err = Restore(backup.Path, target); err != nil {
-		t.Fatal(err)
-	}
-	restored, err := Open(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer restored.Close()
-	if got, err := restored.Submission(sub.ID, 20*Day); err != nil || got.Name != sub.Name {
-		t.Fatal("queue missing after restore", err)
+func TestMigrationPreservesExistingDataAndBackup(t *testing.T) {
+	for _, version := range []int{3, 4} {
+		t.Run(fmt.Sprintf("schema-%d", version), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), DatabaseName)
+			db, err := database(path, "rwc")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range MigrationNames[:version] {
+				source, _ := migrations.Files.ReadFile(name)
+				if _, err = db.Exec(string(source)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err = db.Exec(fmt.Sprintf("PRAGMA user_version=%d", version)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = db.Exec(`INSERT INTO projects(id,cycle,name,topics,entered_at,listed_at,observed_at,attempted_at,stars,trends,type,repo_id) VALUES('github:R1','old-cycle','a/b','[]',1,2,3,3,10,'{}','github','R1'); INSERT INTO snapshot_days VALUES('old-cycle',0,'{"0":[3,10]}'); INSERT INTO system_state VALUES('pending','[{"name":"a/c","nextAt":99}]')`); err != nil {
+				t.Fatal(err)
+			}
+			legacyProjectQuery := "SELECT json_array(" + strings.Join(columnsForVersion("projects", 3), ",") + ") FROM projects"
+			var beforeProject string
+			if err = db.QueryRow(legacyProjectQuery).Scan(&beforeProject); err != nil {
+				t.Fatal(err)
+			}
+			before, err := Audit(db)
+			if err != nil {
+				t.Fatal(err)
+			}
+			db.Close()
+			// Older snapshots must remain verifiable and restorable before upgrading.
+			oldTarget := filepath.Join(t.TempDir(), DatabaseName)
+			if err = Restore(path, oldTarget); err != nil {
+				t.Fatal("old backup was rejected", err)
+			}
+			if err = Migrate(path); err != nil {
+				t.Fatal(err)
+			}
+			if err = Migrate(path); err != nil {
+				t.Fatal("migration was not idempotent", err)
+			}
+			store, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			after, err := Audit(store.DB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for table, digest := range before.Tables {
+				if table == "projects" {
+					continue
+				}
+				if !reflect.DeepEqual(digest, after.Tables[table]) {
+					t.Fatalf("migration changed %s", table)
+				}
+			}
+			var afterProject string
+			if err = store.DB.QueryRow(legacyProjectQuery).Scan(&afterProject); err != nil || afterProject != beforeProject {
+				t.Fatal("migration changed existing project fields", beforeProject, afterProject, err)
+			}
+			rows, err := store.ProjectRows("")
+			if err != nil || len(rows) != 1 || rows[0].Homepage != nil || before.Tables["projects"].Rows != after.Tables["projects"].Rows {
+				t.Fatal("migration lost projects or supplied a homepage", rows, err)
+			}
+			if err = Migrate(path); err == nil {
+				t.Fatal("migration allowed a live writer")
+			}
+			sub, err := store.EnqueueSubmission(context.Background(), "https://github.com/a/c", 20*Day)
+			if err != nil {
+				t.Fatal(err)
+			}
+			backup, err := store.Backup(t.TempDir(), time.UnixMilli(20*Day))
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(t.TempDir(), DatabaseName)
+			if err = Restore(backup.Path, target); err != nil {
+				t.Fatal(err)
+			}
+			restored, err := Open(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer restored.Close()
+			if got, err := restored.Submission(sub.ID, 20*Day); err != nil || got.Name != sub.Name {
+				t.Fatal("queue missing after restore", err)
+			}
+		})
 	}
 }
 

@@ -129,6 +129,7 @@ type collectionHarness struct {
 	failed         map[string]bool
 	graphqlFailure bool
 	seenQueries    []string
+	homepages      map[int]any
 }
 
 func newCollectionHarness(t *testing.T, start int64) *collectionHarness {
@@ -177,6 +178,9 @@ func newCollectionHarness(t *testing.T, start int64) *collectionHarness {
 			}
 			if strings.Contains(q, "stargazerCount") {
 				v["stargazerCount"] = h.stars[i]
+			}
+			if strings.Contains(q, "homepageUrl") {
+				v["homepageUrl"] = h.homepages[i]
 			}
 			if strings.Contains(q, "repositoryTopics") {
 				v["repositoryTopics"] = map[string]any{"nodes": []any{}}
@@ -327,6 +331,7 @@ func TestLegacyMixedStatusUsesActualProjectErrorsBeforeNextSamplingSlot(t *testi
 func TestSharedObservationKeepsIndependentHistoryAndAdmissionTime(t *testing.T) {
 	start := beijing("2026-10-01T08:50:00")
 	h := newCollectionHarness(t, start)
+	h.homepages = map[int]any{0: "https://example.com/one", 1: "https://example.com/two"}
 	linux := "https://linux.do/tag/2234-tag/2234.rss"
 	fallback := "https://fallback.example/rss?secret=private"
 	unavailable := func() *http.Response { r := response("private-source-body"); r.StatusCode = 503; return r }
@@ -363,7 +368,7 @@ func TestSharedObservationKeepsIndependentHistoryAndAdmissionTime(t *testing.T) 
 	h.tick(beijing("2026-10-01T15:00:00"))
 	for _, v := range h.list("linux.do")["items"].([]any) {
 		item := v.(map[string]any)
-		if item["name"] == "" || item["language"] != "Go" {
+		if item["name"] == "" || item["language"] != "Go" || item["homepage"] != "https://example.com/"+strings.TrimPrefix(item["name"].(string), "acme/") {
 			t.Fatal(item)
 		}
 	}
@@ -639,7 +644,7 @@ func TestHundredRepositoryBatchesUpdateBothTypesAndCompletedRoundStaysIdle(t *te
 	}
 	observed := beijing("2026-10-02T09:00:00")
 	seedMatureProjects(t, h, 500, observed)
-	if _, e := h.store.DB.Exec(`INSERT INTO projects SELECT 'linux.do:'||repo_id,cycle||'-linux',name,description,language,topics,entered_at,listed_at,observed_at,attempted_at,error,stars,trends,metadata_at,'linux.do',repo_id FROM projects WHERE type='github'`); e != nil {
+	if _, e := h.store.DB.Exec(`INSERT INTO projects SELECT 'linux.do:'||repo_id,cycle||'-linux',name,description,language,topics,entered_at,listed_at,observed_at,attempted_at,error,stars,trends,metadata_at,'linux.do',repo_id,homepage FROM projects WHERE type='github'`); e != nil {
 		t.Fatal(e)
 	}
 	if _, e := h.store.DB.Exec(`INSERT INTO snapshot_days SELECT cycle||'-linux',day,hours FROM snapshot_days WHERE cycle NOT LIKE '%-linux'`); e != nil {
@@ -748,4 +753,36 @@ func TestLateObservationCannotWriteIntoReplacementTrackingCycle(t *testing.T) {
 	if len(points) != 1 || points[0].([]any)[1] != float64(999) {
 		t.Fatal("old result overwrote new cycle", history)
 	}
+}
+
+func TestHomepageFollowsMetadataRefresh(t *testing.T) {
+	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
+	h.names = h.names[:1]
+	h.homepages = map[int]any{0: "https://example.com/first"}
+	check := func(want any) {
+		t.Helper()
+		item := h.list("github")["items"].([]any)[0].(map[string]any)
+		if item["homepage"] != want {
+			t.Fatalf("homepage = %v, want %v", item["homepage"], want)
+		}
+	}
+	h.tick(beijing("2026-10-01T09:00:00"))
+	check("https://example.com/first")
+	h.homepages[0] = "https://example.com/updated"
+	h.seenQueries = nil
+	h.tick(beijing("2026-10-01T11:00:00"))
+	check("https://example.com/first")
+	for _, query := range h.seenQueries {
+		if strings.Contains(query, "homepageUrl") {
+			t.Fatal("homepage caused an early metadata request", query)
+		}
+	}
+	h.tick(beijing("2026-10-02T11:00:00"))
+	check("https://example.com/updated")
+	h.homepages[0] = nil
+	h.tick(beijing("2026-10-03T13:00:00"))
+	check(nil)
+	h.homepages[0] = ""
+	h.tick(beijing("2026-10-04T15:00:00"))
+	check("")
 }

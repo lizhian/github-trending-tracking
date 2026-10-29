@@ -22,7 +22,7 @@ func rowRepository(row ProjectRow) (*repository, error) {
 	if e := json.Unmarshal([]byte(row.Topics), &names); e != nil {
 		return nil, e
 	}
-	r := &repository{ID: row.RepoID, Name: row.Name, Description: row.Description, Stars: ptr(row.Stars)}
+	r := &repository{ID: row.RepoID, Name: row.Name, Description: row.Description, Homepage: row.Homepage, Stars: ptr(row.Stars)}
 	if row.Language != nil {
 		r.Language = &struct {
 			Name string `json:"name"`
@@ -138,7 +138,7 @@ func (s *Store) saveObservationsAnd(ctx context.Context, items []observation, no
 			}
 			trends[width] = v
 		}
-		name, description, language, topics := o.repo.Name, o.repo.Description, (*string)(nil), "[]"
+		name, description, homepage, language, topics := o.repo.Name, o.repo.Description, o.repo.Homepage, (*string)(nil), "[]"
 		metadataAt := o.metadataAt
 		if o.repo.Name != "" {
 			names := []string{}
@@ -157,6 +157,7 @@ func (s *Store) saveObservationsAnd(ctx context.Context, items []observation, no
 		} else if o.previous != nil {
 			name = o.previous.Name
 			description = o.previous.Description
+			homepage = o.previous.Homepage
 			language = o.previous.Language
 			topics = o.previous.Topics
 			if metadataAt == 0 {
@@ -170,9 +171,9 @@ func (s *Store) saveObservationsAnd(ctx context.Context, items []observation, no
 			listed = o.previous.ListedAt
 		}
 		if o.previous != nil {
-			_, e = tx.ExecContext(ctx, `UPDATE projects SET name=?,description=?,language=?,topics=?,observed_at=?,attempted_at=?,stars=?,trends=?,error=NULL,metadata_at=?,listed_at=MAX(listed_at,?) WHERE id=? AND cycle=? AND observed_at<?`, name, description, language, topics, at, at, *o.repo.Stars, jsonText(trends), metadataAt, listed, id, cycle, at)
+			_, e = tx.ExecContext(ctx, `UPDATE projects SET name=?,description=?,homepage=?,language=?,topics=?,observed_at=?,attempted_at=?,stars=?,trends=?,error=NULL,metadata_at=?,listed_at=MAX(listed_at,?) WHERE id=? AND cycle=? AND observed_at<?`, name, description, homepage, language, topics, at, at, *o.repo.Stars, jsonText(trends), metadataAt, listed, id, cycle, at)
 		} else {
-			_, e = tx.ExecContext(ctx, `INSERT INTO projects(id,type,repo_id,cycle,name,description,language,topics,observed_at,attempted_at,stars,trends,entered_at,listed_at,metadata_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, id, typ, o.repo.ID, cycle, name, description, language, topics, at, at, *o.repo.Stars, jsonText(trends), now, listed, metadataAt)
+			_, e = tx.ExecContext(ctx, `INSERT INTO projects(id,type,repo_id,cycle,name,description,homepage,language,topics,observed_at,attempted_at,stars,trends,entered_at,listed_at,metadata_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, id, typ, o.repo.ID, cycle, name, description, homepage, language, topics, at, at, *o.repo.Stars, jsonText(trends), now, listed, metadataAt)
 		}
 		if e != nil {
 			return e

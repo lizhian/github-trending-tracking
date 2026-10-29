@@ -480,6 +480,26 @@ td.numeric {
   line-height: 1.8;
   margin-top: var(--space-md);
 }
+.detail-homepage {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  margin-top: var(--space-sm);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.detail-homepage svg {
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 2px;
+}
+.detail-homepage span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.detail-homepage:hover span {
+  text-decoration: underline;
+}
 .topics {
   display: flex;
   flex-wrap: wrap;

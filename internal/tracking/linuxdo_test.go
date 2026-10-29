@@ -295,7 +295,7 @@ func cleanupProgress(t *testing.T, h *collectionHarness) cleanupReport {
 func copyLinuxProjects(t *testing.T, h *collectionHarness) {
 	t.Helper()
 	for _, sql := range []string{
-		`INSERT INTO projects SELECT 'linux.do:'||repo_id,cycle||'-linux',name,description,language,topics,entered_at,listed_at,observed_at,attempted_at,error,stars,trends,metadata_at,'linux.do',repo_id FROM projects WHERE type='github'`,
+		`INSERT INTO projects SELECT 'linux.do:'||repo_id,cycle||'-linux',name,description,language,topics,entered_at,listed_at,observed_at,attempted_at,error,stars,trends,metadata_at,'linux.do',repo_id,homepage FROM projects WHERE type='github'`,
 		`INSERT INTO snapshot_days SELECT cycle||'-linux',day,hours FROM snapshot_days WHERE cycle NOT LIKE '%-linux'`,
 		`DELETE FROM system_state WHERE key='linuxdo_cleanup_v1'`,
 	} {
@@ -517,7 +517,7 @@ func TestLinuxdoCleanupRequiresBackupAndFencesReplacementCycle(t *testing.T) {
 	if _, err := h.store.DB.Exec(`DELETE FROM projects WHERE type='linux.do'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.store.DB.Exec(`INSERT INTO projects SELECT 'linux.do:'||repo_id,'replacement',name,description,language,topics,entered_at,listed_at,observed_at,attempted_at,error,stars,trends,metadata_at,'linux.do',repo_id FROM projects WHERE type='github'`); err != nil {
+	if _, err := h.store.DB.Exec(`INSERT INTO projects SELECT 'linux.do:'||repo_id,'replacement',name,description,language,topics,entered_at,listed_at,observed_at,attempted_at,error,stars,trends,metadata_at,'linux.do',repo_id,homepage FROM projects WHERE type='github'`); err != nil {
 		t.Fatal(err)
 	}
 	h.sources[readmeURL] = func() *http.Response { return response("no marker") }

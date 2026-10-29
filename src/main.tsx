@@ -399,6 +399,23 @@ function TrendValue({ trend }: { trend: TrendSummary }) {
     </span>
   );
 }
+function homepageURL(value: string | null): URL | null {
+  if (!value?.trim()) return null;
+  const address = value.trim();
+  try {
+    const url = new URL(
+      address.startsWith("//")
+        ? `https:${address}`
+        : /^[a-z][a-z\d+.-]*:/i.test(address)
+          ? address
+          : `https://${address}`,
+    );
+    return url.protocol === "https:" || url.protocol === "http:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 function Details({
   project,
   window,
@@ -424,6 +441,7 @@ function Details({
   const current = history.value;
   const trend = current?.trend;
   const [owner, ...name] = project.name.split("/");
+  const homepage = homepageURL(project.homepage);
   const protectedNow = asOf - project.enteredAt < 24 * 3_600_000;
   const days =
     trend?.start && trend.end ? (trend.end - trend.start) / 86_400_000 : null;
@@ -443,6 +461,31 @@ function Details({
       <p className="detail-description">
         {project.description || "仓库尚未提供简介。"}
       </p>
+      {homepage && (
+        <a
+          className="detail-homepage"
+          href={homepage.href}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`项目网站：${homepage.href}`}
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M10 13a5 5 0 0 0 7 .1l3-3a5 5 0 0 0-7.1-7.1l-1.7 1.7" />
+            <path d="M14 11a5 5 0 0 0-7-.1l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7" />
+          </svg>
+          <span>{homepage.href.replace(/^https?:\/\//, "")}</span>
+        </a>
+      )}
       <div className="topics" aria-label="仓库 Topics">
         {project.topics.length ? (
           project.topics.map((topic) => (

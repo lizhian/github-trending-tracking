@@ -30,6 +30,7 @@ type Project struct {
 	RepoID      string               `json:"repoId"`
 	Name        string               `json:"name"`
 	Description *string              `json:"description"`
+	Homepage    *string              `json:"homepage"`
 	Language    *string              `json:"language"`
 	Topics      []string             `json:"topics"`
 	Stars       int64                `json:"stars"`

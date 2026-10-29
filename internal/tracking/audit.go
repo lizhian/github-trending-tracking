@@ -53,7 +53,8 @@ func Audit(db *sql.DB) (DatabaseAudit, error) {
 		tables = append(tables, "submissions")
 	}
 	for _, table := range tables {
-		query := "SELECT " + strings.Join(tableColumns[table], ",") + " FROM " + table
+		columns := columnsForVersion(table, version)
+		query := "SELECT " + strings.Join(columns, ",") + " FROM " + table
 		switch table {
 		case "projects", "submissions":
 			query += " ORDER BY id"
@@ -69,7 +70,7 @@ func Audit(db *sql.DB) (DatabaseAudit, error) {
 		hash := sha256.New()
 		count := 0
 		for rows.Next() {
-			values := make([]any, len(tableColumns[table]))
+			values := make([]any, len(columns))
 			pointers := make([]any, len(values))
 			for i := range values {
 				pointers[i] = &values[i]
@@ -78,7 +79,7 @@ func Audit(db *sql.DB) (DatabaseAudit, error) {
 				rows.Close()
 				return report, err
 			}
-			for i, column := range tableColumns[table] {
+			for i, column := range columns {
 				if value, ok := values[i].([]byte); ok {
 					values[i] = string(value)
 				}

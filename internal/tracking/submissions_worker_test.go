@@ -37,7 +37,7 @@ func submissionResponse(code int, body string) *http.Response {
 	return &http.Response{StatusCode: code, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
 }
 
-const submissionRepository = `{"id":"R1","nameWithOwner":"acme/tool","description":"a tool","primaryLanguage":{"name":"Go"},"repositoryTopics":{"nodes":[]},"stargazerCount":100,"isPrivate":false}`
+const submissionRepository = `{"id":"R1","nameWithOwner":"acme/tool","description":"a tool","homepageUrl":"https://example.com/tool","primaryLanguage":{"name":"Go"},"repositoryTopics":{"nodes":[]},"stargazerCount":100,"isPrivate":false}`
 
 type submissionHarness struct {
 	store     *Store
@@ -128,6 +128,9 @@ func TestSubmissionAdmissionIndependentStagesAndNoArtificialListing(t *testing.T
 		t.Fatal("did not share one observation across independent cycles", rows)
 	}
 	for _, row := range rows {
+		if row.Homepage == nil || *row.Homepage != "https://example.com/tool" {
+			t.Fatal("submission lost homepage", row)
+		}
 		if row.ListedAt != 0 {
 			t.Fatal("submission recorded an artificial listing")
 		}

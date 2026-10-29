@@ -190,6 +190,7 @@ type repository struct {
 	ID          string  `json:"id"`
 	Name        string  `json:"nameWithOwner"`
 	Description *string `json:"description"`
+	Homepage    *string `json:"homepageUrl"`
 	Language    *struct {
 		Name string `json:"name"`
 	} `json:"primaryLanguage"`
@@ -218,7 +219,7 @@ func (u *upstream) repositories(ctx context.Context, token string, targets []str
 	if mode == "identity" {
 		fields = "id nameWithOwner"
 	} else if mode == "metadata" || mode == "submission" {
-		fields = "id nameWithOwner description primaryLanguage { name } repositoryTopics(first:100) { nodes { topic { name } } } stargazerCount"
+		fields = "id nameWithOwner description homepageUrl primaryLanguage { name } repositoryTopics(first:100) { nodes { topic { name } } } stargazerCount"
 	}
 	if mode == "submission" {
 		fields += " isPrivate"
