@@ -1,5 +1,8 @@
 package tracking_test
 
+// 本文件验证七个固定 Linux.do RSS 作为一个趋势源的遍历、部分失败和预算行为。
+// 通过可替换响应和请求次数断言判断实际执行流程，全部请求由测试 Transport 接管。
+
 import (
 	"net/http"
 	"strings"
@@ -18,6 +21,7 @@ var linuxFeeds = []string{
 	"https://rss.yicai-tech.com/rss/from/https://linux.do/c/domestic/98.rss",
 }
 
+// linuxSourceState 测试使用的来源视图，只解码需要断言的字段；JSON 可忽略未声明字段。
 type linuxSourceState struct {
 	AttemptedAt int64   `json:"attemptedAt"`
 	SucceededAt *int64  `json:"succeededAt"`
@@ -27,6 +31,7 @@ type linuxSourceState struct {
 	NextAt      int64   `json:"nextAt"`
 }
 
+// linuxSource 从持久化发现状态读取 linuxdo 整组结果，区分来源成功与单个候选成功。
 func (h *collectionHarness) linuxSource() linuxSourceState {
 	h.t.Helper()
 	var state struct {
@@ -38,6 +43,8 @@ func (h *collectionHarness) linuxSource() linuxSourceState {
 	return state.Sources["linuxdo"]
 }
 
+// TestLinuxPartialFailurePreservesCandidatesAndRetriesWholeGroup 分别注入 HTTP 与解析失败，
+// 验证保留成功候选和上次整组成功时间，到期重试全部七个入口并清除错误。
 func TestLinuxPartialFailurePreservesCandidatesAndRetriesWholeGroup(t *testing.T) {
 	for _, failure := range []string{"http", "invalid RSS"} {
 		t.Run(failure, func(t *testing.T) {
@@ -49,6 +56,8 @@ func TestLinuxPartialFailurePreservesCandidatesAndRetriesWholeGroup(t *testing.T
 			}
 			reads := make([]int, len(linuxFeeds))
 			failed := true
+			// 本项目 Go 版本的 range 用 := 声明循环变量时，每轮有独立变量；
+			// 下面闭包保留各自 i，不会全部看到同一个最终索引（旧 Go 版本的常见陷阱）。
 			for i, feed := range linuxFeeds {
 				h.sources[feed] = func() *http.Response {
 					reads[i]++
@@ -92,6 +101,7 @@ func TestLinuxPartialFailurePreservesCandidatesAndRetriesWholeGroup(t *testing.T
 	}
 }
 
+// TestLinuxAllFeedsFailAsOneSource 让七个入口全部失败，确认均被遍历但只计作一个 Linux.do 趋势源失败，且不泄漏正文。
 func TestLinuxAllFeedsFailAsOneSource(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	reads := 0
@@ -111,6 +121,7 @@ func TestLinuxAllFeedsFailAsOneSource(t *testing.T) {
 	}
 }
 
+// TestLinuxDirectCooldownDoesNotDelayProxyAndPreservesFailure 直接主机长冷却时代理仍可返回候选并独立重试；跳过冷却请求不能抹掉已有真实失败。
 func TestLinuxDirectCooldownDoesNotDelayProxyAndPreservesFailure(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	first := beijing("2026-10-01T09:00:00")
@@ -147,6 +158,7 @@ func TestLinuxDirectCooldownDoesNotDelayProxyAndPreservesFailure(t *testing.T) {
 	}
 }
 
+// TestLinuxBothHostsCoolingWaitsForEarliestHost 持久化两个不同冷却截止，确认不发请求也不虚构失败，最早主机到期后独立恢复。
 func TestLinuxBothHostsCoolingWaitsForEarliestHost(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	first := beijing("2026-10-01T09:00:00")
@@ -175,6 +187,7 @@ func TestLinuxBothHostsCoolingWaitsForEarliestHost(t *testing.T) {
 	}
 }
 
+// TestLinuxBudgetExhaustionRetainsCandidatesWithoutFailure 首个入口耗尽预算后保留已发现仓库，不把延后当失败，下一轮重试整组直至成功。
 func TestLinuxBudgetExhaustionRetainsCandidatesWithoutFailure(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	first := beijing("2026-10-01T09:00:00")

@@ -1,5 +1,8 @@
 package tracking_test
 
+// 本文件从公开调度入口验证 README 准入、不符合缓存与一次性存量清洗。
+// 测试中的直接 SQL 用于构造历史状态或注入失败，随后通过调度、查询和持久化结果验证业务行为。
+
 import (
 	"context"
 	"errors"
@@ -19,6 +22,7 @@ const linuxRSS = "https://linux.do/c/develop/4.rss"
 const readmeURL = "https://api.github.com/repos/acme/one/readme"
 const cleanupKey = "linuxdo_cleanup_v1"
 
+// linuxFeed 返回生成 RSS 响应的闭包；可变参数指定仓库名，CDATA 让正文链接不必额外转义成 XML。
 func linuxFeed(names ...string) func() *http.Response {
 	return func() *http.Response {
 		text := "<rss><channel><item><description><![CDATA["
@@ -28,12 +32,16 @@ func linuxFeed(names ...string) func() *http.Response {
 		return response(text + "]]></description></item></channel></rss>")
 	}
 }
+
+// setPending 直接写候选状态以准备测试前置条件，后续仍通过真实调度处理。
 func setPending(t *testing.T, h *collectionHarness, values ...map[string]any) {
 	t.Helper()
 	if err := h.store.SetState("pending", values); err != nil {
 		t.Fatal(err)
 	}
 }
+
+// cacheExpiry 读取稳定仓库 ID 对应的不符合缓存到期时间，不存在时返回 0。
 func cacheExpiry(t *testing.T, h *collectionHarness, id string) int64 {
 	t.Helper()
 	var result struct {
@@ -48,6 +56,8 @@ func cacheExpiry(t *testing.T, h *collectionHarness, id string) int64 {
 	}
 	return result.ExpiresAt
 }
+
+// TestLinuxdoReadmeLiteralQualification 表驱动验证大小写敏感的字面子串规则，代码块和注释也算；保持 GitHub 收录不受影响。
 func TestLinuxdoReadmeLiteralQualification(t *testing.T) {
 	for _, test := range []struct {
 		name, text string
@@ -60,6 +70,7 @@ func TestLinuxdoReadmeLiteralQualification(t *testing.T) {
 		{"missing-marker", "See http://linux.do and https://example.com", false},
 		{"empty", "", false},
 	} {
+		// 子测试为每个场景新建临时库，资格/缓存状态互不污染；失败时能直接定位到具体输入。
 		t.Run(test.name, func(t *testing.T) {
 			h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 			h.sources[linuxRSS] = linuxFeed("acme/one")
@@ -82,6 +93,8 @@ func TestLinuxdoReadmeLiteralQualification(t *testing.T) {
 	}
 }
 
+// TestLinuxdoNegativeCacheSurvivesRestartRenameAndRequiresRediscovery 确认不符合缓存按稳定 ID 跨改名/重启保留，
+// 到期不主动请求，再发现才检查；淘汰再入库需新周期。
 func TestLinuxdoNegativeCacheSurvivesRestartRenameAndRequiresRediscovery(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	requests := 0
@@ -144,6 +157,7 @@ func TestLinuxdoNegativeCacheSurvivesRestartRenameAndRequiresRediscovery(t *test
 	}
 }
 
+// TestLinuxdoReadmeFailuresAndAnonymous404Confirmation 覆盖 README 缺失、Token 权限、身份变化、限流及读取失败；仅明确不符合才缓存，其他情况待重试。
 func TestLinuxdoReadmeFailuresAndAnonymous404Confirmation(t *testing.T) {
 	for _, test := range []struct {
 		name               string
@@ -169,6 +183,7 @@ func TestLinuxdoReadmeFailuresAndAnonymous404Confirmation(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
+			// 保存原 Transport，替换只关心的 URL，其余继续走原测试替身；这不是回退到真实网络。
 			base := h.client.Transport
 			var lastReadmeAt int64
 			h.client.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
@@ -240,13 +255,17 @@ func TestLinuxdoReadmeFailuresAndAnonymous404Confirmation(t *testing.T) {
 	}
 }
 
+// failingRead 始终读失败的 io.Reader 替身，用于区分 HTTP 成功与响应正文读取成功。
 type failingRead struct{}
 
+// Read 返回故意包含敏感字样的读取错误，以验证错误提示经过安全过滤。
 func (failingRead) Read([]byte) (int, error) { return 0, errors.New("secret upstream read failure") }
 
+// TestLinuxdoReadmeRetryDoesNotDelayGitHubCandidate 先制造 Linux.do README 失败，
+// 再加入同仓库 GitHub 候选，确认重试阶段隔离；明确不符合会清除待重试异常。
 func TestLinuxdoReadmeRetryDoesNotDelayGitHubCandidate(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
-	// Make this an old Linux.do pending before any shared GitHub candidate exists.
+	// 准备：先写入旧 Linux.do 候选，此时尚无共享的 GitHub 候选。
 	setPending(t, h, map[string]any{"type": "linux.do", "repoId": "R_0", "name": "acme/one"})
 	h.sources["https://rsshub-balancer.virworks.moe/github/trending/daily/any"] = func() *http.Response { return response("<rss><channel/></rss>") }
 	requests := 0
@@ -264,8 +283,8 @@ func TestLinuxdoReadmeRetryDoesNotDelayGitHubCandidate(t *testing.T) {
 	if requests != 1 || h.list("github")["total"] != float64(1) || h.list("linux.do")["total"] != float64(0) {
 		t.Fatal("README retry leaked across tracking types")
 	}
-	// A successful negative qualification completes this attempt; it must clear
-	// the earlier admission error without creating a Linux.do project.
+	// 执行与断言：明确不符合表示本次准入已完成，应清除旧异常，
+	// 同时仍不创建 Linux.do 追踪项目。
 	h.sources[readmeURL] = func() *http.Response { return response("No community marker") }
 	h.tick(beijing("2026-10-01T09:31:00"))
 	got := h.list("linux.do")
@@ -275,6 +294,7 @@ func TestLinuxdoReadmeRetryDoesNotDelayGitHubCandidate(t *testing.T) {
 	}
 }
 
+// cleanupReport 测试用清洗进度视图，通过公开持久状态验证完成、备份及逐项结果。
 type cleanupReport struct {
 	CompletedAt int64  `json:"completedAt"`
 	Backup      string `json:"backup"`
@@ -284,6 +304,7 @@ type cleanupReport struct {
 	} `json:"items"`
 }
 
+// cleanupProgress 读取清洗进度，缺少记录即说明测试前置或事务流程不符合预期。
 func cleanupProgress(t *testing.T, h *collectionHarness) cleanupReport {
 	t.Helper()
 	var p cleanupReport
@@ -292,6 +313,8 @@ func cleanupProgress(t *testing.T, h *collectionHarness) cleanupReport {
 	}
 	return p
 }
+
+// copyLinuxProjects 直接构造准入规则上线前的 Linux.do 存量及独立历史，并删除清洗完成标志供维护场景使用。
 func copyLinuxProjects(t *testing.T, h *collectionHarness) {
 	t.Helper()
 	for _, sql := range []string{
@@ -304,10 +327,14 @@ func copyLinuxProjects(t *testing.T, h *collectionHarness) {
 		}
 	}
 }
+
+// maintenance 复用测试时钟和客户端，创建显式维护模式调度器；独立备份目录由测试传入。
 func maintenance(h *collectionHarness, backup string) *tracking.Scheduler {
 	return tracking.NewScheduler(h.store, tracking.SchedulerOptions{Clock: h.clock, Client: h.client, StartedAt: h.clock.at, Token: "private-token-secret", LinuxdoCleanup: true, BackupDir: backup})
 }
 
+// TestLinuxdoCleanupBackupIsolationResumeAndStartupGate 覆盖普通启动暂停、维护先备份再删、查询与 GitHub 历史保留、失败重启续作，
+// 以及完成后需普通重启才恢复采集。
 func TestLinuxdoCleanupBackupIsolationResumeAndStartupGate(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	h.tick(beijing("2026-10-01T09:00:00"))
@@ -316,7 +343,7 @@ func TestLinuxdoCleanupBackupIsolationResumeAndStartupGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// An expired physical bucket must also remain untouched while collection is paused.
+	// 准备：插入已超查询期限的物理桶，确认暂停期间连旧历史裁剪也不能执行。
 	old := beijing("2026-08-30T09:00:00")
 	if _, err := h.store.DB.Exec(`INSERT INTO snapshot_days VALUES((SELECT cycle FROM projects WHERE id='github:R_0'),?,?)`, old/tracking.Day, mustJSON(map[string]any{fmtInt(old / tracking.Hour): [2]int64{old, 50}})); err != nil {
 		t.Fatal(err)
@@ -366,7 +393,7 @@ func TestLinuxdoCleanupBackupIsolationResumeAndStartupGate(t *testing.T) {
 	if err := h.store.DB.QueryRow("SELECT COUNT(*) FROM snapshot_days WHERE cycle=?", githubBefore[0].Cycle+"-linux").Scan(&historyCount); err != nil || historyCount != 0 {
 		t.Fatal("removed Linux.do history remained", err)
 	}
-	// Restore the pre-cleanup snapshot; all original records exist and its gate is still closed.
+	// 执行恢复：清洗前备份必须包含全部原始记录，恢复后准入门禁仍应关闭。
 	restoredPath := filepath.Join(t.TempDir(), tracking.DatabaseName)
 	if err := tracking.Restore(progress.Backup, restoredPath); err != nil {
 		t.Fatal(err)
@@ -441,6 +468,8 @@ func TestLinuxdoCleanupBackupIsolationResumeAndStartupGate(t *testing.T) {
 	}
 }
 
+// TestLinuxdoCleanupTransactionRollbackAndBatchLimit 用 SQLite 触发器让检查点失败，
+// 验证删除/缓存/进度一起回滚；恢复后 21 项必须分两批，每批最多 20 项。
 func TestLinuxdoCleanupTransactionRollbackAndBatchLimit(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	h.names = make([]string, 21)
@@ -486,6 +515,7 @@ func TestLinuxdoCleanupTransactionRollbackAndBatchLimit(t *testing.T) {
 	}
 }
 
+// TestLinuxdoCleanupRequiresBackupAndFencesReplacementCycle 先令备份目录无效，验证不删数据；再替换被冻结的追踪周期，确认旧清洗任务拒绝操作新周期。
 func TestLinuxdoCleanupRequiresBackupAndFencesReplacementCycle(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	h.names = h.names[:1]
@@ -513,7 +543,7 @@ func TestLinuxdoCleanupRequiresBackupAndFencesReplacementCycle(t *testing.T) {
 	h.sources[readmeURL] = func() *http.Response { r := response("temporary"); r.StatusCode = 503; return r }
 	h.tick(beijing("2026-10-01T11:00:00"))
 	progress = cleanupProgress(t, h)
-	// Simulate an unexpected external replacement after the frozen inventory was taken.
+	// 准备第二种故障：冻结目标后模拟外部替换追踪周期，旧任务不应误删新周期。
 	if _, err := h.store.DB.Exec(`DELETE FROM projects WHERE type='linux.do'`); err != nil {
 		t.Fatal(err)
 	}

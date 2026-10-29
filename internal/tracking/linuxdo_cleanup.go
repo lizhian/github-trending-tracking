@@ -1,5 +1,8 @@
 package tracking
 
+// 本文件对启用 README 准入前的 Linux.do 存量执行一次性清洗。
+// 先备份并冻结目标追踪周期，再分批处理；进度持久化以支持重启续作。
+
 import (
 	"context"
 	"errors"
@@ -9,18 +12,20 @@ import (
 	"time"
 )
 
+// linuxdoCleanupItem 冻结清洗目标的项目 ID、追踪周期和仓库 ID，防止处理结果误删后来替代的周期。
 type linuxdoCleanupItem struct {
 	ID        string `json:"id"`
 	Cycle     string `json:"cycle"`
 	RepoID    string `json:"repoId"`
 	Name      string `json:"name"`
-	Status    string `json:"status"` // empty until confirmed; kept or removed afterwards
+	Status    string `json:"status"` // 未确认时为空；明确确认后为 kept 或 removed
 	Reason    string `json:"reason,omitempty"`
 	CheckedAt int64  `json:"checkedAt,omitempty"`
 	NextAt    int64  `json:"nextAt,omitempty"`
 	Error     string `json:"error,omitempty"`
 }
 
+// linuxdoCleanupState 保存一次性清洗备份、固定目标和逐项进度；CompletedAt=0 表示尚未全部得到明确结果。
 type linuxdoCleanupState struct {
 	StartedAt   int64                `json:"startedAt"`
 	CompletedAt int64                `json:"completedAt"`
@@ -28,6 +33,8 @@ type linuxdoCleanupState struct {
 	Items       []linuxdoCleanupItem `json:"items"`
 }
 
+// linuxdoGate 返回是否允许普通采集/清理；有未清洗存量时关闭门禁，无存量则直接记录完成。
+// 维护模式先做隔离备份再分批清洗，完成后仍保持暂停，须重启普通模式才能恢复。
 func (s *Scheduler) linuxdoGate(ctx context.Context) (bool, error) {
 	var progress linuxdoCleanupState
 	found, err := s.store.State(linuxdoCleanupKey, &progress)
@@ -50,7 +57,7 @@ func (s *Scheduler) linuxdoGate(ctx context.Context) (bool, error) {
 			if s.options.BackupDir == "" {
 				return false, errors.New("Linux.do cleanup requires BACKUP_DIR")
 			}
-			// This subdirectory is outside the daily backup runner's rotation.
+			// 子目录与每日备份文件分开，使清洗前快照不进入日常顶层轮转。
 			directory := filepath.Join(s.options.BackupDir, "linuxdo-cleanup-v1")
 			if err = os.MkdirAll(directory, 0700); err != nil {
 				return false, err
@@ -96,6 +103,7 @@ func (s *Scheduler) linuxdoGate(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
+// logCleanupPaused 只在首次发现清洗阻塞时记录提示，避免每分钟刷相同日志。
 func (s *Scheduler) logCleanupPaused() {
 	if s.cleanupLog == "" {
 		log.Print("linux.do cleanup required: collection and retention paused; restart serve --linuxdo-cleanup")
@@ -103,9 +111,12 @@ func (s *Scheduler) logCleanupPaused() {
 	}
 }
 
+// cleanLinuxdo 每轮最多处理 20 个到期目标，请求失败保留项目并设下次重试。
+// 明确结果的缓存、删除和进度同事务提交，并用冻结身份校验目标；全部完成才写完成时间。
 func (s *Scheduler) cleanLinuxdo(ctx context.Context, progress *linuxdoCleanupState) error {
 	attempted := 0
 	for i := range progress.Items {
+		// 通过元素地址原地更新进度；若写成 for _, item := range ...，修改结构体副本不会更新 slice 元素。
 		item := &progress.Items[i]
 		if item.Status != "" || item.NextAt > s.upstream.clock.Now() || attempted >= 20 {
 			continue
@@ -132,7 +143,7 @@ func (s *Scheduler) cleanLinuxdo(ctx context.Context, progress *linuxdoCleanupSt
 		if err != nil {
 			return err
 		}
-		// Keep qualification, deletion, negative cache and checkpoint atomic.
+		// 资格、删除、不符合缓存和逐项进度必须一起提交；任一失败则整体回滚。
 		if requestErr == nil {
 			var exists int
 			err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM projects WHERE type='linux.do' AND id=? AND cycle=? AND repo_id=?", item.ID, item.Cycle, item.RepoID).Scan(&exists)

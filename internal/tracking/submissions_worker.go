@@ -1,5 +1,8 @@
 package tracking
 
+// 本文件消费持久化投稿队列，按仓库资料和 README 两个阶段推进。
+// 先完成 GitHub 收录再判断 Linux.do 资格，各阶段独立提交；通过 Scheduler 共享请求锁与冷却。
+
 import (
 	"context"
 	"database/sql"
@@ -11,15 +14,19 @@ import (
 
 var errSubmissionRepositoryMissing = errors.New("GitHub repository not found")
 
+// SubmissionWorker 持有共享调度器和容量为一的唤醒 channel；投稿本身存在数据库中，channel 只发送通知。
 type SubmissionWorker struct {
 	scheduler *Scheduler
 	wake      chan struct{}
 }
 
+// NewSubmissionWorker 构造投稿消费者，复用已有 Scheduler，因此普通采样与投稿共享冷却和请求间隔。
 func NewSubmissionWorker(scheduler *Scheduler) *SubmissionWorker {
 	return &SubmissionWorker{scheduler: scheduler, wake: make(chan struct{}, 1)}
 }
 
+// Wake 非阻塞发送空结构体通知；已有通知时走 default 合并唤醒，不阻塞 HTTP 请求。
+// struct{}{} 是零字段结构体的值，适合只表达事件、不携带数据的 channel。
 func (w *SubmissionWorker) Wake() {
 	select {
 	case w.wake <- struct{}{}:
@@ -27,7 +34,7 @@ func (w *SubmissionWorker) Wake() {
 	}
 }
 
-// This check is read-only and never waits for the sampler's network operations.
+// Paused 只读检查维护门禁，不等待调度器覆盖网络请求的互斥锁；数据库查询仍受单连接约束。
 func (w *SubmissionWorker) Paused(ctx context.Context) (bool, error) {
 	s := w.scheduler
 	if s.options.LinuxdoCleanup {
@@ -46,12 +53,15 @@ func (w *SubmissionWorker) Paused(ctx context.Context) (bool, error) {
 	return count > 0, err
 }
 
+// Run 连续处理到期阶段；无任务或失败时等待唤醒、30 秒计时器或取消信号，再扫描持久队列。
+// 通知可合并但任务不会丢，因为真实任务在数据库里，重启也可继续。
 func (w *SubmissionWorker) Run(ctx context.Context) {
 	for ctx.Err() == nil {
 		worked, err := w.ProcessNext(ctx)
 		if err != nil && ctx.Err() == nil {
 			log.Print("submission processing failed; retrying on next scan")
 		}
+		// 成功处理一个阶段后立即继续扫下一条，不固定等待 30 秒，让 GitHub 之后的 README 阶段及时推进。
 		if err == nil && worked {
 			continue
 		}
@@ -65,7 +75,8 @@ func (w *SubmissionWorker) Run(ctx context.Context) {
 	}
 }
 
-// ProcessNext commits one stage, so GitHub admission is visible before README requests.
+// ProcessNext 串行处理最早到期投稿的一个阶段，使用与采样相同的锁保护主机状态。
+// GitHub 阶段先提交，使其结果在后续 README 请求前已可见；worked=false 表示本轮未处理任务。
 func (w *SubmissionWorker) ProcessNext(ctx context.Context) (worked bool, err error) {
 	s := w.scheduler
 	finish, err := s.lockUpstream()
@@ -104,14 +115,15 @@ func (w *SubmissionWorker) ProcessNext(ctx context.Context) (worked bool, err er
 	return true, err
 }
 
+// retry 按阶段记录重试，普通失败最多三次、至少间隔五分钟；限流和延后不消耗次数。
+// context 取消直接退出，不计失败；README 次数耗尽保留已完成的 GitHub 收录。
 func (w *SubmissionWorker) retry(ctx context.Context, sub *Submission, err error) error {
 	s := w.scheduler
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 	now := s.upstream.clock.Now()
-	// A host-wide cooldown can also follow an ordinary failure; only actual rate
-	// limits and deferred requests are exempt from the per-stage attempt budget.
+	// 普通失败也可能设置主机冷却；只有实际限流或延后才不消耗该阶段的尝试次数。
 	var deferred *deferredRequest
 	rateLimited := errors.As(err, &deferred) || s.upstream.rateLimited
 	if !rateLimited {
@@ -144,6 +156,7 @@ func (w *SubmissionWorker) retry(ctx context.Context, sub *Submission, err error
 	return w.save(ctx, sub)
 }
 
+// reject 结束明确不可访问/非公开仓库的投稿，不执行 Linux.do 阶段，只返回安全提示。
 func (w *SubmissionWorker) reject(ctx context.Context, sub *Submission) error {
 	sub.Phase = "done"
 	sub.FinishedAt = ptr(w.scheduler.upstream.clock.Now())
@@ -153,6 +166,8 @@ func (w *SubmissionWorker) reject(ctx context.Context, sub *Submission) error {
 	return w.save(ctx, sub)
 }
 
+// repositoryStage 获取公开仓库完整资料、按稳定身份合并别名，再提交 GitHub 收录及下一阶段检查点。
+// 成功公开查询会清除不可访问缓存，但不会清除 README 不符合缓存。
 func (w *SubmissionWorker) repositoryStage(ctx context.Context, sub *Submission) error {
 	s := w.scheduler
 	repos, err := s.upstream.repositories(ctx, s.options.Token, []string{sub.Name}, false, "submission")
@@ -169,14 +184,13 @@ func (w *SubmissionWorker) repositoryStage(ctx context.Context, sub *Submission)
 	if *repo.Private {
 		return w.reject(ctx, sub)
 	}
-	// A fresh public lookup overrides only repository-unavailable suppression,
-	// including when this submission is merged into another active request.
+	// 新的公开查询只解除仓库不可访问缓存；即使随后并入其他任务也要执行，不绕过 README 缓存。
 	if err := clearUnavailableCache(ctx, s.store.DB, sub.Name, repo.Name); err != nil {
 		return err
 	}
 	sub.RepoID = strptr(repo.ID)
 	canonical := strings.ToLower(repo.Name)
-	// Resolve aliases before setting the unique active stable identity.
+	// 先解析别名合并，再设置唯一的活跃稳定仓库身份，避免同仓库重复处理。
 	target, err := scanSubmission(s.store.DB.QueryRowContext(ctx, "SELECT "+submissionColumns+" FROM submissions WHERE id<>? AND phase IN ('repository','linuxdo') AND (repo_id=? OR name=?) ORDER BY created_at,id LIMIT 1", sub.ID, repo.ID, canonical))
 	if err == nil {
 		sub.Phase = "alias"
@@ -195,6 +209,8 @@ func (w *SubmissionWorker) repositoryStage(ctx context.Context, sub *Submission)
 	return w.admit(ctx, sub, repo, "github")
 }
 
+// linuxdoStage 已有 Linux.do 项目直接完成；否则校验 README，不符合只结束 Linux.do 阶段。
+// 符合时优先复用同轮共享观测，必要时重新请求资料，再提交独立 Linux.do 追踪项目。
 func (w *SubmissionWorker) linuxdoStage(ctx context.Context, sub *Submission) error {
 	s := w.scheduler
 	if sub.RepoID == nil {
@@ -261,6 +277,8 @@ func (w *SubmissionWorker) linuxdoStage(ctx context.Context, sub *Submission) er
 	return w.admit(ctx, sub, repo, "linux.do")
 }
 
+// admit 确保目标追踪类型存在，复用同轮 Star 但创建独立周期，并原子提交采样规则与投稿进度。
+// 已存在的类型不重置保护期；新增成功后递增列表版本，使进程内旧缓存失效。
 func (w *SubmissionWorker) admit(ctx context.Context, sub *Submission, repo *repository, kind string) error {
 	s := w.scheduler
 	now := s.upstream.clock.Now()
@@ -304,6 +322,7 @@ func (w *SubmissionWorker) admit(ctx context.Context, sub *Submission, repo *rep
 	return err
 }
 
+// checkpoint 将主机冷却和投稿进度写入当前事务，与该阶段创建的观测一起成功或失败。
 func (w *SubmissionWorker) checkpoint(ctx context.Context, tx *sql.Tx, sub *Submission) error {
 	if err := setTxState(ctx, tx, "upstream", w.scheduler.upstream.hosts); err != nil {
 		return err
@@ -311,6 +330,7 @@ func (w *SubmissionWorker) checkpoint(ctx context.Context, tx *sql.Tx, sub *Subm
 	return updateSubmission(ctx, tx, sub)
 }
 
+// save 仅保存投稿检查点而不写观测，复用统一事务入口以保证进度和主机状态一致。
 func (w *SubmissionWorker) save(ctx context.Context, sub *Submission) error {
 	s := w.scheduler
 	return s.store.saveObservationsAnd(ctx, nil, s.upstream.clock.Now(), nil, func(tx *sql.Tx) error { return w.checkpoint(ctx, tx, sub) })

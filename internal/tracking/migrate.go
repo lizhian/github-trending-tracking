@@ -1,11 +1,15 @@
 package tracking
 
+// 本文件负责停机状态下的数据库升级。SQL 来自 migrations 包的嵌入文件；
+// 先检查旧库，再在同一事务内更新表结构和版本，失败时一起回滚。
+
 import (
 	"fmt"
 	"github.com/lizhian/github-trending-tracking/migrations"
 )
 
-// Migrate is offline: the directory lock excludes the application and backups.
+// Migrate 离线升级已有数据库；目录锁排除正在运行的应用和独立备份进程。
+// 只执行当前版本之后的迁移，表结构与 user_version 同事务提交，失败则一起回滚；不会创建缺失库。
 func Migrate(path string) error {
 	lock, err := directoryLock(path)
 	if err != nil {

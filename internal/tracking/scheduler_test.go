@@ -1,5 +1,10 @@
 package tracking_test
 
+// 本文件通过外部测试包 tracking_test 验证公开的调度与 HTTP 行为。
+// 与 Java 常见的同包测试不同，后缀 _test 的包名隔离未导出符号，只能导入 tracking 后使用大写 API。
+// 同目录的外部测试文件共享这里的 fixture；建议先读 testClock、transportFunc、newStore，再读第一个 Test。
+// Go 自动发现 *_test.go 中签名为 func TestXxx(t *testing.T) 的测试，不需要 JUnit 注解。
+
 import (
 	"context"
 	"encoding/json"
@@ -15,20 +20,31 @@ import (
 	"time"
 )
 
+// testClock 手动推进的毫秒时钟，供串行测试替换生产 Clock；这里没有锁，不用于并发访问。
 type testClock struct{ at int64 }
 
+// Now 返回测试时间，不读取机器真实时间。
 func (c *testClock) Now() int64 { return c.at }
+
+// Sleep 立即推进模拟时间而不真正休眠，再返回取消状态；可快速验证主机间隔和超时预算。
 func (c *testClock) Sleep(ctx context.Context, d time.Duration) error {
 	c.at += d.Milliseconds()
 	return ctx.Err()
 }
 
+// transportFunc 以函数为底层类型的 HTTP 替身；具备 RoundTrip 后可赋给 http.Client.Transport。
 type transportFunc func(*http.Request) (*http.Response, error)
 
+// RoundTrip 调用保存的函数返回模拟响应，满足 http.RoundTripper，无需 mock 框架或真实网络。
 func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// response 创建 200 响应；strings.Reader 只有 Read，用 io.NopCloser 包装后才满足 Body 的 io.ReadCloser 要求。
 func response(body string) *http.Response {
 	return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
 }
+
+// newStore 创建隔离临时 SQLite，并登记测试结束时关闭；调用者无需手动管理测试目录。
+// t.Helper 让失败定位到调用处；t.Cleanup 随测试及其子测试结束执行，作用域不同于辅助函数自己的 defer。
 func newStore(t *testing.T) *tracking.Store {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "tracking.sqlite")
@@ -42,6 +58,8 @@ func newStore(t *testing.T) *tracking.Store {
 	t.Cleanup(func() { s.Close() })
 	return s
 }
+
+// beijing 把无时区日期字符串按 +08:00 解析成 Unix 毫秒；固定测试输入写错属于测试代码错误，直接 panic。
 func beijing(s string) int64 {
 	t, e := time.Parse(time.RFC3339, s+"+08:00")
 	if e != nil {
@@ -49,6 +67,9 @@ func beijing(s string) int64 {
 	}
 	return t.UnixMilli()
 }
+
+// requestJSON 在内存中调用真实 HTTP Handler 并解码响应，不监听端口。
+// 默认解码到 any 的 JSON 数字是 float64，因此下面断言常写 float64(1)，不是 Go 隐式数值转换。
 func requestJSON(t *testing.T, s *tracking.Store, c *testClock, path string) map[string]any {
 	t.Helper()
 	h := tracking.Handler(s, tracking.HTTPOptions{Now: func() time.Time { return time.UnixMilli(c.at) }})
@@ -63,10 +84,15 @@ func requestJSON(t *testing.T, s *tracking.Store, c *testClock, path string) map
 	}
 	return v
 }
+
+// TestSchedulerWaitsForNextSlotAndAdmitsWithActualObservation 验证启动不立即采集，到下一应采时段才入库，快照使用实际观测时间且响应不泄漏 Token。
 func TestSchedulerWaitsForNextSlotAndAdmitsWithActualObservation(t *testing.T) {
+	// 准备：使用临时真库、假时钟和假 HTTP；与 mock DAO 不同，实际 SQL 和序列化仍会执行。
 	s := newStore(t)
 	c := &testClock{beijing("2026-10-01T11:10:00")}
 	start := c.at
+	// 闭包读取 h 的当前字段，因此测试稍后修改 stars/failed 就能影响后续响应；
+	// 所有外部 URL 最终都被 Transport 接管，不会误发到真实 GitHub。
 	client := &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Host == "api.github.com" {
 			b, _ := io.ReadAll(r.Body)
@@ -81,6 +107,7 @@ func TestSchedulerWaitsForNextSlotAndAdmitsWithActualObservation(t *testing.T) {
 		return response(`<rss><channel/></rss>`), nil
 	})}
 	scheduler := tracking.NewScheduler(s, tracking.SchedulerOptions{Clock: c, Client: client, StartedAt: start, Token: "test-secret"})
+	// 执行：先在启动时间 Tick，再在边界前后推进时间，验证是否真的发生收录。
 	if e := scheduler.Tick(context.Background()); e != nil {
 		t.Fatal(e)
 	}
@@ -99,10 +126,13 @@ func TestSchedulerWaitsForNextSlotAndAdmitsWithActualObservation(t *testing.T) {
 	if e := scheduler.Tick(context.Background()); e != nil {
 		t.Fatal(e)
 	}
+	// 断言：从公开 API 检查入库时间、观测时间和 Star，最后再检查历史与凭据隔离。
 	got := requestJSON(t, s, c, "/api/projects")
 	if got["total"] != float64(1) {
 		t.Fatal(got)
 	}
+	// 测试已预期响应形状，直接类型断言失败会 panic 并使测试失败；
+	// 生产处理未知输入通常应先用 value, ok 形式检查类型。
 	item := got["items"].([]any)[0].(map[string]any)
 	if item["observedAt"] != float64(tick) || item["enteredAt"] != float64(tick) || item["stars"] != float64(100) {
 		t.Fatal(item)
@@ -115,8 +145,12 @@ func TestSchedulerWaitsForNextSlotAndAdmitsWithActualObservation(t *testing.T) {
 		t.Fatal(history)
 	}
 }
+
+// mustJSON 把测试中已知可编码的数据变为 JSON 文本，用于构造响应与比较状态；不是通用错误处理范例。
 func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
 
+// collectionHarness 组合真实 SQLite、假时钟和假 HTTP Transport 的测试装置。
+// 类似测试 fixture；可以更改 sources、stars、failed 等字段制造场景，无需启动真实 GitHub 服务。
 type collectionHarness struct {
 	t              *testing.T
 	store          *tracking.Store
@@ -132,9 +166,10 @@ type collectionHarness struct {
 	homepages      map[int]any
 }
 
+// newCollectionHarness 建立已通过清洗门禁的测试环境；根据请求 GraphQL 字段生成对应节点，保留真实调度与数据库流程。
 func newCollectionHarness(t *testing.T, start int64) *collectionHarness {
 	h := &collectionHarness{t: t, store: newStore(t), clock: &testClock{start}, sources: map[string]func() *http.Response{}, names: []string{"acme/one", "acme/two"}, stars: []int64{100, 200}, failed: map[string]bool{}}
-	// Existing collection scenarios model a database already cleared for normal operation.
+	// 普通采集用例默认已通过存量清洗；清洗专项测试会另行移除这个完成标志。
 	if err := h.store.SetState("linuxdo_cleanup_v1", map[string]any{"completedAt": start}); err != nil {
 		t.Fatal(err)
 	}
@@ -220,6 +255,8 @@ func newCollectionHarness(t *testing.T, start int64) *collectionHarness {
 	h.scheduler = tracking.NewScheduler(h.store, tracking.SchedulerOptions{Clock: h.clock, Client: client, StartedAt: start, Token: "private-token-secret"})
 	return h
 }
+
+// tick 将测试时钟定位到指定毫秒并执行一次完整调度；失败立即终止当前测试。
 func (h *collectionHarness) tick(at int64) {
 	h.t.Helper()
 	h.clock.at = at
@@ -227,13 +264,19 @@ func (h *collectionHarness) tick(at int64) {
 		h.t.Fatal(e)
 	}
 }
+
+// list 通过公开列表 API 查询指定追踪类型，验证持久化数据最终如何展示。
 func (h *collectionHarness) list(typ string) map[string]any {
 	return requestJSON(h.t, h.store, h.clock, "/api/projects?type="+typ)
 }
+
+// history 通过公开历史 API 读取 30 天窗口，避免只检查内部实现而漏掉响应错误。
 func (h *collectionHarness) history(id string) map[string]any {
 	return requestJSON(h.t, h.store, h.clock, "/api/projects/"+id+"/history?window=720")
 }
 
+// TestAttachmentLinksNeverBecomeCandidatesAndOldPendingIsPersistentlyRemoved 验证附件链接不成为仓库候选，
+// 旧 pending 中的附件即使没有新来源执行也会持久移除。
 func TestAttachmentLinksNeverBecomeCandidatesAndOldPendingIsPersistentlyRemoved(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	h.sources["https://linux.do/c/develop/4.rss"] = func() *http.Response {
@@ -244,7 +287,7 @@ func TestAttachmentLinksNeverBecomeCandidatesAndOldPendingIsPersistentlyRemoved(
 	if got := h.list("linux.do"); got["total"] != float64(1) {
 		t.Fatal("normal repository was filtered", got)
 	}
-	// No source is due on the next tick: cleaning old pending must itself persist.
+	// 下一轮没有来源到期；仅清理旧 pending 也必须独立持久化，不能依赖新发现触发。
 	if err := h.store.SetState("pending", []map[string]any{{"type": "linux.do", "name": "USER-ATTACHMENTS/assets", "nextAt": first + tracking.Day}}); err != nil {
 		t.Fatal(err)
 	}
@@ -258,6 +301,7 @@ func TestAttachmentLinksNeverBecomeCandidatesAndOldPendingIsPersistentlyRemoved(
 	}
 }
 
+// TestCandidateAndSamplingFailuresHaveIndependentStatus 分别制造候选收录与已收录项目采样失败，确认独立报错、独立恢复，候选仍保留重试。
 func TestCandidateAndSamplingFailuresHaveIndependentStatus(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	first := beijing("2026-10-01T09:00:00")
@@ -293,6 +337,8 @@ func TestCandidateAndSamplingFailuresHaveIndependentStatus(t *testing.T) {
 	}
 }
 
+// TestLegacyMixedStatusUsesActualProjectErrorsBeforeNextSamplingSlot 构造旧混合状态，
+// 确认查询能从项目行还原真实采样失败，筛选结果也不能掩盖全类型异常。
 func TestLegacyMixedStatusUsesActualProjectErrorsBeforeNextSamplingSlot(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	first := beijing("2026-10-01T09:00:00")
@@ -314,7 +360,7 @@ func TestLegacyMixedStatusUsesActualProjectErrorsBeforeNextSamplingSlot(t *testi
 	if _, err := h.store.DB.Exec("UPDATE projects SET error='GitHub HTTP 503',attempted_at=? WHERE id='github:R_0'", first+5*60_000); err != nil {
 		t.Fatal(err)
 	}
-	// A filter hiding the failing project must not hide the type's update error.
+	// 即使筛选隐藏了失败项目，也必须继续显示当前追踪类型的更新异常。
 	status = requestJSON(t, h.store, h.clock, "/api/projects?type=github&q=two")["status"].(map[string]any)
 	if status["collection"].(map[string]any)["failed"] != float64(1) || status["collection"].(map[string]any)["error"] != "GitHub HTTP 503" || status["admission"].(map[string]any)["failed"] != float64(1) {
 		t.Fatal("legacy compatibility hid a real sampling failure", status)
@@ -328,6 +374,8 @@ func TestLegacyMixedStatusUsesActualProjectErrorsBeforeNextSamplingSlot(t *testi
 	}
 }
 
+// TestSharedObservationKeepsIndependentHistoryAndAdmissionTime 先收录 GitHub 后收录 Linux.do，
+// 确认复用当前轮观测但不复制旧历史，入库时间与观测时间分别保留。
 func TestSharedObservationKeepsIndependentHistoryAndAdmissionTime(t *testing.T) {
 	start := beijing("2026-10-01T08:50:00")
 	h := newCollectionHarness(t, start)
@@ -359,7 +407,7 @@ func TestSharedObservationKeepsIndependentHistoryAndAdmissionTime(t *testing.T) 
 	if item["stars"] != float64(175) || item["trends"].(map[string]any)["24"].(map[string]any)["delta"] != float64(25) {
 		t.Fatal(item)
 	}
-	// A stars-only daily metadata interval can still admit a newly found type.
+	// 距离上次元数据刷新不足一天、只请求 Star 的轮次，也应能正确收录新追踪类型。
 	h.sources[linux] = func() *http.Response {
 		return response(`<rss><channel><item><description>https://github.com/acme/two</description></item></channel></rss>`)
 	}
@@ -374,6 +422,8 @@ func TestSharedObservationKeepsIndependentHistoryAndAdmissionTime(t *testing.T) 
 		t.Fatal("secret leaked")
 	}
 }
+
+// TestFailedAdmissionSharesRetryAcrossNewTypesAndRediscovery 同仓库新类型与重新发现共享仓库级重试截止时间，不能通过另一入口提前请求；到期后两类均可收录。
 func TestFailedAdmissionSharesRetryAcrossNewTypesAndRediscovery(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T10:50:00"))
 	h.names = h.names[:1]
@@ -384,7 +434,7 @@ func TestFailedAdmissionSharesRetryAcrossNewTypesAndRediscovery(t *testing.T) {
 	if h.list("github")["total"] != float64(0) {
 		t.Fatal("failed admission created project")
 	}
-	// The new type is persisted while no tracked project exists, as it can be after discovery.
+	// 准备：尚无已收录项目时加入另一类型候选，模拟发现后共享重试的场景。
 	if e := h.store.SetState("pending", []map[string]any{{"name": "acme/one", "repoId": "R_0", "nextAt": first + 30*60_000}, {"type": "linux.do", "name": "acme/one"}}); e != nil {
 		t.Fatal(e)
 	}
@@ -409,11 +459,14 @@ func TestFailedAdmissionSharesRetryAcrossNewTypesAndRediscovery(t *testing.T) {
 		}
 	}
 }
+
+// TestRestartAcrossMidnightRetainsLongHostCooldownAndNeverRevivesOldData 模拟跨日重启，
+// 验证上游长冷却保留、旧观测仍过期、净增量允许为负，整点重启也不回放当前轮。
 func TestRestartAcrossMidnightRetainsLongHostCooldownAndNeverRevivesOldData(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T20:50:00"))
 	h.tick(beijing("2026-10-01T21:00:00"))
 	old := h.history("github:R_0")["points"]
-	// Persisted upstream headers can require a longer wait than the restart gate.
+	// 上游要求的持久冷却可能长于重启门禁，不能被下一采样时段覆盖。
 	until := beijing("2026-10-02T06:00:00")
 	if e := h.store.SetState("upstream", map[string]any{"api.github.com": map[string]any{"startedAt": 0, "blockedUntil": until}}); e != nil {
 		t.Fatal(e)
@@ -433,7 +486,7 @@ func TestRestartAcrossMidnightRetainsLongHostCooldownAndNeverRevivesOldData(t *t
 	if len(history["points"].([]any)) != 2 || history["trend"].(map[string]any)["delta"] != float64(-10) {
 		t.Fatal(history)
 	}
-	// Restart exactly on the slot waits strictly until the next scheduled time.
+	// 恰逢应采整点重启，也必须等严格晚于启动的下一时段。
 	h.clock.at = beijing("2026-10-02T09:00:00")
 	h.scheduler = tracking.NewScheduler(h.store, tracking.SchedulerOptions{Clock: h.clock, Client: h.client, StartedAt: h.clock.at})
 	h.tick(h.clock.at)
@@ -445,6 +498,8 @@ func TestRestartAcrossMidnightRetainsLongHostCooldownAndNeverRevivesOldData(t *t
 		t.Fatal("next slot not collected")
 	}
 }
+
+// TestNewestOnlyCollectionKeepsGapAndFailuresKeepGoodObservations 跨过多个轮次只采最新真实观测并记录缺测；请求失败保留旧快照，到退避期限后才能恢复。
 func TestNewestOnlyCollectionKeepsGapAndFailuresKeepGoodObservations(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	h.tick(beijing("2026-10-01T09:00:00"))
@@ -476,6 +531,8 @@ func TestNewestOnlyCollectionKeepsGapAndFailuresKeepGoodObservations(t *testing.
 		t.Fatal("retry failed")
 	}
 }
+
+// seedMatureProjects 批量写入可比较的项目与历史供淘汰测试；末项刻意处于保护期，前几项使用低评分便于观察淘汰顺序。
 func seedMatureProjects(t *testing.T, h *collectionHarness, count int, at int64) {
 	t.Helper()
 	tx, e := h.store.DB.Begin()
@@ -515,6 +572,9 @@ func seedMatureProjects(t *testing.T, h *collectionHarness, count int, at int64)
 		t.Fatal(e)
 	}
 }
+
+// TestCleanupRunsDuringStartupWaitProtectsYoungProjectsAndReentryStartsNewHistory 确认启动等待期间仍可常规淘汰、保护年轻项目；淘汰项目再发现时开启新历史，
+// 不能继承旧周期。
 func TestCleanupRunsDuringStartupWaitProtectsYoungProjectsAndReentryStartsNewHistory(t *testing.T) {
 	start := beijing("2026-10-02T03:50:00")
 	h := newCollectionHarness(t, start)
@@ -550,7 +610,10 @@ func TestCleanupRunsDuringStartupWaitProtectsYoungProjectsAndReentryStartsNewHis
 		t.Fatal("reentry inherited old cycle", history)
 	}
 }
+
+// TestCleanupOrdersByScoreDeltaStarsEntryTimeAndID 逐个改变评分、净增量、Star、入库时间与 ID，表驱动验证淘汰排序的每一级决胜规则。
 func TestCleanupOrdersByScoreDeltaStarsEntryTimeAndID(t *testing.T) {
+	// 表驱动测试把输入与预期写成结构体 slice；每行通过 t.Run 生成可单独定位的子测试。
 	for _, tc := range []struct {
 		name      string
 		deltas    [2][4]int64
@@ -581,6 +644,7 @@ func TestCleanupOrdersByScoreDeltaStarsEntryTimeAndID(t *testing.T) {
 			if _, err := h.store.DB.Exec("UPDATE projects SET trends=?", trends([4]int64{100, 100, 100, 100})); err != nil {
 				t.Fatal(err)
 			}
+			// range 也能遍历非负整数：这里 i 依次为 0、1，不是遍历名为 2 的集合。
 			for i := range 2 {
 				if _, err := h.store.DB.Exec("UPDATE projects SET trends=?,stars=?,entered_at=? WHERE id=?", trends(tc.deltas[i]), tc.stars[i], observed-tc.ageDays[i]*tracking.Day, fmt.Sprintf("github:R_%d", i)); err != nil {
 					t.Fatal(err)
@@ -600,6 +664,7 @@ func TestCleanupOrdersByScoreDeltaStarsEntryTimeAndID(t *testing.T) {
 	}
 }
 
+// TestLinuxMultipleFeedsAndAuthoritativeSourceParsing 验证七个 RSS 全部遍历后再准入、合并去重；各趋势源只使用其约定的权威链接位置。
 func TestLinuxMultipleFeedsAndAuthoritativeSourceParsing(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	h.names = []string{"acme/one", "acme/two", "acme/dependency", "acme/detail"}
@@ -657,13 +722,15 @@ func TestLinuxMultipleFeedsAndAuthoritativeSourceParsing(t *testing.T) {
 	if lookups != 1 {
 		t.Fatal("duplicate repositories were queried", lookups, h.seenQueries)
 	}
-	// On the next round the first feed is empty, but later feeds still run.
+	// 首个入口在下一轮为空，也必须继续遍历后续入口，不能把空 RSS 当成提前结束条件。
 	h.tick(beijing("2026-10-01T11:01:00"))
 	status := h.list("linux.do")["status"].(map[string]any)["discovery"].(map[string]any)
 	if reads != 2*len(linuxFeeds) || status["failed"] != float64(0) {
 		t.Fatal(reads, status)
 	}
 }
+
+// TestDiscoveryBudgetDefersHelloDetailsWithoutFailures 让详情请求消耗模拟时间，确认三分钟预算用尽仅延后，不报真实失败，后续轮次可继续完成。
 func TestDiscoveryBudgetDefersHelloDetailsWithoutFailures(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	h.names = []string{"acme/one"}
@@ -687,7 +754,7 @@ func TestDiscoveryBudgetDefersHelloDetailsWithoutFailures(t *testing.T) {
 	if status["failed"] != float64(0) {
 		t.Fatal("budget became failure", status)
 	}
-	// Remaining details finish in subsequent ticks.
+	// 后续轮次继续完成因预算延后的详情任务。
 	h.tick(first + 10*60_000)
 	h.tick(first + 20*60_000)
 	got := h.list("github")
@@ -695,6 +762,9 @@ func TestDiscoveryBudgetDefersHelloDetailsWithoutFailures(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// TestHundredRepositoryBatchesUpdateBothTypesAndCompletedRoundStaysIdle 为 500 个仓库各建两类项目，
+// 分五批每批 100 仓库更新两类，完成后空闲扫描不改状态。
 func TestHundredRepositoryBatchesUpdateBothTypesAndCompletedRoundStaysIdle(t *testing.T) {
 	start := beijing("2026-10-02T10:50:00")
 	h := newCollectionHarness(t, start)
@@ -741,6 +811,9 @@ func TestHundredRepositoryBatchesUpdateBothTypesAndCompletedRoundStaysIdle(t *te
 		t.Fatal("completed idle round modified status")
 	}
 }
+
+// TestPartialGraphQLResultsSurviveRateLimitsAndRespectLongerRetryAfter 模拟部分节点成功且限流，
+// 确认成功快照保留、失败节点等待更长 Retry-After 后恢复。
 func TestPartialGraphQLResultsSurviveRateLimitsAndRespectLongerRetryAfter(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	h.tick(beijing("2026-10-01T09:00:00"))
@@ -771,6 +844,8 @@ func TestPartialGraphQLResultsSurviveRateLimitsAndRespectLongerRetryAfter(t *tes
 		t.Fatal("cooldown recovery failed")
 	}
 }
+
+// TestLateObservationCannotWriteIntoReplacementTrackingCycle 在上游请求期间替换追踪周期，确认旧请求结果不能覆盖替代周期的 Star 和历史。
 func TestLateObservationCannotWriteIntoReplacementTrackingCycle(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	h.tick(beijing("2026-10-01T09:00:00"))
@@ -817,6 +892,7 @@ func TestLateObservationCannotWriteIntoReplacementTrackingCycle(t *testing.T) {
 	}
 }
 
+// TestHomepageFollowsMetadataRefresh 验证项目网站随 24 小时元数据刷新而更新，单独 Star 采样不提前刷新，并区分 null 与空字符串。
 func TestHomepageFollowsMetadataRefresh(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	h.names = h.names[:1]

@@ -1,5 +1,8 @@
 package tracking_test
 
+// 本文件验证采样时间表、历史规则兼容和重试边界，复用 scheduler_test.go 的模拟时钟。
+// 不等待真实时间；修改时钟后执行单轮 Tick，能精确检查截止前一毫秒与到期时的行为。
+
 import (
 	"net/http"
 	"testing"
@@ -7,6 +10,7 @@ import (
 	"github.com/lizhian/github-trending-tracking/internal/tracking"
 )
 
+// TestDaytimeHourlyScheduleAcrossMidnight 依次验证北京时间十八个应采整点，以及跨午夜的最近/下一时段计算。
 func TestDaytimeHourlyScheduleAcrossMidnight(t *testing.T) {
 	previous := beijing("2026-10-01T23:00:00")
 	for _, hour := range []string{"01", "03", "05", "07", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "23"} {
@@ -27,6 +31,7 @@ func TestDaytimeHourlyScheduleAcrossMidnight(t *testing.T) {
 	}
 }
 
+// TestSamplingTransitionPreservesHistoricalGapsAndWindowBoundaries 跨旧/新规则生效边界比较缺测、窗口完整性和过期，确认新计划不重新解释旧历史。
 func TestSamplingTransitionPreservesHistoricalGapsAndWindowBoundaries(t *testing.T) {
 	p := &tracking.SamplingPolicy{Version: 3, EffectiveAt: beijing("2026-09-01T09:00:00"), HourlyDaytimeAt: beijing("2026-10-02T12:00:00")}
 	for _, test := range []struct {
@@ -44,8 +49,8 @@ func TestSamplingTransitionPreservesHistoricalGapsAndWindowBoundaries(t *testing
 			t.Errorf("gap %s -> %s: got %t", test.from, test.to, got)
 		}
 	}
-	// A window whose left boundary precedes the new policy retains the old
-	// first expected slot (15:00 after 14:00), even when its end is after upgrade.
+	// 即使窗口终点已过升级边界，只要左边界仍在旧规则内，
+	// 就按旧规则判断其首个应采时段（14:00 之后是 15:00）。
 	if !tracking.CompleteWindow(beijing("2026-10-01T15:09:00"), beijing("2026-10-02T14:00:00"), 24, p) {
 		t.Fatal("old window boundary was reinterpreted")
 	}
@@ -61,6 +66,7 @@ func TestSamplingTransitionPreservesHistoricalGapsAndWindowBoundaries(t *testing
 	}
 }
 
+// TestScheduleUpgradeReplansBothSourcesAndPreservesCooldowns 构造旧计划与已持久化冷却，验证来源改用新时刻表、启动门禁仍有效且已有冷却不缩短。
 func TestScheduleUpgradeReplansBothSourcesAndPreservesCooldowns(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-02T11:10:00"))
 	effective := beijing("2026-09-01T09:00:00")
@@ -114,6 +120,7 @@ func TestScheduleUpgradeReplansBothSourcesAndPreservesCooldowns(t *testing.T) {
 	}
 }
 
+// TestSourceAndCandidateFailuresRetryAfterFiveMinutes 先制造来源失败再制造候选失败，分别在截止前后执行，确认五分钟退避和到期恢复。
 func TestSourceAndCandidateFailuresRetryAfterFiveMinutes(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-02T08:50:00"))
 	first := beijing("2026-10-02T09:00:00")

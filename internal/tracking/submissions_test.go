@@ -1,5 +1,8 @@
 package tracking
 
+// 本文件使用 package tracking 同包测试，可以调用小写内部函数，适合验证地址规则与迁移边界。
+// 这与 scheduler_test.go 的外部包测试互补；使用真实临时 SQLite，不操作开发/生产数据库。
+
 import (
 	"context"
 	"encoding/json"
@@ -15,6 +18,7 @@ import (
 	"time"
 )
 
+// submissionStore 建立本包测试使用的真实临时 SQLite，返回库和路径，并登记清理。
 func submissionStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), DatabaseName)
@@ -29,6 +33,7 @@ func submissionStore(t *testing.T) (*Store, string) {
 	return store, path
 }
 
+// TestSubmissionAddressRules 逐组检查合法地址规范化与非法地址拒绝，尤其排除附件、子页面、伪造主机和编码路径。
 func TestSubmissionAddressRules(t *testing.T) {
 	for _, input := range []string{"https://github.com/user-attachments/assets", "https://github.com/USER-ATTACHMENTS/assets.git/"} {
 		if name, err := submissionName(input); err == nil {
@@ -48,10 +53,13 @@ func TestSubmissionAddressRules(t *testing.T) {
 	}
 }
 
+// TestSubmissionConcurrentDedupCapacityAndExpiry 并发提交同一仓库验证合并，再检查满队列仍可合并、七天结果边界和完成后重新投稿产生新任务。
 func TestSubmissionConcurrentDedupCapacityAndExpiry(t *testing.T) {
 	store, _ := submissionStore(t)
 	ctx := context.Background()
 	now := int64(20 * Day)
+	// WaitGroup 等待二十个 goroutine 全部结束；Add 必须先于启动，defer Done 保证每个任务归还计数。
+	// 工作 goroutine 用 t.Error 报错并 return；t.Fatal 会终止当前 goroutine，不应用它代替主测试退出。
 	var wg sync.WaitGroup
 	ids := make(chan string, 20)
 	for i := 0; i < 20; i++ {
@@ -66,6 +74,7 @@ func TestSubmissionConcurrentDedupCapacityAndExpiry(t *testing.T) {
 			ids <- sub.ID
 		}()
 	}
+	// 所有发送者结束后由主测试关闭 ids；range ids 收完缓冲结果后退出，不与发送发生关闭竞态。
 	wg.Wait()
 	close(ids)
 	id := ""
@@ -101,11 +110,16 @@ func TestSubmissionConcurrentDedupCapacityAndExpiry(t *testing.T) {
 	}
 }
 
+// testSubmissionControl 只控制是否暂停的接口替身，让 HTTP 测试不必启动真实后台消费者。
 type testSubmissionControl struct{ paused bool }
 
+// Paused 返回测试设置的暂停标志；不执行网络或维护流程。
 func (c *testSubmissionControl) Paused(context.Context) (bool, error) { return c.paused, nil }
+
+// Wake 空实现满足 SubmissionControl 接口；本组测试只检查 HTTP 接收与持久入队。
 func (c *testSubmissionControl) Wake()                                {}
 
+// TestSubmissionHTTPBoundariesAndProxyLimits 验证 202 接收、状态查询、可信代理/IP 限额、维护门禁、JSON 边界、预检与来源校验。
 func TestSubmissionHTTPBoundariesAndProxyLimits(t *testing.T) {
 	store, _ := submissionStore(t)
 	control := &testSubmissionControl{}
@@ -137,7 +151,7 @@ func TestSubmissionHTTPBoundariesAndProxyLimits(t *testing.T) {
 	if w := request("GET", "/api/submissions/"+sub.ID, "", "203.0.113.1:1234", ""); w.Code != 200 {
 		t.Fatal(w.Code, w.Body)
 	}
-	// An untrusted peer cannot rotate its quota by spoofing forwarding headers.
+	// 不可信连接对端不能靠伪造转发头轮换 IP 配额。
 	for i := 0; i < 5; i++ {
 		if w := request("POST", "/api/submissions", `{"url":"https://github.com/a/b"}`, "203.0.113.5:12", fmt.Sprintf("192.0.2.%d", i)); w.Code != 202 {
 			t.Fatal(w.Code, w.Body)
@@ -146,7 +160,7 @@ func TestSubmissionHTTPBoundariesAndProxyLimits(t *testing.T) {
 	if w := request("POST", "/api/submissions", `{"url":"https://github.com/a/b"}`, "203.0.113.5:12", "192.0.2.200"); w.Code != 429 || w.Header().Get("Retry-After") == "" {
 		t.Fatal(w.Code, w.Body)
 	}
-	// Distinct real clients behind a trusted proxy retain independent quotas.
+	// 可信代理后的不同真实客户端应拥有独立配额。
 	if w := request("POST", "/api/submissions", `{"url":"https://github.com/a/b"}`, "10.0.0.1:12", "192.0.2.2"); w.Code != 202 {
 		t.Fatal(w.Code, w.Body)
 	}
@@ -180,8 +194,10 @@ func TestSubmissionHTTPBoundariesAndProxyLimits(t *testing.T) {
 	}
 }
 
+// TestMigrationPreservesExistingDataAndBackup 对 schema 3/4/5 分别准备旧库，升级后验证数据/重试保留、旧字段移除、重复升级安全和投稿队列可备份恢复。
 func TestMigrationPreservesExistingDataAndBackup(t *testing.T) {
 	for _, version := range []int{3, 4, 5} {
+		// 每个版本是独立子测试，有自己的 *testing.T 与临时目录；没有 t.Parallel，因此顺序执行。
 		t.Run(fmt.Sprintf("schema-%d", version), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), DatabaseName)
 			db, err := database(path, "rwc")
@@ -216,7 +232,7 @@ func TestMigrationPreservesExistingDataAndBackup(t *testing.T) {
 				t.Fatal(err)
 			}
 			db.Close()
-			// Older snapshots must remain verifiable and restorable before upgrading.
+			// 执行升级前，先断言旧快照仍可校验和恢复；恢复兼容性不等同于可直接启动旧 schema。
 			oldTarget := filepath.Join(t.TempDir(), DatabaseName)
 			if err = Restore(path, oldTarget); err != nil {
 				t.Fatal("old backup was rejected", err)
@@ -291,6 +307,7 @@ func TestMigrationPreservesExistingDataAndBackup(t *testing.T) {
 	}
 }
 
+// TestSubmissionMigrationFailureRollsBackDDLAndVersion 先制造迁移索引名称冲突，再验证失败后版本仍为 3 且新表不存在，证明 DDL 和版本同事务回滚。
 func TestSubmissionMigrationFailureRollsBackDDLAndVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), DatabaseName)
 	db, err := database(path, "rwc")
@@ -303,6 +320,7 @@ func TestSubmissionMigrationFailureRollsBackDDLAndVersion(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// 准备故障：让旧库预先占用后续迁移的索引名称，真实触发 DDL 失败，而非 mock 一个返回值。
 	if _, err = db.Exec("PRAGMA user_version=3; CREATE INDEX submissions_active_name ON projects(name)"); err != nil {
 		t.Fatal(err)
 	}

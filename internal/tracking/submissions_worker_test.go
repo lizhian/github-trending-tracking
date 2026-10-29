@@ -1,5 +1,8 @@
 package tracking
 
+// 本文件为同包测试，验证投稿队列的分阶段提交、失败重试与共享冷却。
+// 先读 submissionHarness 的依赖注入，再读两个 step 如何分别完成仓库与 README 阶段。
+
 import (
 	"context"
 	"encoding/json"
@@ -14,13 +17,19 @@ import (
 	"time"
 )
 
+// submissionTestClock 带互斥锁的模拟时钟，供采样和投稿并发场景安全读写；等待只推进时间，不实际休眠。
 type submissionTestClock struct {
 	mu sync.Mutex
 	at int64
 }
 
+// Now 加锁读取当前模拟时间；短方法中的 defer 仍在方法返回前释放锁。
 func (c *submissionTestClock) Now() int64       { c.mu.Lock(); defer c.mu.Unlock(); return c.at }
+
+// advance 将模拟时间设置到指定毫秒，常用于精确抵达重试边界。
 func (c *submissionTestClock) advance(at int64) { c.mu.Lock(); c.at = at; c.mu.Unlock() }
+
+// Sleep 检查取消后加锁推进模拟时间，不等待真实墙上时间。
 func (c *submissionTestClock) Sleep(ctx context.Context, d time.Duration) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -31,15 +40,20 @@ func (c *submissionTestClock) Sleep(ctx context.Context, d time.Duration) error 
 	return nil
 }
 
+// submissionTransport 函数类型的 RoundTripper 适配器，将测试回调注入 http.Client。
 type submissionTransport func(*http.Request) (*http.Response, error)
 
+// RoundTrip 把 HTTP 请求交给替身函数，不建立真实网络连接。
 func (f submissionTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// submissionResponse 构造指定状态和正文的 HTTP 响应，用 NopCloser 补齐 Body.Close。
 func submissionResponse(code int, body string) *http.Response {
 	return &http.Response{StatusCode: code, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}
 }
 
 const submissionRepository = `{"id":"R1","nameWithOwner":"acme/tool","description":"a tool","homepageUrl":"https://example.com/tool","primaryLanguage":{"name":"Go"},"repositoryTopics":{"nodes":[]},"stargazerCount":100,"isPrivate":false}`
 
+// submissionHarness 组合真实数据库、模拟时间、共享调度器、投稿消费者和可替换响应函数。
 type submissionHarness struct {
 	store     *Store
 	scheduler *Scheduler
@@ -50,6 +64,7 @@ type submissionHarness struct {
 	response  func(*http.Request) (*http.Response, error)
 }
 
+// newSubmissionHarness 建立投稿测试环境，拦截 HTTP 请求计数，并允许单个用例覆盖默认成功响应。
 func newSubmissionHarness(t *testing.T) *submissionHarness {
 	t.Helper()
 	store, _ := submissionStore(t)
@@ -68,6 +83,8 @@ func newSubmissionHarness(t *testing.T) *submissionHarness {
 	h.worker = NewSubmissionWorker(h.scheduler)
 	return h
 }
+
+// success 按 README、按 ID 查询或按名称查询返回正确形状的模拟成功数据。
 func (h *submissionHarness) success(r *http.Request) (*http.Response, error) {
 	if strings.HasSuffix(r.URL.Path, "/readme") {
 		return submissionResponse(200, "a link https://linux.do"), nil
@@ -78,6 +95,8 @@ func (h *submissionHarness) success(r *http.Request) (*http.Response, error) {
 	}
 	return submissionResponse(200, `{"data":{"r0":`+submissionRepository+`}}`), nil
 }
+
+// enqueue 以真实入队 API 创建投稿，自动补齐 GitHub URL 并使用模拟时间。
 func (h *submissionHarness) enqueue(t *testing.T, name string) Submission {
 	t.Helper()
 	sub, err := h.store.EnqueueSubmission(context.Background(), "https://github.com/"+name, h.clock.Now())
@@ -86,6 +105,8 @@ func (h *submissionHarness) enqueue(t *testing.T, name string) Submission {
 	}
 	return sub
 }
+
+// step 执行且要求确实处理一个到期阶段；有错误或未处理任务均使测试立即失败。
 func (h *submissionHarness) step(t *testing.T) {
 	t.Helper()
 	worked, err := h.worker.ProcessNext(context.Background())
@@ -93,6 +114,8 @@ func (h *submissionHarness) step(t *testing.T) {
 		t.Fatalf("worked=%t err=%v", worked, err)
 	}
 }
+
+// result 按模拟当前时间读取投稿展示结果，统一测试中的失败定位。
 func (h *submissionHarness) result(t *testing.T, id string) Submission {
 	t.Helper()
 	sub, err := h.store.Submission(id, h.clock.Now())
@@ -102,13 +125,16 @@ func (h *submissionHarness) result(t *testing.T, id string) Submission {
 	return sub
 }
 
+// TestSubmissionAdmissionIndependentStages 验证启动等待不阻塞投稿、GitHub 先提交、Linux.do 复用观测但独立周期，重复不重置保护期而淘汰再入库会重建周期。
 func TestSubmissionAdmissionIndependentStages(t *testing.T) {
+	// 准备：持久化投稿，时钟仍处于普通采样启动等待内；后续 step 每次只处理一个阶段。
 	h := newSubmissionHarness(t)
 	sub := h.enqueue(t, "acme/tool")
-	// Startup's ordinary sampling wait must not postpone intake.
+	// 普通采样启动等待不能推迟已入队投稿的处理。
 	if h.scheduler.startAt <= h.clock.Now() {
 		t.Fatal("fixture is not in startup wait")
 	}
+	// 执行与断言：第一个 step 后 GitHub 必须已经提交，即使 Linux.do 仍未完成。
 	h.step(t)
 	if got := h.result(t, sub.ID); got.GitHub != "tracked" || got.Linuxdo != "pending" {
 		t.Fatal(got)
@@ -165,6 +191,7 @@ func TestSubmissionAdmissionIndependentStages(t *testing.T) {
 	}
 }
 
+// TestSubmissionStableIdentityAliasesAndResultExpiry 同稳定仓库的不同名称合并后原请求 ID 仍可查，结果到期后别名也不可绕过七天限制。
 func TestSubmissionStableIdentityAliasesAndResultExpiry(t *testing.T) {
 	h := newSubmissionHarness(t)
 	first := h.enqueue(t, "acme/tool")
@@ -177,7 +204,7 @@ func TestSubmissionStableIdentityAliasesAndResultExpiry(t *testing.T) {
 	if got := h.result(t, alias.ID); got.GitHub != "tracked" || got.Linuxdo != "tracked" {
 		t.Fatal(got)
 	}
-	// Exercise an active stable-ID merge independently of stage scheduling order.
+	// 重新制造活跃任务，独立验证稳定 ID 合并，不依赖前面阶段恰好怎样调度。
 	if _, err := h.store.DB.Exec("UPDATE submissions SET phase='linuxdo',finished_at=NULL,next_at=? WHERE id=?", h.clock.Now()+Hour, first.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +218,7 @@ func TestSubmissionStableIdentityAliasesAndResultExpiry(t *testing.T) {
 	h.step(t)
 	finished := h.result(t, first.ID)
 	h.clock.advance(*finished.FinishedAt + 7*Day)
-	// Even before physical maintenance, expired results are unavailable.
+	// 尚未物理清理时查询也必须遵守七天有效期。
 	if _, err := h.store.Submission(activeAlias.ID, h.clock.Now()); err == nil {
 		t.Fatal("alias bypassed result expiry")
 	}
@@ -204,6 +231,8 @@ func TestSubmissionStableIdentityAliasesAndResultExpiry(t *testing.T) {
 	}
 }
 
+// TestSubmissionNegativeCacheAndPartialReadmeFailure 分别验证 README 不符合缓存复用/到期再投，
+// 以及三次 README 失败只结束为部分成功而保留 GitHub 项目。
 func TestSubmissionNegativeCacheAndPartialReadmeFailure(t *testing.T) {
 	t.Run("negative cache", func(t *testing.T) {
 		h := newSubmissionHarness(t)
@@ -265,6 +294,7 @@ func TestSubmissionNegativeCacheAndPartialReadmeFailure(t *testing.T) {
 	})
 }
 
+// TestSubmissionPrivacyFailuresAndRateLimitRecovery 区分私有/缺失、认证失败与限流；限流不计次数，重启后并发采样/投稿仍保留冷却，到期可恢复。
 func TestSubmissionPrivacyFailuresAndRateLimitRecovery(t *testing.T) {
 	for _, kind := range []string{"private", "missing", "auth", "rate"} {
 		t.Run(kind, func(t *testing.T) {
@@ -309,7 +339,7 @@ func TestSubmissionPrivacyFailuresAndRateLimitRecovery(t *testing.T) {
 				if got.RepositoryAttempts != 0 || got.NextAt < h.clock.Now()+2*Hour {
 					t.Fatal("rate limit consumed attempt or lost cooldown", got)
 				}
-				// Simulate process restart, then run the ordinary sampler and intake concurrently.
+				// 重建调度器模拟进程重启，再并发执行普通采样与投稿，验证共享冷却不会被覆盖。
 				h.scheduler = NewScheduler(h.store, h.scheduler.options)
 				h.worker = NewSubmissionWorker(h.scheduler)
 				var wg sync.WaitGroup
@@ -348,6 +378,7 @@ func TestSubmissionPrivacyFailuresAndRateLimitRecovery(t *testing.T) {
 	}
 }
 
+// TestSubmissionFiveMinuteRetriesAndUpstreamReset 覆盖普通不可用、HTTP/二级/GraphQL 限流和额度重置，验证退避时间、计次数差异及精确截止恢复。
 func TestSubmissionFiveMinuteRetriesAndUpstreamReset(t *testing.T) {
 	for _, kind := range []string{"unavailable", "http-limit", "secondary-limit", "graphql-limit", "reset"} {
 		t.Run(kind, func(t *testing.T) {
@@ -394,9 +425,12 @@ func TestSubmissionFiveMinuteRetriesAndUpstreamReset(t *testing.T) {
 	}
 }
 
+// TestSubmissionAdmissionCheckpointIsAtomicAndCancellationIsFree 用触发器令队列更新失败，
+// 验证项目和快照一起回滚；再取消请求，确认不消耗次数且重建消费者可继续。
 func TestSubmissionAdmissionCheckpointIsAtomicAndCancellationIsFree(t *testing.T) {
 	h := newSubmissionHarness(t)
 	sub := h.enqueue(t, "acme/tool")
+	// 在真实 SQLite 的投稿检查点更新处注入故障，检验事务回滚是否也覆盖已写项目和快照。
 	_, err := h.store.DB.Exec(`CREATE TRIGGER fail_checkpoint BEFORE UPDATE ON submissions WHEN NEW.github='tracked' BEGIN SELECT RAISE(ABORT,'injected checkpoint failure'); END`)
 	if err != nil {
 		t.Fatal(err)
@@ -432,6 +466,7 @@ func TestSubmissionAdmissionCheckpointIsAtomicAndCancellationIsFree(t *testing.T
 	}
 }
 
+// TestSubmissionListCacheInvalidatesAndCleanupGateRejects 先生成可缓存列表再收录新项目，验证立即失效；随后设置清洗门禁，确认消费者暂停且不请求上游。
 func TestSubmissionListCacheInvalidatesAndCleanupGateRejects(t *testing.T) {
 	h := newSubmissionHarness(t)
 	var repo repository
@@ -461,7 +496,7 @@ func TestSubmissionListCacheInvalidatesAndCleanupGateRejects(t *testing.T) {
 	if read() != 2 {
 		t.Fatal("successful admission left old ten-minute list cache")
 	}
-	// A cleanup marker must gate both new POSTs and the queued consumer.
+	// 清洗门禁是新投稿请求与已入队消费者共同使用的暂停依据；这里继续验证消费者读取。
 	if err := h.store.SetState(linuxdoCleanupKey, linuxdoCleanupState{StartedAt: h.clock.Now()}); err != nil {
 		t.Fatal(err)
 	}

@@ -1,5 +1,8 @@
 package tracking_test
 
+// 本文件用 httptest 在内存中调用真实 Handler，验证查询边界与缓存。
+// NewRecorder 记录状态码/响应头/正文，不需启动服务器；时钟通过函数注入以精确验证失效边界。
+
 import (
 	"encoding/json"
 	"net/http/httptest"
@@ -11,6 +14,7 @@ import (
 	"github.com/lizhian/github-trending-tracking/internal/tracking"
 )
 
+// TestEmptyDatabaseIsExplicitAndTypeQueriesRemainReadOnly 验证缺失库不被隐式创建、写锁排他、空列表有明确数组，以及查询参数/方法/来源/路径边界。
 func TestEmptyDatabaseIsExplicitAndTypeQueriesRemainReadOnly(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tracking.sqlite")
 	if _, err := tracking.Open(path); err == nil {
@@ -41,6 +45,7 @@ func TestEmptyDatabaseIsExplicitAndTypeQueriesRemainReadOnly(t *testing.T) {
 	if got["items"] == nil || got["languages"] == nil || got["topics"] == nil || got["pages"] != float64(1) {
 		t.Fatalf("invalid empty list %s", w.Body)
 	}
+	// 用一张用例表检查不同 method/path/origin；t.Errorf 记录失败后继续其他用例，t.Fatal 则终止当前测试。
 	for _, tt := range []struct {
 		method, path, origin string
 		status               int
@@ -76,6 +81,7 @@ func TestEmptyDatabaseIsExplicitAndTypeQueriesRemainReadOnly(t *testing.T) {
 	reopened.Close()
 }
 
+// TestInitialEmptyTypeIsNotCachedAndNonemptyQueriesExpire 先查空类型再插入项目，验证初始空列表不缓存；已有项目的零匹配查询可缓存，600 秒整失效。
 func TestInitialEmptyTypeIsNotCachedAndNonemptyQueriesExpire(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tracking.sqlite")
 	if err := tracking.Initialize(path); err != nil {

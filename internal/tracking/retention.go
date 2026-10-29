@@ -1,10 +1,14 @@
 package tracking
 
+// 本文件按追踪类型分别执行每日淘汰。
+// 结合 trends.go 理解保留评分，结合 observations.go 理解追踪周期与历史归属。
+
 import (
 	"context"
 	"slices"
 )
 
+// cleanupResult 记录某个追踪类型本日淘汰的执行时段、删除数量、剩余数量与符合淘汰条件的数量。
 type cleanupResult struct {
 	At        int64 `json:"at"`
 	Removed   int   `json:"removed"`
@@ -12,7 +16,11 @@ type cleanupResult struct {
 	Eligible  int   `json:"eligible"`
 }
 
+// cleanup 按追踪类型独立执行每日淘汰，500 项是软目标，保护期或观测不足时允许超出。
+// 仅考虑入库满 24 小时、观测新鲜且历史可比较的项目；综合窗口增长速度得到保留评分。
+// 按评分、24 小时净增量、Star 总数、入库时间、ID 升序淘汰，删除和执行记录同事务提交。
 func (s *Scheduler) cleanup(ctx context.Context, now int64, policy *SamplingPolicy) (bool, error) {
+	// 每日淘汰边界是北京时间 04:00（UTC 前一天 20:00），不是程序每启动就重复淘汰。
 	at := floorDiv(now+4*Hour, Day)*Day - 4*Hour
 	changed := false
 	for _, typ := range projectTypes {
@@ -64,6 +72,8 @@ func (s *Scheduler) cleanup(ctx context.Context, now int64, policy *SamplingPoli
 						valid = false
 						break
 					}
+					// 先把净增量下限夹到 0，再除以实际观测天数得到速度，按四个窗口权重相加；
+					// 负净增量不产生负评分，但稍后的 24 小时净增量决胜规则仍保留其负值。
 					score += float64(max(*v.Delta, 0)) / (float64(*v.End-*v.Start) / float64(Day)) * []float64{.6, .25, .1, .05}[j]
 				}
 				if valid {
@@ -71,6 +81,7 @@ func (s *Scheduler) cleanup(ctx context.Context, now int64, policy *SamplingPoli
 				}
 			}
 		}
+		// 比较函数约定：负数代表 a 排在前，0 表示同序，正数代表 b 排在前，类似 Java Comparator。
 		slices.SortFunc(candidates, func(a, b candidate) int {
 			if a.score < b.score {
 				return -1
@@ -98,6 +109,7 @@ func (s *Scheduler) cleanup(ctx context.Context, now int64, policy *SamplingPoli
 			}
 			return EnglishCompare(a.row.ID, b.row.ID)
 		})
+		// 最多删到 500 个；符合条件不足时不强删受保护/数据不足项目，所以是软容量。
 		victims := candidates[:min(len(candidates), max(0, len(rows)-500))]
 		tx, e := s.store.DB.BeginTx(ctx, nil)
 		if e != nil {

@@ -1,5 +1,8 @@
 package tracking
 
+// 本文件将数据库数据转换成 HTTP 查询结果，并提供前端静态文件。
+// 先看 Handler → ServeHTTP → api，再看 list 的筛选、排序、分页；投稿接口在 submissions_http.go。
+
 import (
 	"encoding/json"
 	"errors"
@@ -24,7 +27,11 @@ import (
 	"golang.org/x/text/language"
 )
 
+// Project 提供给前端的追踪项目视图，与数据库原始行 ProjectRow 分离。
+// 大写字段可供 encoding/json 反射访问，反引号中的 json 标签指定外部字段名，类似序列化注解。
+// 可空字段用指针，集合用 slice/map；默认 nil 集合编码为 null，显式空 slice 编码为 []。
 type Project struct {
+	// ID 是追踪项目身份（类型+仓库 ID），RepoID 是 GitHub 稳定仓库身份；同仓库可有两个项目。
 	ID          string               `json:"id"`
 	Type        string               `json:"type"`
 	RepoID      string               `json:"repoId"`
@@ -34,13 +41,18 @@ type Project struct {
 	Language    *string              `json:"language"`
 	Topics      []string             `json:"topics"`
 	Stars       int64                `json:"stars"`
+	// EnteredAt 决定本周期保护期；ObservedAt 是最后成功观测，AttemptedAt 包含失败尝试。
+	// 三者不能互相替代；共享旧观测收录新类型时，入库时间可能晚于观测时间。
 	EnteredAt   int64                `json:"enteredAt"`
 	ObservedAt  int64                `json:"observedAt"`
 	AttemptedAt int64                `json:"attemptedAt"`
+	// Error 记录采样失败；Stale 独立按时间判断。Trends 的整数键是窗口小时数，JSON 编码为字符串键。
 	Error       *string              `json:"error"`
 	Stale       bool                 `json:"stale"`
 	Trends      map[int]TrendSummary `json:"trends"`
 }
+
+// Summary 当前追踪类型的全量统计，先于关键词/语言/标签筛选计算；Net24 为 nil 表示没有可比较项目。
 type Summary struct {
 	Tracked      int    `json:"tracked"`
 	Fresh        int    `json:"fresh"`
@@ -48,6 +60,8 @@ type Summary struct {
 	Net24        *int64 `json:"net24"`
 	Comparable24 int    `json:"comparable24"`
 }
+
+// ListResult 列表 API 的 JSON 响应，包含分页、筛选选项、汇总和运行状态。
 type ListResult struct {
 	Items     []Project                  `json:"items"`
 	Total     int                        `json:"total"`
@@ -60,6 +74,8 @@ type ListResult struct {
 	Status    map[string]json.RawMessage `json:"status"`
 	AsOf      int64                      `json:"asOf"`
 }
+
+// HistoryResult 历史 API 的 JSON 响应；缺测、覆盖状态和观测过期分别表达不同信息。
 type HistoryResult struct {
 	Points     []Point `json:"points"`
 	Trend      Trend   `json:"trend"`
@@ -67,17 +83,23 @@ type HistoryResult struct {
 	ObservedAt int64   `json:"observedAt"`
 	Stale      bool    `json:"stale"`
 }
+
+// HTTPOptions HTTP 层依赖与配置；Now 函数字段可注入测试时钟，Submissions 只暴露所需控制能力。
 type HTTPOptions struct {
 	AllowedOrigin, StaticDir string
 	Now                      func() time.Time
 	Submissions              SubmissionControl
 	TrustedProxies           []netip.Prefix
 }
+
+// cacheEntry 保存已编码响应、失效毫秒时间和数据版本，避免数据变化后继续命中过时列表。
 type cacheEntry struct {
 	body     []byte
 	expires  int64
 	revision uint64
 }
+
+// handler HTTP 处理器的具体实现；多个请求可并发调用它，因此缓存和限流状态需要锁保护。
 type handler struct {
 	store   *Store
 	options HTTPOptions
@@ -86,17 +108,23 @@ type handler struct {
 	limiter submissionLimiter
 }
 
+// Handler 构造并返回 http.Handler 接口，具体对象是 *handler。
+// 只要具有 ServeHTTP 方法就自动满足接口，无需 implements，也不需要继承框架基类。
 func Handler(store *Store, options HTTPOptions) http.Handler {
+	// 函数也是值，可存结构体字段、传参和判 nil；测试注入闭包，生产默认使用 time.Now。
 	if options.Now == nil {
 		options.Now = time.Now
 	}
 	return &handler{store: store, options: options, cache: map[string]cacheEntry{}}
 }
 
+// parameterError 以 string 为底层类型的自定义错误；添加 Error 方法后即可满足 error 接口。
 type parameterError string
 
+// Error 返回参数错误文本；类型转换 string(e) 取出底层字符串。
 func (e parameterError) Error() string { return string(e) }
 
+// parameters 保存已校验、带默认值的列表参数；小写字段仅供本包使用。
 type parameters struct {
 	q, language, topic, sort, direction, kind string
 	page                                      int
@@ -104,11 +132,15 @@ type parameters struct {
 
 var pagePattern = regexp.MustCompile(`^[1-9]\d{0,5}$`)
 
+// listParameters 校验查询键、单值约束、长度、排序与类型，返回规范化参数或可展示的参数错误。
+// 长度按 UTF-16 计数以保持前端契约，不能用 Go 的 len(string) 代替字符数。
 func listParameters(u *url.URL) (parameters, error) {
 	values, err := searchParameters(u.RawQuery)
 	if err != nil {
 		return parameters{}, parameterError("查询参数无效")
 	}
+	// Go string 存字节（本项目文本为 UTF-8），len 给字节数；range string 解码为 rune（Unicode 码点）。
+	// Java String.length 按 UTF-16 码元计数；这里显式转换以保持原前端长度契约。
 	for key, values := range values {
 		if !slices.Contains([]string{"q", "language", "topic", "sort", "direction", "page", "type"}, key) || len(values) != 1 || len(utf16.Encode([]rune(values[0]))) > 200 {
 			return parameters{}, parameterError("查询参数无效")
@@ -128,10 +160,17 @@ func listParameters(u *url.URL) (parameters, error) {
 	p.page, _ = strconv.Atoi(page)
 	return p, nil
 }
+
+// jsStringCompare 按 UTF-16 码元比较字符串，使选项排序与 JavaScript 行为一致。
 func jsStringCompare(a, b string) int {
 	return slices.Compare(utf16.Encode([]rune(a)), utf16.Encode([]rune(b)))
 }
+
+// EnglishCompare 按英语排序规则比较文本，供淘汰等需要稳定决胜顺序的逻辑使用。
 func EnglishCompare(a, b string) int { return collate.New(language.English).CompareString(a, b) }
+
+// list 读取某追踪类型项目，构造全量统计与选项，再筛选、排序、分页并汇总运行状态。
+// 无可比较净增量的项目放在末尾；旧混合采集状态从项目行还原，避免候选失败污染存量采样状态。
 func (s *Store) list(p parameters, now int64) (ListResult, error) {
 	rows, err := s.ProjectRows("WHERE type=?", p.kind)
 	if err != nil {
@@ -161,6 +200,7 @@ func (s *Store) list(p parameters, now int64) (ListResult, error) {
 		if !project.Stale {
 			result.Summary.Fresh++
 		}
+		// 先判 nil 再解引用；*delta=0 也算一个可比较项目，不能按“是否非零”决定是否纳入。
 		if delta := project.Trends[24].Delta; delta != nil {
 			net += *delta
 			result.Summary.Comparable24++
@@ -194,6 +234,7 @@ func (s *Store) list(p parameters, now int64) (ListResult, error) {
 	slices.SortFunc(result.Languages, jsStringCompare)
 	slices.SortFunc(result.Topics, jsStringCompare)
 	collator := collate.New(language.English)
+	// 排序回调是捕获参数与 collator 的闭包；比较净增量之前先处理 nil，避免解引用空指针。
 	slices.SortStableFunc(filtered, func(a, b Project) int {
 		comparison := 0
 		if p.sort == "name" {
@@ -253,8 +294,8 @@ func (s *Store) list(p parameters, now int64) (ListResult, error) {
 			return result, err
 		}
 		if legacy.Version < 2 {
-			// Old batches mixed candidate admission with sampling. Project rows
-			// retain the actual update results, even before the next sampling slot.
+			// 旧批次混合了候选准入和存量采样；即使下一采样时段未到，
+			// 项目行也保留真实更新结果，可据此恢复展示状态。
 			sampling := runState{}
 			for _, row := range rows {
 				sampling.AttemptedAt = max(sampling.AttemptedAt, row.AttemptedAt)
@@ -291,6 +332,9 @@ func (s *Store) list(p parameters, now int64) (ListResult, error) {
 	}
 	return result, nil
 }
+
+// ServeHTTP 满足 http.Handler 的入口：/api/ 路径交给 API，其余交给静态前端。
+// ResponseWriter 是接口，*http.Request 是请求指针；框架会为并发请求调用这个方法。
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		h.api(w, r)
@@ -298,11 +342,16 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	h.static(w, r)
 }
+
+// writeJSON 先设置内容类型和状态码，再编码响应；写出响应后不能再可靠地改状态码。
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
 }
+
+// api 处理来源校验、方法检查、列表缓存和历史查询，并分流投稿接口。
+// 内部错误统一映射为安全提示；parameterError 返回 400，其他数据错误返回 503。
 func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	if origin != "" && origin != h.options.AllowedOrigin {
@@ -341,6 +390,7 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 			h.mu.Lock()
 			entry, ok := h.cache[key]
 			h.mu.Unlock()
+			// 版本号原子读取，配合有效期一起判缓存。锁只保护 map 访问，不覆盖耗时的数据库查询。
 			revision := h.store.listRevision.Load()
 			if ok && entry.expires > now && entry.revision == revision {
 				w.Header().Set("Content-Type", "application/json")
@@ -348,6 +398,7 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			var list ListResult
+			// 此处用 = 保留外层 err，让函数末尾统一转换 HTTP 错误；若误用 := 可能遮蔽外层变量。
 			list, err = h.store.list(p, now)
 			result = list
 			if err == nil && list.Summary.Tracked > 0 {
@@ -360,6 +411,7 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 							delete(h.cache, key)
 						}
 					}
+					// map 无遍历顺序保证，这里任意驱逐一项控制大小，并不是 LRU 缓存。
 					if len(h.cache) >= 128 {
 						for key := range h.cache {
 							delete(h.cache, key)
@@ -434,6 +486,8 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		var parameter parameterError
+		// errors.As 按错误类型匹配（也可沿包装链查找）；errors.Is 则判断某个已知错误值。
+		// 这是 Go 的显式错误分类，不会像异常捕获那样改变程序控制流。
 		if errors.As(err, &parameter) {
 			fail(400, string(parameter))
 		} else {
@@ -443,6 +497,8 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, result)
 }
+
+// jsNumber 兼容历史前端的数字参数格式，支持十六/二进制与八进制前缀；调用方继续检查整数及允许窗口。
 func jsNumber(text string) (float64, error) {
 	text = strings.TrimSpace(text)
 	if strings.HasPrefix(text, "0x") || strings.HasPrefix(text, "0X") {
@@ -459,6 +515,8 @@ func jsNumber(text string) (float64, error) {
 	}
 	return strconv.ParseFloat(text, 64)
 }
+
+// static 从构建目录提供静态文件；不存在且无扩展名的页面路径回退到 index.html，支持前端路由。
 func (h *handler) static(w http.ResponseWriter, r *http.Request) {
 	if h.options.StaticDir == "" {
 		http.NotFound(w, r)
@@ -481,8 +539,8 @@ func (h *handler) static(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, filepath.Join(h.options.StaticDir, name))
 }
 
-// URLSearchParams treats semicolons as ordinary text and tolerates malformed
-// percent escapes; net/url.ParseQuery uses different parsing rules.
+// searchParameters 按 URLSearchParams 语义解析查询：分号是普通字符，畸形百分号转义按原文保留。
+// 标准 net/url.ParseQuery 的规则不同，因此这里手动解码；无效 UTF-8 替换为 U+FFFD。
 func searchParameters(raw string) (url.Values, error) {
 	values := url.Values{}
 	decode := func(raw string) string {

@@ -1,5 +1,9 @@
 package tracking
 
+// 本文件编排后台采集：Run 周期调用 Tick，Tick 执行准入门禁、发现、观测和清理。
+// collect 较长，可按“合并候选 → 解析身份 → README 准入 → 复用/请求观测 → 保存状态”阅读。
+// 采样和投稿共用锁与上游状态，但来源发现、候选收录和存量观测分别记录结果。
+
 import (
 	"context"
 	"errors"
@@ -11,14 +15,20 @@ import (
 	"time"
 )
 
+// SchedulerOptions 调度依赖和启动配置；Clock/Client 可注入替身，零值由构造函数补默认。
+// StartedAt 为 Unix 毫秒，决定普通采集重启后从哪一轮恢复。
 type SchedulerOptions struct {
 	Token          string
+	// 可替换的接口依赖，类似 Java 构造器注入；测试传模拟时钟，生产由 NewScheduler 补 realClock。
 	Clock          Clock
 	Client         *http.Client
+	// 0 表示由时钟取启动时间；清洗模式暂停普通采集并使用 BackupDir 保存清洗前快照。
 	StartedAt      int64
 	LinuxdoCleanup bool
 	BackupDir      string
 }
+
+// Scheduler 协调采样、投稿和主机状态的共享所有者；mu 保护跨网络请求的整个上游工作阶段。
 type Scheduler struct {
 	store      *Store
 	options    SchedulerOptions
@@ -28,6 +38,8 @@ type Scheduler struct {
 	cleanupLog string
 }
 
+// NewScheduler 补齐依赖并计算严格晚于启动时间的下一时段；构造函数只是普通函数，New 前缀是惯例。
+// options 按值传入；其中指针/接口仍可能引用外部对象，不能理解成对依赖做深拷贝。
 func NewScheduler(store *Store, options SchedulerOptions) *Scheduler {
 	if options.Clock == nil {
 		options.Clock = realClock{}
@@ -40,6 +52,8 @@ func NewScheduler(store *Store, options SchedulerOptions) *Scheduler {
 	}
 	return &Scheduler{store: store, options: options, upstream: &upstream{hosts: map[string]*hostState{}, clock: options.Clock, client: options.Client}, startAt: NextSlot(options.StartedAt)}
 }
+
+// Run 串行调用 Tick，扣除本轮耗时后等待至约一分钟间隔；context 取消时结束循环。
 func (s *Scheduler) Run(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
@@ -54,12 +68,18 @@ func (s *Scheduler) Run(ctx context.Context) {
 		}
 	}
 }
+
+// Tick 执行一次维护/采集检查；返回 error 供循环记录，取消时不额外报告业务失败。
+// (err error) 是命名返回值，defer 在函数返回前可修改它，将收尾持久化错误传回调用者。
 func (s *Scheduler) Tick(ctx context.Context) (err error) {
+	// finish 是持有阶段锁后的清理回调；立即检查错误，成功后用 defer 保证后续任意返回都执行。
 	finish, err := s.lockUpstream()
 	if err != nil {
 		return err
 	}
 	now := s.upstream.clock.Now()
+	// 普通 return err 会先设置命名返回值，再执行 defer；这里仅在原流程成功时接纳收尾错误。
+	// defer 调用的实参在登记时求值；这里使用闭包，在退出时读取 err 的最终值。
 	defer func() {
 		if e := finish(); err == nil {
 			err = e
@@ -111,8 +131,8 @@ func (s *Scheduler) Tick(ctx context.Context) (err error) {
 	return nil
 }
 
-// Preserve the first policy boundary; the new timetable starts at the first
-// slot this process can collect, including when submissions initialize it.
+// upgradeSamplingPolicy 保留第一次规则生效边界，新时刻表从本进程可采集的首个时段生效。
+// 投稿也可能初始化规则，因此统一使用 startAt，不能直接用当前时间替换历史边界。
 func (s *Scheduler) upgradeSamplingPolicy(policy *SamplingPolicy, now int64) *SamplingPolicy {
 	if policy == nil {
 		policy = &SamplingPolicy{EffectiveAt: now}
@@ -123,6 +143,10 @@ func (s *Scheduler) upgradeSamplingPolicy(policy *SamplingPolicy, now int64) *Sa
 	}
 	return policy
 }
+
+// collect 合并来源与持久化候选、确认身份与准入、复用同轮观测，再批量更新最多 100 个不同仓库。
+// 返回 bool 表示发现/待处理队列/阶段状态发生变化，error 表示流程失败，并不表示每个候选都失败。
+// 同仓库两类项目共享请求结果，但分别保留入库时间、追踪周期和历史；各阶段状态也独立保存。
 func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPolicy) (bool, error) {
 	d, e := s.discover(ctx, now, policy)
 	if e != nil {
@@ -134,6 +158,8 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 	}
 	priorJSON := jsonText(priorPending)
 	pending := []*discoveryEntry{}
+	// map 存指针；通过 previous 修改候选会同时修改 pending 中引用的对象。
+	// 这是有意共享状态，不能把它理解成 Java Stream 中不可变记录的拷贝。
 	byName := map[string]*discoveryEntry{}
 	addPending := func(entry *discoveryEntry) {
 		if entry == nil || repositoryName("https://github.com/"+entry.Name, false) == "" {
@@ -195,6 +221,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		}
 	}
 	pending = kept
+	// 先将发现进度与新候选一起持久化；后续上游请求中断时，已发现任务不会仅停留在内存。
 	if d.changed {
 		tx, e := s.store.DB.BeginTx(ctx, nil)
 		if e != nil {
@@ -244,6 +271,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			v.Error = strptr(message)
 		}
 	}
+	// 指针可作 map 键，这里按候选对象身份标记完成；按仓库去重另用规范名或稳定 ID。
 	completed := map[*discoveryEntry]bool{}
 	unavailable := map[string]unavailableResult{}
 	finishUnavailable := func(entry *discoveryEntry) {
@@ -329,6 +357,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			}
 		}
 	}
+	// 解析身份后再次按“追踪类型+稳定 ID”合并，消除仓库改名/大小写造成的同类型重复。
 	canonical := []*discoveryEntry{}
 	byID := map[string]*discoveryEntry{}
 	selectedTarget := map[*discoveryEntry]bool{}
@@ -385,6 +414,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		var latest *ProjectRow
 		retryAt := int64(0)
 		for i := range existing {
+			// 按索引取 slice 元素地址，后面保存的是对应项目行；普通 range 的 row 是值副本。
 			row := &existing[i]
 			if row.Type == entry.Type {
 				tracked = row
@@ -400,6 +430,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			completed[entry] = true
 			continue
 		}
+		// README 准入必须先于同轮观测复用；已有 Star 结果不代表具有 Linux.do 收录资格。
 		if entry.Type == "linux.do" {
 			qualification, err := s.linuxdoReadme(ctx, entry.RepoID, entry.Name)
 			if err != nil {
@@ -423,6 +454,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 				continue
 			}
 		}
+		// 复用真实观测时间，不把复用动作伪造成一次新观测；新项目 entered_at 仍用本次收录时间。
 		if latest != nil && latest.ObservedAt >= slot {
 			repo, e := rowRepository(*latest)
 			if e != nil {
@@ -471,6 +503,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 	} else {
 		ids = nil
 	}
+	// 限制的是不同仓库数；每个仓库可更新两个追踪类型，所以最多涉及 200 个追踪项目。
 	if len(ids) > 100 {
 		ids = ids[:100]
 	}
@@ -496,6 +529,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		}
 		return !found || latest <= now-Day
 	}
+	// 分成完整元数据和仅 Star 两组请求，沿用元数据 24 小时刷新周期，减少不必要字段获取。
 	for _, metadata := range []bool{true, false} {
 		if !readyGitHub() {
 			break
@@ -570,7 +604,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 					record("admission", entry.Type, true, "")
 				}
 			} else {
-				// Only candidate additions are eligible for termination; tracked rows retain sampling errors.
+				// 只有未收录候选可以明确结束本次收录；已收录项目保留采样错误及旧历史。
 				index := slices.Index(group, id)
 				for _, entry := range additions {
 					entry.Failure = message
@@ -650,6 +684,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			}
 		}
 	}
+	// 候选结束、不可访问缓存和错误状态在同一事务提交，避免移除候选却留下“后台重试”提示。
 	pendingChanged := jsonText(pending) != priorJSON
 	if pendingChanged || len(changes) > 0 || len(unavailable) > 0 {
 		tx, e := s.store.DB.BeginTx(ctx, nil)
@@ -717,8 +752,11 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 	return d.changed || pendingChanged || len(changes) > 0, nil
 }
 
-// Both sampling and submission stages use one owner for host state and persistence.
+// lockUpstream 获得采样与投稿共用的互斥锁，加载持久化主机状态，返回结束本阶段的函数。
+// 调用者必须执行返回函数：状态变化时保存，随后解锁；不是单纯读取后立刻释放的短锁。
 func (s *Scheduler) lockUpstream() (func() error, error) {
+	// 互斥锁跨越整个调用方工作阶段；返回的闭包完成持久化后才解锁。
+	// Go mutex 不是可重入锁，持锁路径不能再调用一次 lockUpstream。
 	s.mu.Lock()
 	hosts := map[string]*hostState{}
 	if _, err := s.store.State("upstream", &hosts); err != nil {

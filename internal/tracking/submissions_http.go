@@ -1,5 +1,8 @@
 package tracking
 
+// 本文件提供投稿 HTTP 接口、可信代理地址识别与每 IP 限流。
+// HTTP 只负责入队与查询，后台工作通过 SubmissionControl 接口唤醒，避免请求等待 GitHub。
+
 import (
 	"context"
 	"database/sql"
@@ -15,18 +18,24 @@ import (
 	"sync"
 )
 
-// SubmissionControl is supplied by the same process as the sampler.
+// SubmissionControl HTTP 层所需的最小后台接口，由同进程的 SubmissionWorker 隐式实现。
+// 接口放在使用方可降低耦合，测试可只提供 Paused/Wake 两个方法。
 type SubmissionControl interface {
 	Paused(context.Context) (bool, error)
 	Wake()
 }
 
+// submissionLimiter 用互斥锁保护按 IP 保存的请求时间窗口；它是进程内限流，不是数据库持久配额。
 type submissionLimiter struct {
 	mu       sync.Mutex
 	requests map[string][]int64
 }
 
+// allow 删除一分钟前的记录，每 IP 最多允许五次，返回是否放行与 Retry-After 秒数。
+// 活跃 IP 达到一万时拒绝新 IP，不驱逐有效额度，避免轮换 IP 清空限制。
 func (l *submissionLimiter) allow(ip string, now int64) (bool, int) {
+	// map 不是并发安全容器；HTTP 请求可能并发调用 allow，需要整段“检查+记录”原子执行。
+	// Mutex 零值即可用，不需要 Java synchronized 对象那样额外创建锁实例。
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.requests == nil {
@@ -47,7 +56,7 @@ func (l *submissionLimiter) allow(ip string, now int64) (bool, int) {
 	if len(times) >= 5 {
 		return false, max(1, int((times[0]+60_000-now+999)/1000))
 	}
-	// Never evict live limits, which would let a rotating client reset them.
+	// 不驱逐仍有效的额度记录，否则轮换客户端可能借驱逐机制重置限制。
 	if len(times) == 0 && len(l.requests) >= 10_000 {
 		return false, 60
 	}
@@ -55,7 +64,7 @@ func (l *submissionLimiter) allow(ip string, now int64) (bool, int) {
 	return true, 0
 }
 
-// ParseProxyNetworks validates the optional comma-separated trusted CIDRs.
+// ParseProxyNetworks 解析可选、逗号分隔的可信代理 CIDR；空配置得到 nil slice，遍历 nil slice 是安全的。
 func ParseProxyNetworks(raw string) ([]netip.Prefix, error) {
 	var networks []netip.Prefix
 	for _, part := range strings.Split(raw, ",") {
@@ -71,6 +80,8 @@ func ParseProxyNetworks(raw string) ([]netip.Prefix, error) {
 	return networks, nil
 }
 
+// clientAddress 默认采用连接对端地址；仅当对端可信时从右向左检查 X-Forwarded-For，停在首个不可信节点。
+// 不直接相信用户可伪造的最左端头字段；Unmap 将 IPv4 映射地址统一成 IPv4。
 func clientAddress(r *http.Request, networks []netip.Prefix) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -92,7 +103,7 @@ func clientAddress(r *http.Request, networks []netip.Prefix) string {
 	if !trusted(peer) {
 		return peer.String()
 	}
-	// Walk from the connection toward the client, stopping at the first untrusted hop.
+	// 从连接对端向客户端回溯，遇到首个不可信节点就停止，不能盲信任意转发头。
 	chain := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
 	for i := len(chain) - 1; i >= 0; i-- {
 		addr, err := netip.ParseAddr(strings.TrimSpace(chain[i]))
@@ -107,6 +118,8 @@ func clientAddress(r *http.Request, networks []netip.Prefix) string {
 	return peer.String()
 }
 
+// submissionAPI 处理投稿预检、POST 入队与 GET 状态，校验限流、维护门禁、媒体类型和单个 JSON 对象。
+// 接收后先提交数据库，再 Wake 后台并返回 202；该状态不代表已完成 GitHub/README 请求。
 func (h *handler) submissionAPI(w http.ResponseWriter, r *http.Request) {
 	fail := func(code int, message string) { writeJSON(w, code, map[string]string{"error": message}) }
 	root := r.URL.Path == "/api/submissions"
@@ -146,6 +159,8 @@ func (h *handler) submissionAPI(w http.ResponseWriter, r *http.Request) {
 		var input struct {
 			URL string `json:"url"`
 		}
+		// 先限制请求体字节数，再解码唯一一个对象；DisallowUnknownFields 拒绝多余字段。
+		// 第二次 Decode 必须返回 io.EOF，避免拼接两个 JSON 值被误当合法请求。
 		r.Body = http.MaxBytesReader(w, r.Body, 4096)
 		decoder := json.NewDecoder(r.Body)
 		decoder.DisallowUnknownFields()

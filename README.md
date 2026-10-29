@@ -6,6 +6,10 @@
 
 单个 Go 应用容器提供 React/TypeScript 静态前端、同源只读 API 和串行采集循环，SQLite 整个数据目录挂载本地磁盘。镜像同时支持 `linux/amd64` 与 `linux/arm64`，服务器手动按 digest 更新。后续运行、发布与恢复统一使用 Go、SQLite 和 Docker。
 
+## 源码学习
+
+[从 Java 到 Go：项目源码学习指南](docs/go-learning-guide.md) 提供四阶段阅读路线、代码地图、八幅架构与流程图、Java 对照知识索引和可运行的测试练习，可与源码中的中文注释并排阅读。
+
 ## 本地运行
 
 使用 `go.mod` 所需 Go 版本、Node.js 26 和 npm。先构建前端，再显式初始化新的开发库：

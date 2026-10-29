@@ -1,5 +1,8 @@
 package tracking
 
+// 本文件为同包测试，验证公开不可访问候选的结束、缓存与匿名复核。
+// 复用投稿测试装置控制 GraphQL/REST 两层响应，避免把模糊失败当作仓库缺失。
+
 import (
 	"context"
 	"encoding/json"
@@ -13,6 +16,7 @@ import (
 	"time"
 )
 
+// TestUnavailableCandidateRequiresExplicitMissingAndAnonymous404 表驱动验证只有目标明确 NOT_FOUND 加匿名仓库 404 才结束候选；模糊 null、权限、限流等继续重试。
 func TestUnavailableCandidateRequiresExplicitMissingAndAnonymous404(t *testing.T) {
 	for _, tc := range []struct {
 		name, graphql string
@@ -28,6 +32,8 @@ func TestUnavailableCandidateRequiresExplicitMissingAndAnonymous404(t *testing.T
 		{"anonymous-timeout", `{"data":{"r0":null},"errors":[{"type":"NOT_FOUND","path":["r0"]}]}`, 0, false},
 		{"anonymous-malformed", `{"data":{"r0":null},"errors":[{"type":"NOT_FOUND","path":["r0"]}]}`, 200, false},
 	} {
+		// 准备：每个子测试控制 GraphQL 证据与匿名响应组合；
+		// 执行一次真实 Tick 后，下面同时检查 pending、缓存 TTL 与准入错误，防止仅修复一个表象。
 		t.Run(tc.name, func(t *testing.T) {
 			h := newSubmissionHarness(t)
 			h.scheduler.startAt = h.clock.Now()
@@ -76,6 +82,7 @@ func TestUnavailableCandidateRequiresExplicitMissingAndAnonymous404(t *testing.T
 	}
 }
 
+// TestSubmissionClearsUnavailableCacheIncludingAlias 主动投稿确认公开可访问后清除原名和规范名缓存，别名合并也生效；README 不符合缓存仍保留。
 func TestSubmissionClearsUnavailableCacheIncludingAlias(t *testing.T) {
 	for _, alias := range []bool{false, true} {
 		t.Run(map[bool]string{false: "admit", true: "alias"}[alias], func(t *testing.T) {
@@ -124,8 +131,7 @@ func TestSubmissionClearsUnavailableCacheIncludingAlias(t *testing.T) {
 	}
 }
 
-// Keep discovery empty so tests exercise the persisted candidate path without
-// unrelated trend-source fixtures or live network calls.
+// candidateResponse 让发现源为空、GitHub 明确找不到且匿名返回 404，只测试持久候选路径，不依赖真实网络。
 func candidateResponse(r *http.Request) (*http.Response, error) {
 	if r.URL.Host != "api.github.com" {
 		return submissionResponse(200, `<rss><channel/></rss>`), nil
@@ -136,6 +142,7 @@ func candidateResponse(r *http.Request) (*http.Response, error) {
 	return submissionResponse(404, ""), nil
 }
 
+// TestLookupMissingIsTargetSpecific 同批一个 NOT_FOUND、一个 FORBIDDEN，确认 missing 按目标独立判断，不能整批认定缺失。
 func TestLookupMissingIsTargetSpecific(t *testing.T) {
 	h := newSubmissionHarness(t)
 	h.response = func(r *http.Request) (*http.Response, error) {
@@ -147,6 +154,7 @@ func TestLookupMissingIsTargetSpecific(t *testing.T) {
 	}
 }
 
+// TestUnavailableCacheSurvivesRestartAndRequiresRediscovery 两类同名候选共享一次确认，缓存跨重启与大小写保留，到期不主动请求，后续来源再发现才复核。
 func TestUnavailableCacheSurvivesRestartAndRequiresRediscovery(t *testing.T) {
 	h := newSubmissionHarness(t)
 	h.scheduler.startAt = h.clock.Now()
@@ -191,7 +199,7 @@ func TestUnavailableCacheSurvivesRestartAndRequiresRediscovery(t *testing.T) {
 	if found, err := h.store.State(unavailableCacheKey("acme/gone"), &after); err != nil || found || anonymous != 1 {
 		t.Fatal(found, err, anonymous)
 	}
-	// A later source discovery queues a fresh candidate; expiration alone did not.
+	// 缓存到期没有主动请求；之后来源再次发现才会创建新候选并重新复核。
 	h.response = func(r *http.Request) (*http.Response, error) {
 		if strings.HasPrefix(r.URL.Path, "/repos/") {
 			anonymous++
@@ -208,9 +216,11 @@ func TestUnavailableCacheSurvivesRestartAndRequiresRediscovery(t *testing.T) {
 	}
 }
 
+// TestUnavailableCandidateRetainsOtherFailuresAndClearsCachedList 结束明确不可访问候选后立即刷新缓存状态，
+// 仍保留同批其他真实失败，空闲扫描不伪造新尝试时间。
 func TestUnavailableCandidateRetainsOtherFailuresAndClearsCachedList(t *testing.T) {
 	h := newSubmissionHarness(t)
-	// Populate a tracked project so HTTP list response caching is active.
+	// 准备：先收录项目激活列表缓存，再检查候选状态变化是否使缓存及时失效。
 	h.enqueue(t, "acme/tool")
 	h.step(t)
 	h.step(t)
@@ -260,7 +270,7 @@ func TestUnavailableCandidateRetainsOtherFailuresAndClearsCachedList(t *testing.
 	if global.Failed != 2 || github.Failed != 1 {
 		t.Fatal(global, github)
 	}
-	// An idle scan must retain failures without inventing a new attempt time.
+	// 断言：空闲扫描保留已有失败，但不能伪造新的尝试时间。
 	h.clock.advance(h.clock.Now() + 60_000)
 	if err := h.scheduler.Tick(context.Background()); err != nil {
 		t.Fatal(err)
@@ -276,11 +286,12 @@ func TestUnavailableCandidateRetainsOtherFailuresAndClearsCachedList(t *testing.
 	}
 }
 
+// TestUnavailableCandidateCheckpointRollsBack 用触发器令最终准入状态提交失败，确认缓存、pending 移除和准入结果全都回滚。
 func TestUnavailableCandidateCheckpointRollsBack(t *testing.T) {
 	h := newSubmissionHarness(t)
 	h.scheduler.startAt = h.clock.Now()
 	h.response = candidateResponse
-	// Settle discovery first, then fail the final admission-state checkpoint.
+	// 准备：先完成发现状态初始化，再只让最终准入检查点失败，隔离待验证的事务边界。
 	if err := h.scheduler.Tick(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -309,6 +320,7 @@ func TestUnavailableCandidateCheckpointRollsBack(t *testing.T) {
 	}
 }
 
+// TestUnavailableRepositoryFallbackPreservesIdentity 组合身份/README/资料阶段与匿名缺失/同身份/名称复用，验证恢复可用结果时不能认错稳定仓库 ID。
 func TestUnavailableRepositoryFallbackPreservesIdentity(t *testing.T) {
 	for _, stage := range []string{"identity", "readme", "metadata"} {
 		for _, anonymous := range []string{"missing", "same", "reused"} {
