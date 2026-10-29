@@ -2,6 +2,8 @@
 
 同一个 Go 进程提供前端和只读 `/api`，数据库路径默认 `data/tracking.sqlite`。服务启动要求已有有效 SQLite，不会悄悄创建空库，也不会重新初始化 `sampling_policy.effectiveAt`。
 
+首次启用 Linux.do README 准入规则时，已有 Linux.do 存量必须先按[一次性清洗流程](linuxdo-cleanup.md)执行 `serve --linuxdo-cleanup`。未完成时普通启动也会暂停采集和常规清理，继续提供查询与备份。
+
 ## 本地运行
 
 ```sh

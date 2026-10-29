@@ -15,13 +15,16 @@ type SchedulerOptions struct {
 	Clock              Clock
 	Client             *http.Client
 	StartedAt          int64
+	LinuxdoCleanup     bool
+	BackupDir          string
 }
 type Scheduler struct {
-	store    *Store
-	options  SchedulerOptions
-	upstream *upstream
-	startAt  int64
-	mu       sync.Mutex
+	store      *Store
+	options    SchedulerOptions
+	upstream   *upstream
+	startAt    int64
+	mu         sync.Mutex
+	cleanupLog string
 }
 
 func NewScheduler(store *Store, options SchedulerOptions) *Scheduler {
@@ -73,6 +76,13 @@ func (s *Scheduler) Tick(ctx context.Context) (err error) {
 			_ = s.store.SetState("scheduler", runState{AttemptedAt: now, Failed: 1, Error: strptr("采集或数据库任务失败")})
 		}
 	}()
+	allowed, err := s.linuxdoGate(ctx)
+	if err != nil || !allowed {
+		return err
+	}
+	if err = s.expireReadmeCache(ctx, now); err != nil {
+		return err
+	}
 	policy, err := s.store.Policy()
 	if err != nil {
 		return err
@@ -129,6 +139,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 				previous.RepoID = entry.RepoID
 			}
 			previous.NextAt = max(previous.NextAt, entry.NextAt)
+			previous.ReadmeNextAt = max(previous.ReadmeNextAt, entry.ReadmeNextAt)
 		} else {
 			byName[key] = entry
 			pending = append(pending, entry)
@@ -215,7 +226,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 	targets := []*discoveryEntry{}
 	unresolved := []string{}
 	for _, entry := range pending {
-		if entry.NextAt <= now && len(targets) < 20 {
+		if max(entry.NextAt, entry.ReadmeNextAt) <= now && len(targets) < 20 {
 			targets = append(targets, entry)
 			if entry.RepoID == "" && !slices.Contains(unresolved, strings.ToLower(entry.Name)) {
 				unresolved = append(unresolved, strings.ToLower(entry.Name))
@@ -239,6 +250,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			}
 			if identity != nil {
 				entry.RepoID = identity.ID
+				entry.Name = identity.Name
 				if _, e = s.store.DB.ExecContext(ctx, "UPDATE projects SET name=? WHERE repo_id=? AND name<>?", identity.Name, identity.ID, identity.Name); e != nil {
 					return false, e
 				}
@@ -267,6 +279,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		if previous := byID[key]; previous != nil {
 			previous.ListedAt = max(previous.ListedAt, entry.ListedAt)
 			previous.NextAt = max(previous.NextAt, entry.NextAt)
+			previous.ReadmeNextAt = max(previous.ReadmeNextAt, entry.ReadmeNextAt)
 			if selectedTarget[entry] {
 				selectedTarget[previous] = true
 			}
@@ -289,7 +302,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 	ready := []*discoveryEntry{}
 	reuse := []observation{}
 	for _, entry := range pending {
-		if selectedTarget[entry] && entry.RepoID != "" && entry.NextAt <= now {
+		if selectedTarget[entry] && entry.RepoID != "" && max(entry.NextAt, entry.ReadmeNextAt) <= now {
 			ready = append(ready, entry)
 		}
 	}
@@ -320,7 +333,25 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 				return false, e
 			}
 			completed[entry] = true
-		} else if latest != nil && latest.ObservedAt >= slot {
+			continue
+		}
+		if entry.Type == "linux.do" {
+			qualification, err := s.linuxdoReadme(ctx, entry.RepoID)
+			if err != nil {
+				entry.ReadmeNextAt = s.readmeRetryAt()
+				record(entry.Type, false, safeError(err))
+				continue
+			}
+			entry.ReadmeNextAt = 0
+			if !qualification.Eligible {
+				if e = s.store.SetState(readmeCacheKey(entry.RepoID), qualification); e != nil {
+					return false, e
+				}
+				completed[entry] = true
+				continue
+			}
+		}
+		if latest != nil && latest.ObservedAt >= slot {
 			repo, e := rowRepository(*latest)
 			if e != nil {
 				return false, e
@@ -338,7 +369,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 	ids := []string{}
 	newEntries := []*discoveryEntry{}
 	for _, entry := range ready {
-		if !completed[entry] && entry.NextAt <= now {
+		if !completed[entry] && max(entry.NextAt, entry.ReadmeNextAt) <= now {
 			newEntries = append(newEntries, entry)
 			if !slices.Contains(ids, entry.RepoID) {
 				ids = append(ids, entry.RepoID)

@@ -81,7 +81,15 @@ func (u *upstream) cooldown(raw string, headers http.Header, duration int64) {
 	}
 	s.BlockedUntil = until
 }
-func (u *upstream) text(ctx context.Context, raw, label string, body []byte, token string, deadline int64) (string, error) {
+
+type upstreamHTTPError struct {
+	label  string
+	status int
+}
+
+func (e *upstreamHTTPError) Error() string { return fmt.Sprintf("%s HTTP %d", e.label, e.status) }
+
+func (u *upstream) text(ctx context.Context, raw, label string, body []byte, token string, deadline int64, headers ...http.Header) (string, error) {
 	parsed, e := url.Parse(raw)
 	if e != nil || parsed.Hostname() == "" || (parsed.Scheme != "https" && parsed.Scheme != "http") {
 		return "", errors.New("invalid upstream URL")
@@ -120,6 +128,11 @@ func (u *upstream) text(ctx context.Context, raw, label string, body []byte, tok
 		return "", e
 	}
 	req.Header.Set("User-Agent", "github-trending-tracking")
+	for _, header := range headers {
+		for name, values := range header {
+			req.Header[name] = values
+		}
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -135,7 +148,7 @@ func (u *upstream) text(ctx context.Context, raw, label string, body []byte, tok
 	if limited {
 		u.cooldown(raw, res.Header, Hour)
 	}
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
+	if res.StatusCode < 200 || res.StatusCode >= 300 || (label == "GitHub" && res.StatusCode != http.StatusOK) {
 		if label == "GitHub" && res.StatusCode == 403 && !limited {
 			b, e := readBounded(res.Body)
 			if e != nil {
@@ -146,7 +159,7 @@ func (u *upstream) text(ctx context.Context, raw, label string, body []byte, tok
 				u.cooldown(raw, res.Header, Hour)
 			}
 		}
-		return "", fmt.Errorf("%s HTTP %d", label, res.StatusCode)
+		return "", &upstreamHTTPError{label: label, status: res.StatusCode}
 	}
 	return readBounded(res.Body)
 }
