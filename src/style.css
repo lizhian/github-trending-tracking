@@ -1056,17 +1056,13 @@ td.numeric {
   min-height: 36px;
   text-decoration: underline;
 }
-.chart-note,
-.actual-interval {
+.chart-note {
   color: var(--color-muted);
   font-size: 11px;
   line-height: 1.7;
 }
 .chart-note {
   margin-block: var(--space-xs);
-}
-.actual-interval {
-  margin-top: var(--space-sm);
 }
 .record-times {
   font-size: 12px;
@@ -1248,9 +1244,6 @@ td.numeric {
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
-}
-.record-times .actual-interval {
-  margin-top: var(--space-sm);
 }
 @media (max-width: 760px) {
   .app-shell {

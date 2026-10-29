@@ -627,11 +627,6 @@ function Details({
           <dt>最后成功观测</dt>
           <dd>{time(project.observedAt)}</dd>
         </dl>
-        {trend?.start && trend.end && !history.loading ? (
-          <p className="actual-interval">
-            实际区间：{time(trend.start)} 至 {time(trend.end)}
-          </p>
-        ) : null}
       </section>
       <a
         className="repo-link"
