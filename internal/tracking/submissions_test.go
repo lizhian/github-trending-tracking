@@ -242,3 +242,39 @@ func TestSubmissionMigrationPreservesExistingDataAndBackup(t *testing.T) {
 		t.Fatal("queue missing after restore", err)
 	}
 }
+
+func TestSubmissionMigrationFailureRollsBackDDLAndVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), DatabaseName)
+	db, err := database(path, "rwc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range MigrationNames[:3] {
+		source, _ := migrations.Files.ReadFile(name)
+		if _, err = db.Exec(string(source)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = db.Exec("PRAGMA user_version=3; CREATE INDEX submissions_active_name ON projects(name)"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if err = Migrate(path); err == nil {
+		t.Fatal("conflicting DDL unexpectedly succeeded")
+	}
+	db, err = database(path, "rw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var version, count int
+	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='submissions'").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if version != 3 || count != 0 {
+		t.Fatalf("failed migration left version=%d submissions=%d", version, count)
+	}
+}

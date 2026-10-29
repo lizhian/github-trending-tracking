@@ -50,6 +50,7 @@ export function SubmissionDialog({
 
   useEffect(() => {
     dialog.current?.showModal();
+    dialog.current?.querySelector("input")?.focus();
     return () => postController.current?.abort();
   }, []);
 

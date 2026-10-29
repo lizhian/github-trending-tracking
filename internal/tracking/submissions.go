@@ -40,7 +40,9 @@ func submissionName(raw string) (string, error) {
 		return "", parameterError("请输入 https://github.com/owner/repo 仓库地址")
 	}
 	path := strings.TrimSuffix(u.Path, "/")
-	path = strings.TrimSuffix(path, ".git")
+	if strings.HasSuffix(strings.ToLower(path), ".git") {
+		path = path[:len(path)-4]
+	}
 	name := strings.TrimPrefix(path, "/")
 	// Reuse the discovery parser's reserved-path checks, then require a root URL.
 	parsed := repositoryName("https://github.com/"+name, false)
