@@ -1030,9 +1030,6 @@ function App() {
                     }}
                   >
                     {label}
-                    {query.tab === tab && (
-                      <span>{data?.summary.tracked ?? "…"}</span>
-                    )}
                   </button>
                 ))}
               </div>

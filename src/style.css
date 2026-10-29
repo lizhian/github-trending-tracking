@@ -232,12 +232,6 @@ nav a[aria-current]::after {
   align-items: center;
   color: var(--color-muted);
 }
-.view-tabs button span {
-  font-size: 11px;
-  padding-inline: var(--space-2xs);
-  background: var(--color-paper-3);
-  border-radius: 3px;
-}
 .view-tabs button[aria-pressed="true"] {
   color: var(--color-ink);
 }
