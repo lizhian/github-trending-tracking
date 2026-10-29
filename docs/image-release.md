@@ -9,7 +9,7 @@ git push origin v1.0.0
 gh run list --workflow release-image.yml
 ```
 
-工作流保存版本、提交和 OCI source/version/revision 标识；成功摘要记录镜像 index digest。它使用无登录配置验证公开清单，再分别启动两架构镜像，检查版本、静态资源和真实 SQLite API。只有 tag 推送触发构建，不自动部署服务器。
+每次发布同时生成 `ghcr.io/lizhian/github-trending-tracking:vMAJOR.MINOR.PATCH` 和 `ghcr.io/lizhian/github-trending-tracking:latest` 两个标签，指向同一个多平台镜像 index；`latest` 随每次版本发布更新。工作流保存版本、提交和 OCI source/version/revision 标识；成功摘要记录两个标签及镜像 index digest。它使用无登录配置验证公开清单，再分别启动两架构镜像，检查版本、静态资源和真实 SQLite API。只有 tag 推送触发构建，不自动部署服务器。
 
 ## 首次公开与产物核验
 

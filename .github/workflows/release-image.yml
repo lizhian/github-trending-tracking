@@ -109,7 +109,7 @@ jobs:
             sources+=("$IMAGE@sha256:$digest")
           done
           test "${#sources[@]}" -eq 2
-          docker buildx imagetools create --tag "$IMAGE:$VERSION" "${sources[@]}"
+          docker buildx imagetools create --tag "$IMAGE:$VERSION" --tag "$IMAGE:latest" "${sources[@]}"
           digest="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -r '.digest')"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
@@ -136,6 +136,7 @@ jobs:
             echo "- Version: $VERSION"
             echo "- Commit: $GITHUB_SHA"
             echo "- Image: \`$image\`"
+            echo "- Tags: \`$IMAGE:$VERSION\`, \`$IMAGE:latest\`"
             echo '- Platforms: linux/amd64, linux/arm64'
             echo '- Anonymous pull, static frontend and SQLite API verified on both platforms.'
             echo '- Production update is manual.'
