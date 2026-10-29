@@ -806,9 +806,10 @@ function App() {
   const failures = [
     data?.status.scheduler,
     data?.status.collection,
-    data?.status.discovery,
   ] as (RunState | undefined)[];
   const failure = failures.find((state) => state?.failed);
+  const admission = data?.status.admission as RunState | undefined;
+  const discovery = data?.status.discovery as RunState | undefined;
   return (
     <div className="app-shell">
       <a className="skip-link" href="#rankings">
@@ -890,6 +891,16 @@ function App() {
           <p className="notice" role="status">
             更新异常：{failure.error || "采集尚未恢复"}
             。继续展示上次有效观测，后台将重试。
+          </p>
+        )}
+        {!!discovery?.failed && (
+          <p className="notice" role="status">
+            趋势源获取异常：{discovery.error || "暂时无法获取新候选"}。后台将重试。
+          </p>
+        )}
+        {!!admission?.failed && (
+          <p className="notice" role="status">
+            部分候选暂未收录，后台将重试。
           </p>
         )}
         {data &&

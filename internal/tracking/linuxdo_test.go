@@ -264,6 +264,15 @@ func TestLinuxdoReadmeRetryDoesNotDelayGitHubCandidate(t *testing.T) {
 	if requests != 1 || h.list("github")["total"] != float64(1) || h.list("linux.do")["total"] != float64(0) {
 		t.Fatal("README retry leaked across tracking types")
 	}
+	// A successful negative qualification completes this attempt; it must clear
+	// the earlier admission error without creating a Linux.do project.
+	h.sources[readmeURL] = func() *http.Response { return response("No community marker") }
+	h.tick(beijing("2026-10-01T09:31:00"))
+	got := h.list("linux.do")
+	admission := got["status"].(map[string]any)["admission"].(map[string]any)
+	if got["total"] != float64(0) || admission["failed"] != float64(0) || admission["error"] != nil {
+		t.Fatal("completed qualification left a retry warning", got)
+	}
 }
 
 type cleanupReport struct {

@@ -231,7 +231,7 @@ func (s *Store) list(p parameters, now int64) (ListResult, error) {
 	result.Pages = max(1, (len(filtered)+99)/100)
 	result.Page = min(p.page, result.Pages)
 	result.Items = filtered[min((result.Page-1)*100, len(filtered)):min(result.Page*100, len(filtered))]
-	for _, key := range []string{"discovery", "collection", "cleanup", "scheduler"} {
+	for _, key := range []string{"discovery", "collection", "admission", "cleanup", "scheduler"} {
 		var raw json.RawMessage
 		ok, err := s.State(key+":"+p.kind, &raw)
 		if err != nil {
@@ -245,6 +245,48 @@ func (s *Store) list(p parameters, now int64) (ListResult, error) {
 		}
 		if ok {
 			result.Status[key] = raw
+		}
+	}
+	if raw, ok := result.Status["collection"]; ok {
+		var legacy runState
+		if err := json.Unmarshal(raw, &legacy); err != nil {
+			return result, err
+		}
+		if legacy.Version < 2 {
+			// Old batches mixed candidate admission with sampling. Project rows
+			// retain the actual update results, even before the next sampling slot.
+			sampling := runState{}
+			for _, row := range rows {
+				sampling.AttemptedAt = max(sampling.AttemptedAt, row.AttemptedAt)
+				if sampling.SucceededAt == nil || row.ObservedAt > *sampling.SucceededAt {
+					sampling.SucceededAt = ptr(row.ObservedAt)
+				}
+				if row.Error != nil {
+					sampling.Failed++
+					sampling.Error = row.Error
+				} else {
+					sampling.Succeeded++
+				}
+			}
+			result.Status["collection"], _ = json.Marshal(sampling)
+			if _, exists := result.Status["admission"]; !exists && legacy.Failed > sampling.Failed {
+				var pending []*discoveryEntry
+				if _, err := s.State("pending", &pending); err != nil {
+					return result, err
+				}
+				candidates := 0
+				for _, entry := range pending {
+					if entry != nil && (entry.Type == p.kind || entry.Type == "" && p.kind == "github") && repositoryName("https://github.com/"+entry.Name, false) != "" {
+						candidates++
+					}
+				}
+				legacy.Failed = min(legacy.Failed-sampling.Failed, candidates)
+				legacy.Succeeded = 0
+				legacy.SucceededAt = nil
+				if legacy.Failed > 0 {
+					result.Status["admission"], _ = json.Marshal(legacy)
+				}
+			}
 		}
 	}
 	return result, nil

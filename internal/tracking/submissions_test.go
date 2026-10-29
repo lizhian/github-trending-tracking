@@ -30,6 +30,11 @@ func submissionStore(t *testing.T) (*Store, string) {
 }
 
 func TestSubmissionAddressRules(t *testing.T) {
+	for _, input := range []string{"https://github.com/user-attachments/assets", "https://github.com/USER-ATTACHMENTS/assets.git/"} {
+		if name, err := submissionName(input); err == nil {
+			t.Errorf("accepted attachment %q as %q", input, name)
+		}
+	}
 	for _, input := range []string{"https://github.com/Acme/Tool", "https://GITHUB.com/Acme/Tool.git/", " https://github.com/Acme/Tool/?tab=readme "} {
 		got, err := submissionName(input)
 		if err != nil || got != "acme/tool" {

@@ -229,6 +229,101 @@ func (h *collectionHarness) list(typ string) map[string]any {
 func (h *collectionHarness) history(id string) map[string]any {
 	return requestJSON(h.t, h.store, h.clock, "/api/projects/"+id+"/history?window=720")
 }
+
+func TestAttachmentLinksNeverBecomeCandidatesAndOldPendingIsPersistentlyRemoved(t *testing.T) {
+	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
+	h.sources["https://linux.do/tag/2234-tag/2234.rss"] = func() *http.Response {
+		return response(`<rss><channel><item><description>https://github.com/user-attachments/assets/image-id https://github.com/acme/one</description></item></channel></rss>`)
+	}
+	first := beijing("2026-10-01T09:00:00")
+	h.tick(first)
+	if got := h.list("linux.do"); got["total"] != float64(1) {
+		t.Fatal("normal repository was filtered", got)
+	}
+	// No source is due on the next tick: cleaning old pending must itself persist.
+	if err := h.store.SetState("pending", []map[string]any{{"type": "linux.do", "name": "USER-ATTACHMENTS/assets", "nextAt": first + tracking.Day}}); err != nil {
+		t.Fatal(err)
+	}
+	h.tick(first + 60_000)
+	var pending []map[string]any
+	if _, err := h.store.State("pending", &pending); err != nil || len(pending) != 0 {
+		t.Fatal("attachment persisted in pending", pending, err)
+	}
+	if strings.Contains(strings.ToLower(mustJSON(h.seenQueries)), "user-attachments") {
+		t.Fatal("attachment reached GitHub queries", h.seenQueries)
+	}
+}
+
+func TestCandidateAndSamplingFailuresHaveIndependentStatus(t *testing.T) {
+	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
+	first := beijing("2026-10-01T09:00:00")
+	h.tick(first)
+	if err := h.store.SetState("pending", []map[string]any{{"type": "github", "name": "acme/missing", "listedAt": first}}); err != nil {
+		t.Fatal(err)
+	}
+	h.tick(first + 5*60_000)
+	status := h.list("github")["status"].(map[string]any)
+	admission, ok := status["admission"].(map[string]any)
+	if !ok || admission["failed"] != float64(1) {
+		t.Fatal("missing candidate not reported as admission failure", status)
+	}
+	if sampling, ok := status["collection"].(map[string]any); ok && sampling["failed"] != float64(0) {
+		t.Fatal("candidate failure became update failure", status)
+	}
+	h.failed["R_0"] = true
+	h.tick(beijing("2026-10-01T11:00:00"))
+	status = h.list("github")["status"].(map[string]any)
+	if status["collection"].(map[string]any)["failed"] != float64(1) || status["admission"].(map[string]any)["failed"] != float64(1) {
+		t.Fatal("sampling and admission errors mixed", status)
+	}
+	h.failed["R_0"] = false
+	retryAt := beijing("2026-10-01T11:31:00")
+	h.tick(retryAt)
+	status = h.list("github")["status"].(map[string]any)
+	if status["collection"].(map[string]any)["failed"] != float64(0) || status["admission"].(map[string]any)["failed"] != float64(1) {
+		t.Fatal("sampling recovery cleared the candidate failure or retained its own error", status)
+	}
+	var pending []map[string]any
+	if _, err := h.store.State("pending", &pending); err != nil || len(pending) != 1 || pending[0]["nextAt"].(float64) < float64(retryAt+30*60_000) {
+		t.Fatal("missing candidate lost its retry", pending, err)
+	}
+}
+
+func TestLegacyMixedStatusUsesActualProjectErrorsBeforeNextSamplingSlot(t *testing.T) {
+	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
+	first := beijing("2026-10-01T09:00:00")
+	h.tick(first)
+	if _, err := h.store.DB.Exec("DELETE FROM system_state WHERE key LIKE 'admission%'"); err != nil {
+		t.Fatal(err)
+	}
+	legacy := map[string]any{"attemptedAt": first + 5*60_000, "succeededAt": first, "succeeded": 0, "failed": 2, "error": "GitHub repository unavailable"}
+	if err := h.store.SetState("pending", []map[string]any{{"name": "acme/missing-one"}, {"name": "acme/missing-two"}, {"name": "user-attachments/assets"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.SetState("collection:github", legacy); err != nil {
+		t.Fatal(err)
+	}
+	status := h.list("github")["status"].(map[string]any)
+	if status["collection"].(map[string]any)["failed"] != float64(0) || status["admission"].(map[string]any)["failed"] != float64(2) {
+		t.Fatal("legacy candidates still trigger update failure", status)
+	}
+	if _, err := h.store.DB.Exec("UPDATE projects SET error='GitHub HTTP 503',attempted_at=? WHERE id='github:R_0'", first+5*60_000); err != nil {
+		t.Fatal(err)
+	}
+	// A filter hiding the failing project must not hide the type's update error.
+	status = requestJSON(t, h.store, h.clock, "/api/projects?type=github&q=two")["status"].(map[string]any)
+	if status["collection"].(map[string]any)["failed"] != float64(1) || status["collection"].(map[string]any)["error"] != "GitHub HTTP 503" || status["admission"].(map[string]any)["failed"] != float64(1) {
+		t.Fatal("legacy compatibility hid a real sampling failure", status)
+	}
+	if err := h.store.SetState("pending", []map[string]any{{"name": "user-attachments/assets"}}); err != nil {
+		t.Fatal(err)
+	}
+	status = h.list("github")["status"].(map[string]any)
+	if status["admission"] != nil || status["collection"].(map[string]any)["failed"] != float64(1) {
+		t.Fatal("legacy attachment error survived or real project error was cleared", status)
+	}
+}
+
 func TestSharedObservationKeepsIndependentHistoryAndAdmissionTime(t *testing.T) {
 	start := beijing("2026-10-01T08:50:00")
 	h := newCollectionHarness(t, start)

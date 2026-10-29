@@ -114,9 +114,13 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 	if _, e = s.store.State("pending", &priorPending); e != nil {
 		return false, e
 	}
+	priorJSON := jsonText(priorPending)
 	pending := []*discoveryEntry{}
 	byName := map[string]*discoveryEntry{}
 	addPending := func(entry *discoveryEntry) {
+		if entry == nil || repositoryName("https://github.com/"+entry.Name, false) == "" {
+			return
+		}
 		if entry.Type == "" {
 			entry.Type = "github"
 		}
@@ -139,7 +143,6 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 	for _, entry := range priorPending {
 		addPending(entry)
 	}
-	priorJSON := jsonText(pending)
 	for _, entry := range d.entries {
 		addPending(entry)
 	}
@@ -190,20 +193,28 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			return false, e
 		}
 	}
-	prior, e := s.priorRun("collection", "")
-	if e != nil {
-		return false, e
-	}
 	results := map[string]*runState{}
-	for _, typ := range projectTypes {
-		previous, e := s.priorRun("collection", typ)
-		if e != nil {
-			return false, e
+	prior := map[string]runState{}
+	for _, kind := range []string{"collection", "admission"} {
+		previous, err := s.priorRun(kind, "")
+		if err != nil {
+			return false, err
 		}
-		results[typ] = &runState{AttemptedAt: now, SucceededAt: previous.SucceededAt}
+		prior[kind] = previous
+		for _, typ := range projectTypes {
+			previous, err := s.priorRun(kind, typ)
+			if err != nil {
+				return false, err
+			}
+			v := &runState{AttemptedAt: now, SucceededAt: previous.SucceededAt}
+			if kind == "collection" {
+				v.Version = 2
+			}
+			results[kind+":"+typ] = v
+		}
 	}
-	record := func(typ string, success bool, message string) {
-		v := results[typ]
+	record := func(kind, typ string, success bool, message string) {
+		v := results[kind+":"+typ]
 		if success {
 			v.Succeeded++
 			v.SucceededAt = ptr(now)
@@ -252,7 +263,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 				}
 			} else {
 				entry.NextAt = max(s.upstream.clock.Now()+30*60_000, s.upstream.blocked("https://api.github.com/graphql"))
-				record(entry.Type, false, message)
+				record("admission", entry.Type, false, message)
 			}
 		}
 	}
@@ -330,7 +341,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			qualification, err := s.linuxdoReadme(ctx, entry.RepoID)
 			if err != nil {
 				entry.ReadmeNextAt = s.readmeRetryAt()
-				record(entry.Type, false, safeError(err))
+				record("admission", entry.Type, false, safeError(err))
 				continue
 			}
 			entry.ReadmeNextAt = 0
@@ -339,6 +350,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 					return false, e
 				}
 				completed[entry] = true
+				record("admission", entry.Type, true, "")
 				continue
 			}
 		}
@@ -349,7 +361,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			}
 			reuse = append(reuse, observation{repo: repo, typ: entry.Type, listedAt: ptr(entry.ListedAt), observedAt: latest.ObservedAt, metadataAt: latest.MetadataAt})
 			completed[entry] = true
-			record(entry.Type, true, "")
+			record("admission", entry.Type, true, "")
 		} else if retryAt > 0 {
 			entry.NextAt = retryAt
 		}
@@ -481,23 +493,23 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 				}
 				for _, row := range existing {
 					observations = append(observations, observation{repo: repo, previous: row, metadataAt: latestMetadata})
-					record(row.Type, true, "")
+					record("collection", row.Type, true, "")
 				}
 				for _, entry := range additions {
 					observations = append(observations, observation{repo: repo, typ: entry.Type, listedAt: ptr(entry.ListedAt), metadataAt: latestMetadata})
 					completed[entry] = true
-					record(entry.Type, true, "")
+					record("admission", entry.Type, true, "")
 				}
 			} else {
 				for _, row := range existing {
 					if _, e = s.store.DB.ExecContext(ctx, "UPDATE projects SET attempted_at=?,error=? WHERE id=? AND cycle=? AND attempted_at<=?", now, message, row.ID, row.Cycle, now); e != nil {
 						return false, e
 					}
-					record(row.Type, false, message)
+					record("collection", row.Type, false, message)
 				}
 				for _, entry := range additions {
 					entry.NextAt = max(s.upstream.clock.Now()+30*60_000, s.upstream.blocked("https://api.github.com/graphql"))
-					record(entry.Type, false, message)
+					record("admission", entry.Type, false, message)
 				}
 			}
 		}
@@ -507,9 +519,12 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 	}
 	pending = slices.DeleteFunc(pending, func(v *discoveryEntry) bool { return completed[v] })
 	changes := []string{}
-	for _, typ := range projectTypes {
-		if results[typ].Succeeded > 0 || results[typ].Failed > 0 {
-			changes = append(changes, typ)
+	for _, kind := range []string{"collection", "admission"} {
+		for _, typ := range projectTypes {
+			key := kind + ":" + typ
+			if results[key].Succeeded > 0 || results[key].Failed > 0 {
+				changes = append(changes, key)
+			}
 		}
 	}
 	pendingChanged := jsonText(pending) != priorJSON
@@ -521,23 +536,31 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		if pendingChanged {
 			e = setTxState(ctx, tx, "pending", pending)
 		}
-		global := runState{AttemptedAt: now, SucceededAt: prior.SucceededAt}
-		for _, typ := range changes {
-			v := results[typ]
-			if e == nil {
-				e = setTxState(ctx, tx, "collection:"+typ, v)
+		for _, kind := range []string{"collection", "admission"} {
+			global := runState{AttemptedAt: now, SucceededAt: prior[kind].SucceededAt}
+			if kind == "collection" {
+				global.Version = 2
 			}
-			global.Succeeded += v.Succeeded
-			global.Failed += v.Failed
-			if v.Succeeded > 0 {
-				global.SucceededAt = ptr(now)
+			for _, key := range changes {
+				if !strings.HasPrefix(key, kind+":") {
+					continue
+				}
+				v := results[key]
+				if e == nil {
+					e = setTxState(ctx, tx, key, v)
+				}
+				global.Succeeded += v.Succeeded
+				global.Failed += v.Failed
+				if v.Succeeded > 0 {
+					global.SucceededAt = ptr(now)
+				}
+				if global.Error == nil {
+					global.Error = v.Error
+				}
 			}
-			if global.Error == nil {
-				global.Error = v.Error
+			if e == nil && global.Succeeded+global.Failed > 0 {
+				e = setTxState(ctx, tx, kind, global)
 			}
-		}
-		if e == nil && len(changes) > 0 {
-			e = setTxState(ctx, tx, "collection", global)
 		}
 		if e != nil {
 			tx.Rollback()

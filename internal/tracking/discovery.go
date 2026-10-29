@@ -12,6 +12,8 @@ import (
 )
 
 type runState struct {
+	// Collection version 2 counts existing-project sampling only.
+	Version     int     `json:"version,omitempty"`
 	AttemptedAt int64   `json:"attemptedAt"`
 	SucceededAt *int64  `json:"succeededAt"`
 	Succeeded   int     `json:"succeeded"`
@@ -81,7 +83,7 @@ func repositoryName(v string, broad bool) string {
 		return ""
 	}
 	owner, repo := m[1], m[2]
-	if slices.Contains([]string{"trending", "topics", "collections", "sponsors", "features", "marketplace", "settings", "orgs", "users", "search"}, strings.ToLower(owner)) {
+	if slices.Contains([]string{"trending", "topics", "collections", "sponsors", "features", "marketplace", "settings", "orgs", "users", "search", "user-attachments"}, strings.ToLower(owner)) {
 		return ""
 	}
 	if strings.HasSuffix(strings.ToLower(repo), ".git") {
