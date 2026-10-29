@@ -208,12 +208,20 @@ type repository struct {
 	Private *bool  `json:"isPrivate"`
 }
 
-func (u *upstream) repositories(ctx context.Context, token string, targets []string, byID bool, mode string) (repos []*repository, err error) {
+func (u *upstream) repositories(ctx context.Context, token string, targets []string, byID bool, mode string) ([]*repository, error) {
+	repos, missing, err := u.lookupRepositories(ctx, token, targets, byID, mode)
+	if err == nil && mode == "submission" && len(missing) == 1 && missing[0] {
+		return nil, errSubmissionRepositoryMissing
+	}
+	return repos, err
+}
+
+func (u *upstream) lookupRepositories(ctx context.Context, token string, targets []string, byID bool, mode string) (repos []*repository, missing []bool, err error) {
 	const endpoint = "https://api.github.com/graphql"
 	defer func() {
 		if err != nil && ctx.Err() == nil {
 			var deferred *deferredRequest
-			if !errors.As(err, &deferred) && !errors.Is(err, errSubmissionRepositoryMissing) {
+			if !errors.As(err, &deferred) {
 				u.cooldown(endpoint, nil, retryInterval)
 			}
 		}
@@ -244,20 +252,21 @@ func (u *upstream) repositories(ctx context.Context, token string, targets []str
 	body, _ := json.Marshal(map[string]string{"query": query})
 	text, e := u.text(ctx, endpoint, "GitHub", body, token, 0)
 	if e != nil {
-		return nil, e
+		return nil, nil, e
 	}
 	var result struct {
 		Data   map[string]json.RawMessage `json:"data"`
 		Errors []struct {
 			Type       string `json:"type"`
 			Message    string `json:"message"`
+			Path       []any  `json:"path"`
 			Extensions struct {
 				Code string `json:"code"`
 			} `json:"extensions"`
 		} `json:"errors"`
 	}
 	if e = json.Unmarshal([]byte(text), &result); e != nil {
-		return nil, e
+		return nil, nil, e
 	}
 	for _, problem := range result.Errors {
 		if problem.Type == "RATE_LIMITED" || problem.Extensions.Code == "RATE_LIMITED" || strings.Contains(strings.ToLower(problem.Message), "rate limit") {
@@ -268,18 +277,18 @@ func (u *upstream) repositories(ctx context.Context, token string, targets []str
 	if mode == "submission" && len(result.Errors) > 0 {
 		for _, problem := range result.Errors {
 			if problem.Type != "NOT_FOUND" && problem.Extensions.Code != "NOT_FOUND" {
-				return nil, errors.New("GitHub GraphQL unavailable")
+				return nil, nil, errors.New("GitHub GraphQL unavailable")
 			}
 		}
 	}
 	if result.Data == nil {
-		return nil, errors.New("GitHub GraphQL unavailable")
+		return nil, nil, errors.New("GitHub GraphQL unavailable")
 	}
 	var nodes []json.RawMessage
 	if byID {
 		if len(result.Data["nodes"]) > 0 {
 			if e = json.Unmarshal(result.Data["nodes"], &nodes); e != nil {
-				return nil, e
+				return nil, nil, e
 			}
 		}
 	} else {
@@ -288,12 +297,52 @@ func (u *upstream) repositories(ctx context.Context, token string, targets []str
 		}
 	}
 	repos = make([]*repository, len(targets))
+	missing = make([]bool, len(targets))
+	// Classify each target independently: another repository's permission error
+	// must not hide this target's explicit NOT_FOUND, or turn an ambiguous null
+	// into evidence that it is missing.
+	for i := range targets {
+		if i >= len(nodes) || strings.TrimSpace(string(nodes[i])) != "null" {
+			continue
+		}
+		uncertain := false
+		for _, problem := range result.Errors {
+			notFound := problem.Type == "NOT_FOUND" || problem.Extensions.Code == "NOT_FOUND"
+			if len(problem.Path) == 0 {
+				if notFound && len(targets) == 1 {
+					missing[i] = true
+				} else {
+					uncertain = true
+				}
+				continue
+			}
+			relevant, exact := false, false
+			if !byID {
+				relevant = problem.Path[0] == fmt.Sprintf("r%d", i)
+				exact = len(problem.Path) == 1
+			} else if problem.Path[0] == "nodes" {
+				relevant = len(problem.Path) == 1 || problem.Path[1] == float64(i)
+				exact = len(problem.Path) == 2
+			}
+			if relevant {
+				if notFound && exact {
+					missing[i] = true
+				} else {
+					uncertain = true
+				}
+			}
+		}
+		if uncertain {
+			missing[i] = false
+		}
+	}
+
 	for i := range targets {
 		if i >= len(nodes) {
 			continue
 		}
 		var r repository
-		if e = json.Unmarshal(nodes[i], &r); e != nil || r.ID == "" {
+		if e = json.Unmarshal(nodes[i], &r); e != nil || r.ID == "" || (byID && r.ID != targets[i]) {
 			continue
 		}
 		if mode == "identity" {
@@ -310,10 +359,7 @@ func (u *upstream) repositories(ctx context.Context, token string, targets []str
 		}
 		repos[i] = &r
 	}
-	if mode == "submission" && len(repos) == 1 && repos[0] == nil && len(result.Errors) > 0 {
-		return nil, errSubmissionRepositoryMissing
-	}
-	return repos, nil
+	return repos, missing, nil
 }
 
 var repoNamePattern = regexp.MustCompile(`^[\w.-]+/[\w.-]+$`)

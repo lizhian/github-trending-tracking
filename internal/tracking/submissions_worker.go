@@ -169,6 +169,11 @@ func (w *SubmissionWorker) repositoryStage(ctx context.Context, sub *Submission)
 	if *repo.Private {
 		return w.reject(ctx, sub)
 	}
+	// A fresh public lookup overrides only repository-unavailable suppression,
+	// including when this submission is merged into another active request.
+	if err := clearUnavailableCache(ctx, s.store.DB, sub.Name, repo.Name); err != nil {
+		return err
+	}
 	sub.RepoID = strptr(repo.ID)
 	canonical := strings.ToLower(repo.Name)
 	// Resolve aliases before setting the unique active stable identity.

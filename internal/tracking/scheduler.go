@@ -2,6 +2,7 @@ package tracking
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"slices"
@@ -71,6 +72,9 @@ func (s *Scheduler) Tick(ctx context.Context) (err error) {
 	if err != nil || !allowed {
 		return err
 	}
+	if _, err = s.store.DB.ExecContext(ctx, `DELETE FROM system_state WHERE key GLOB ? AND json_extract(value,'$.expiresAt')<=?`, unavailableCachePrefix+"*", now); err != nil {
+		return err
+	}
 	if err = s.expireReadmeCache(ctx, now); err != nil {
 		return err
 	}
@@ -135,6 +139,9 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		if entry == nil || repositoryName("https://github.com/"+entry.Name, false) == "" {
 			return
 		}
+		if entry.Failure == "" && max(entry.NextAt, entry.ReadmeNextAt) > 0 {
+			entry.Failure = "GitHub repository unavailable"
+		}
 		if entry.Type == "" {
 			entry.Type = "github"
 		}
@@ -149,6 +156,9 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			}
 			previous.NextAt = max(previous.NextAt, entry.NextAt)
 			previous.ReadmeNextAt = max(previous.ReadmeNextAt, entry.ReadmeNextAt)
+			if previous.Failure == "" {
+				previous.Failure = entry.Failure
+			}
 		} else {
 			byName[key] = entry
 			pending = append(pending, entry)
@@ -227,7 +237,11 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			results[kind+":"+typ] = v
 		}
 	}
+	admissionAttempted := map[string]bool{}
 	record := func(kind, typ string, success bool, message string) {
+		if kind == "admission" {
+			admissionAttempted[typ] = true
+		}
 		v := results[kind+":"+typ]
 		if success {
 			v.Succeeded++
@@ -237,12 +251,33 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			v.Error = strptr(message)
 		}
 	}
+	completed := map[*discoveryEntry]bool{}
+	unavailable := map[string]unavailableResult{}
+	finishUnavailable := func(entry *discoveryEntry) {
+		key := unavailableCacheKey(entry.Name)
+		if _, found := unavailable[key]; !found {
+			checked := s.upstream.clock.Now()
+			unavailable[key] = unavailableResult{CheckedAt: checked, ExpiresAt: checked + Day}
+		}
+		completed[entry] = true
+		record("admission", entry.Type, true, "")
+	}
+	for _, entry := range pending {
+		_, cached, err := s.unavailableCache(entry.Name)
+		if err != nil {
+			return false, err
+		}
+		if cached {
+			completed[entry] = true
+			record("admission", entry.Type, true, "")
+		}
+	}
 	readyGitHub := func() bool { return s.upstream.blocked("https://api.github.com/graphql") <= s.upstream.clock.Now() }
 	slot := SamplingSlot(now, policy)
 	targets := []*discoveryEntry{}
 	unresolved := []string{}
 	for _, entry := range pending {
-		if max(entry.NextAt, entry.ReadmeNextAt) <= now && len(targets) < 20 {
+		if !completed[entry] && max(entry.NextAt, entry.ReadmeNextAt) <= now && len(targets) < 20 {
 			targets = append(targets, entry)
 			if entry.RepoID == "" && !slices.Contains(unresolved, strings.ToLower(entry.Name)) {
 				unresolved = append(unresolved, strings.ToLower(entry.Name))
@@ -250,7 +285,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		}
 	}
 	if len(unresolved) > 0 && readyGitHub() {
-		identities, err := s.upstream.repositories(ctx, s.options.Token, unresolved, false, "identity")
+		identities, missing, err := s.upstream.lookupRepositories(ctx, s.options.Token, unresolved, false, "identity")
 		message := "GitHub repository unavailable"
 		if err != nil {
 			message = safeError(err)
@@ -264,7 +299,26 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			if i >= 0 && i < len(identities) {
 				identity = identities[i]
 			}
+			failure := message
+			if _, found := unavailable[unavailableCacheKey(entry.Name)]; found {
+				completed[entry] = true
+				record("admission", entry.Type, true, "")
+				continue
+			}
+			if err == nil && identity == nil && i >= 0 && i < len(missing) && missing[i] {
+				var confirmErr error
+				identity, confirmErr = s.upstream.publicRepository(ctx, entry.Name, "", "identity")
+				if errors.Is(confirmErr, errPublicRepositoryMissing) {
+					finishUnavailable(entry)
+					continue
+				}
+				if confirmErr != nil {
+					failure = safeError(confirmErr)
+				}
+			}
 			if identity != nil {
+				entry.Failure = ""
+				entry.NextAt = 0
 				entry.RepoID = identity.ID
 				entry.Name = identity.Name
 				if _, e = s.store.DB.ExecContext(ctx, "UPDATE projects SET name=? WHERE repo_id=? AND name<>?", identity.Name, identity.ID, identity.Name); e != nil {
@@ -277,7 +331,8 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 				}
 			} else {
 				entry.NextAt = max(s.upstream.clock.Now()+retryInterval, s.upstream.blocked("https://api.github.com/graphql"))
-				record("admission", entry.Type, false, message)
+				entry.Failure = failure
+				record("admission", entry.Type, false, failure)
 			}
 		}
 	}
@@ -288,6 +343,9 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		selectedTarget[entry] = true
 	}
 	for _, entry := range pending {
+		if completed[entry] {
+			continue
+		}
 		key := entry.Type + ":" + strings.ToLower(entry.Name)
 		if entry.RepoID != "" {
 			key = entry.Type + ":" + entry.RepoID
@@ -296,6 +354,9 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			previous.ListedAt = max(previous.ListedAt, entry.ListedAt)
 			previous.NextAt = max(previous.NextAt, entry.NextAt)
 			previous.ReadmeNextAt = max(previous.ReadmeNextAt, entry.ReadmeNextAt)
+			if previous.Failure == "" {
+				previous.Failure = entry.Failure
+			}
 			if selectedTarget[entry] {
 				selectedTarget[previous] = true
 			}
@@ -314,7 +375,6 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 	for _, entry := range pending {
 		entry.NextAt = max(entry.NextAt, retryByRepo[entry.RepoID])
 	}
-	completed := map[*discoveryEntry]bool{}
 	ready := []*discoveryEntry{}
 	reuse := []observation{}
 	for _, entry := range pending {
@@ -352,13 +412,19 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			continue
 		}
 		if entry.Type == "linux.do" {
-			qualification, err := s.linuxdoReadme(ctx, entry.RepoID)
+			qualification, err := s.linuxdoReadme(ctx, entry.RepoID, entry.Name)
 			if err != nil {
+				if errors.Is(err, errPublicRepositoryMissing) {
+					finishUnavailable(entry)
+					continue
+				}
+				entry.Failure = safeError(err)
 				entry.ReadmeNextAt = s.readmeRetryAt()
 				record("admission", entry.Type, false, safeError(err))
 				continue
 			}
 			entry.ReadmeNextAt = 0
+			entry.Failure = ""
 			if !qualification.Eligible {
 				if e = s.store.SetState(readmeCacheKey(entry.RepoID), qualification); e != nil {
 					return false, e
@@ -458,7 +524,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		if metadata {
 			mode = "metadata"
 		}
-		nodes, err := s.upstream.repositories(ctx, s.options.Token, group, true, mode)
+		nodes, missing, err := s.upstream.lookupRepositories(ctx, s.options.Token, group, true, mode)
 		message := "GitHub repository unavailable"
 		if err != nil {
 			message = safeError(err)
@@ -515,6 +581,30 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 					record("admission", entry.Type, true, "")
 				}
 			} else {
+				// Only candidate additions are eligible for termination; tracked rows retain sampling errors.
+				index := slices.Index(group, id)
+				for _, entry := range additions {
+					entry.Failure = message
+					if _, found := unavailable[unavailableCacheKey(entry.Name)]; found {
+						completed[entry] = true
+						record("admission", entry.Type, true, "")
+						continue
+					}
+					if err == nil && index < len(missing) && missing[index] {
+						recovered, confirmErr := s.upstream.publicRepository(ctx, entry.Name, entry.RepoID, mode)
+						if errors.Is(confirmErr, errPublicRepositoryMissing) {
+							finishUnavailable(entry)
+							continue
+						}
+						if confirmErr == nil {
+							observations = append(observations, observation{repo: recovered, typ: entry.Type, listedAt: ptr(entry.ListedAt), metadataAt: now})
+							completed[entry] = true
+							record("admission", entry.Type, true, "")
+							continue
+						}
+						entry.Failure = safeError(confirmErr)
+					}
+				}
 				for _, row := range existing {
 					if _, e = s.store.DB.ExecContext(ctx, "UPDATE projects SET attempted_at=?,error=? WHERE id=? AND cycle=? AND attempted_at<=?", now, message, row.ID, row.Cycle, now); e != nil {
 						return false, e
@@ -522,8 +612,14 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 					record("collection", row.Type, false, message)
 				}
 				for _, entry := range additions {
+					if completed[entry] {
+						continue
+					}
+					if entry.Failure == "" {
+						entry.Failure = message
+					}
 					entry.NextAt = max(s.upstream.clock.Now()+retryInterval, s.upstream.blocked("https://api.github.com/graphql"))
-					record("admission", entry.Type, false, message)
+					record("admission", entry.Type, false, entry.Failure)
 				}
 			}
 		}
@@ -531,21 +627,51 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			return false, e
 		}
 	}
-	pending = slices.DeleteFunc(pending, func(v *discoveryEntry) bool { return completed[v] })
+	pending = slices.DeleteFunc(pending, func(v *discoveryEntry) bool {
+		return completed[v] || unavailable[unavailableCacheKey(v.Name)].ExpiresAt > 0
+	})
+	for _, typ := range projectTypes {
+		v := results["admission:"+typ]
+		v.Failed = 0
+		v.Error = nil
+	}
+	for _, entry := range pending {
+		if entry.Failure != "" {
+			v := results["admission:"+entry.Type]
+			v.Failed++
+			if v.Error == nil {
+				v.Error = strptr(entry.Failure)
+			}
+		}
+	}
 	changes := []string{}
 	for _, kind := range []string{"collection", "admission"} {
 		for _, typ := range projectTypes {
 			key := kind + ":" + typ
-			if results[key].Succeeded > 0 || results[key].Failed > 0 {
+			previous, err := s.priorRun(kind, typ)
+			if err != nil {
+				return false, err
+			}
+			changed := results[key].Succeeded > 0 || results[key].Failed > 0
+			if kind == "admission" {
+				changed = admissionAttempted[typ] || previous.Failed != results[key].Failed || jsonText(previous.Error) != jsonText(results[key].Error)
+			}
+			if changed {
 				changes = append(changes, key)
 			}
 		}
 	}
 	pendingChanged := jsonText(pending) != priorJSON
-	if pendingChanged || len(changes) > 0 {
+	if pendingChanged || len(changes) > 0 || len(unavailable) > 0 {
 		tx, e := s.store.DB.BeginTx(ctx, nil)
 		if e != nil {
 			return false, e
+		}
+		for key, cached := range unavailable {
+			if e = setTxState(ctx, tx, key, cached); e != nil {
+				tx.Rollback()
+				return false, e
+			}
 		}
 		if pendingChanged {
 			e = setTxState(ctx, tx, "pending", pending)
@@ -572,7 +698,21 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 					global.Error = v.Error
 				}
 			}
-			if e == nil && global.Succeeded+global.Failed > 0 {
+			if kind == "admission" {
+				global = runState{AttemptedAt: now, SucceededAt: prior[kind].SucceededAt}
+				for _, typ := range projectTypes {
+					v := results[kind+":"+typ]
+					global.Succeeded += v.Succeeded
+					global.Failed += v.Failed
+					if v.Succeeded > 0 {
+						global.SucceededAt = ptr(now)
+					}
+					if global.Error == nil {
+						global.Error = v.Error
+					}
+				}
+			}
+			if e == nil && ((kind == "collection" && global.Succeeded+global.Failed > 0) || (kind == "admission" && (slices.Contains(changes, "admission:github") || slices.Contains(changes, "admission:linux.do") || global.Failed != prior[kind].Failed))) {
 				e = setTxState(ctx, tx, kind, global)
 			}
 		}
@@ -583,6 +723,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		if e = tx.Commit(); e != nil {
 			return false, e
 		}
+		s.store.listRevision.Add(1)
 	}
 	return d.changed || pendingChanged || len(changes) > 0, nil
 }

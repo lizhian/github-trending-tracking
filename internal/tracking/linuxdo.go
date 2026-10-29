@@ -25,16 +25,22 @@ func isHTTPStatus(err error, status int) bool {
 
 // Resolve by stable identity before requesting content: names can be renamed or reused.
 // Errors are deliberately distinct from a successful, negative qualification.
-func (s *Scheduler) linuxdoReadme(ctx context.Context, repoID string) (readmeResult, error) {
+func (s *Scheduler) linuxdoReadme(ctx context.Context, repoID string, names ...string) (readmeResult, error) {
 	var cached readmeResult
 	if found, err := s.store.State(readmeCachePrefix+repoID, &cached); err != nil {
 		return readmeResult{}, err
 	} else if found && !cached.Eligible && cached.ExpiresAt > s.upstream.clock.Now() {
 		return cached, nil
 	}
-	repos, err := s.upstream.repositories(ctx, s.options.Token, []string{repoID}, true, "identity")
+	repos, absent, err := s.upstream.lookupRepositories(ctx, s.options.Token, []string{repoID}, true, "identity")
 	if err != nil {
 		return readmeResult{}, err
+	}
+	if len(repos) == 1 && repos[0] == nil && len(absent) == 1 && absent[0] && len(names) > 0 {
+		repos[0], err = s.upstream.publicRepository(ctx, names[0], repoID, "identity")
+		if err != nil {
+			return readmeResult{}, err
+		}
 	}
 	if len(repos) != 1 || repos[0] == nil || repos[0].ID != repoID {
 		return readmeResult{}, errors.New("GitHub repository unavailable")

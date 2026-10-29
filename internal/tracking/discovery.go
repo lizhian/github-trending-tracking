@@ -42,6 +42,7 @@ type discoveryState struct {
 	Resolved        map[string]resolvedDetail `json:"resolved"`
 }
 type discoveryEntry struct {
+	Failure      string `json:"failure,omitempty"`
 	Type         string `json:"type"`
 	Name         string `json:"name"`
 	ListedAt     int64  `json:"listedAt"`
