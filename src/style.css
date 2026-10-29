@@ -1186,8 +1186,7 @@ td.numeric {
   flex-direction: column;
 }
 .masthead,
-.overview,
-.app-main > .notice {
+.overview {
   flex-shrink: 0;
 }
 .app-main {
@@ -1888,7 +1887,8 @@ html {
   white-space: nowrap;
   font-size: 14px;
 }
-.submission-dialog {
+.submission-dialog,
+.collection-dialog {
   width: min(520px, calc(100vw - 32px));
   max-height: calc(100dvh - 32px);
   overflow: auto;
@@ -1900,10 +1900,25 @@ html {
   border-radius: var(--radius-card);
   box-shadow: 0 24px 80px #0003;
 }
-.submission-dialog::backdrop { background: #0007; }
-.submission-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.submission-heading h2 { margin: 0; font-size: 20px; }
-.submission-dialog p { color: var(--color-muted); font-size: 14px; line-height: 1.7; }
+.submission-dialog::backdrop,
+.collection-dialog::backdrop { background: #0007; }
+.submission-heading,
+.collection-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.submission-heading h2,
+.collection-heading h2 { margin: 0; font-size: 20px; }
+.submission-dialog p,
+.collection-dialog p { color: var(--color-muted); font-size: 14px; line-height: 1.7; }
+.collection-dialog { overflow-wrap: anywhere; }
+.collection-heading .icon-button { flex-shrink: 0; }
+.message-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-negative);
+}
 .submission-dialog form { display: grid; gap: 12px; margin-top: 24px; }
 .submission-dialog label { font-size: 14px; }
 .submission-dialog input {
@@ -1921,7 +1936,8 @@ html {
 .submission-result dt { color: var(--color-muted); }
 .submission-result dd { margin: 0; }
 @media (max-width: 420px) {
-  .submission-dialog { padding: 20px; }
+  .submission-dialog,
+  .collection-dialog { padding: 20px; }
   .masthead-end { gap: 4px; }
   .submission-open { padding-inline: 8px; }
 }

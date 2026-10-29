@@ -180,6 +180,7 @@ function Icon({
     | "previous"
     | "next"
     | "sun"
+    | "bell"
     | "moon";
   size?: number;
 }) {
@@ -220,6 +221,11 @@ function Icon({
       </>
     ),
     moon: <path d="M20.5 13.5A9 9 0 0 1 10.5 3a9 9 0 1 0 10 10.5Z" />,
+    bell: (
+      <>
+        <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
+      </>
+    ),
   };
   return (
     <svg
@@ -646,6 +652,7 @@ function App() {
   const [draft, setDraft] = useState(query.q);
   const [refresh, setRefresh] = useState(0);
   const [submissionOpen, setSubmissionOpen] = useState(false);
+  const messagesDialog = useRef<HTMLDialogElement>(null);
   const submissionChanged = useCallback(() => setRefresh((value) => value + 1), []);
   const [dark, setDark] = useState(() => {
     try {
@@ -853,6 +860,9 @@ function App() {
   const failure = failures.find((state) => state?.failed);
   const admission = data?.status.admission as RunState | undefined;
   const discovery = data?.status.discovery as RunState | undefined;
+  const hasCollectionNotice =
+    failure || discovery?.failed || admission?.failed ||
+    (data && data.summary.fresh < data.summary.tracked);
   return (
     <div className="app-shell">
       <a className="skip-link" href="#rankings">
@@ -909,6 +919,18 @@ function App() {
             <button type="button" className="submission-open" onClick={() => setSubmissionOpen(true)}>投稿</button>
             <button
               type="button"
+              className="icon-button collection-messages"
+              aria-label={hasCollectionNotice ? "采集消息，有异常提示" : "采集消息"}
+              aria-haspopup="dialog"
+              aria-controls="collection-messages"
+              title="采集消息"
+              onClick={() => messagesDialog.current?.showModal()}
+            >
+              <Icon name="bell" size={20} />
+              {!!hasCollectionNotice && <span className="message-dot" aria-hidden="true" />}
+            </button>
+            <button
+              type="button"
               className="icon-button"
               aria-label={dark ? "切换浅色主题" : "切换深色主题"}
               onClick={() => setDark((value) => !value)}
@@ -928,31 +950,55 @@ function App() {
         </div>
       </header>
       {submissionOpen && <SubmissionDialog apiBase={apiBase} onClose={() => setSubmissionOpen(false)} onChanged={submissionChanged} />}
-      <main className="frame app-main">
-        <h1 className="visually-hidden">开源趋势追踪</h1>
-        {failure && (
-          <p className="notice" role="status">
-            更新异常：{failure.error || "采集尚未恢复"}
-            。继续展示上次有效观测，后台将重试。
-          </p>
-        )}
-        {!!discovery?.failed && (
-          <p className="notice" role="status">
-            趋势源获取异常：{discovery.error || "暂时无法获取新候选"}。后台将重试。
-          </p>
-        )}
-        {!!admission?.failed && (
-          <p className="notice" role="status">
-            部分候选暂未收录，后台将重试。
-          </p>
-        )}
-        {data &&
-          data.summary.fresh < data.summary.tracked && (
-            <p className="notice" role="status">
-              {data.summary.tracked - data.summary.fresh} 个项目未按计划完成更新，已超过 10
-              分钟宽限并标记为数据过期。
+      <dialog
+        id="collection-messages"
+        className="collection-dialog"
+        ref={messagesDialog}
+        aria-labelledby="collection-messages-title"
+      >
+        <div className="collection-heading">
+          <h2 id="collection-messages-title">
+            {query.tab === "linuxdo" ? "Linux.do" : "GitHub"} 采集消息
+          </h2>
+          <button type="button" className="icon-button" aria-label="关闭采集消息" onClick={() => messagesDialog.current?.close()}>×</button>
+        </div>
+        <div aria-live="polite">
+          {failure && (
+            <p>
+              更新异常：{failure.error || "采集尚未恢复"}
+              。继续展示上次有效观测，后台将重试。
             </p>
           )}
+          {!!discovery?.failed && (
+            <p>
+              趋势源获取异常：{discovery.error || "暂时无法获取新候选"}。后台将重试。
+            </p>
+          )}
+          {!!admission?.failed && (
+            <p>
+              部分候选暂未收录，后台将重试。
+            </p>
+          )}
+          {data &&
+            data.summary.fresh < data.summary.tracked && (
+              <p>
+                {data.summary.tracked - data.summary.fresh} 个项目未按计划完成更新，已超过 10
+                分钟宽限并标记为数据过期。
+              </p>
+            )}
+          {!hasCollectionNotice && (
+            <p>
+              {resource.loading
+                ? "正在读取采集状态…"
+                : resource.error
+                  ? "暂时无法获取采集状态。"
+                  : "暂无采集异常提示。"}
+            </p>
+          )}
+        </div>
+      </dialog>
+      <main className="frame app-main">
+        <h1 className="visually-hidden">开源趋势追踪</h1>
         <section
           className="workspace"
           id="rankings"
