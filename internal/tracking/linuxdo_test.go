@@ -86,7 +86,7 @@ func TestLinuxdoNegativeCacheSurvivesRestartRenameAndRequiresRediscovery(t *test
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	requests := 0
 	h.sources[readmeURL] = func() *http.Response { requests++; return response("unrelated dependency") }
-	setPending(t, h, map[string]any{"type": "linux.do", "repoId": "R_0", "name": "acme/one", "listedAt": h.clock.at})
+	setPending(t, h, map[string]any{"type": "linux.do", "repoId": "R_0", "name": "acme/one"})
 	h.tick(beijing("2026-10-01T09:00:00"))
 	expires := cacheExpiry(t, h, "R_0")
 	var checked struct {
@@ -101,7 +101,7 @@ func TestLinuxdoNegativeCacheSurvivesRestartRenameAndRequiresRediscovery(t *test
 	h.names[0] = "acme/renamed"
 	h.sources["https://api.github.com/repos/acme/renamed/readme"] = func() *http.Response { requests++; return response("https://linux.do") }
 	h.scheduler = tracking.NewScheduler(h.store, tracking.SchedulerOptions{Clock: h.clock, Client: h.client, StartedAt: h.clock.at})
-	setPending(t, h, map[string]any{"type": "linux.do", "repoId": "R_0", "name": "acme/renamed", "listedAt": h.clock.at})
+	setPending(t, h, map[string]any{"type": "linux.do", "repoId": "R_0", "name": "acme/renamed"})
 	h.tick(beijing("2026-10-01T11:00:00"))
 	if requests != 1 || h.list("linux.do")["total"] != float64(0) {
 		t.Fatal("cache lost on restart or rename")
@@ -247,7 +247,7 @@ func (failingRead) Read([]byte) (int, error) { return 0, errors.New("secret upst
 func TestLinuxdoReadmeRetryDoesNotDelayGitHubCandidate(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	// Make this an old Linux.do pending before any shared GitHub candidate exists.
-	setPending(t, h, map[string]any{"type": "linux.do", "repoId": "R_0", "name": "acme/one", "listedAt": h.clock.at})
+	setPending(t, h, map[string]any{"type": "linux.do", "repoId": "R_0", "name": "acme/one"})
 	h.sources["https://rsshub-balancer.virworks.moe/github/trending/daily/any"] = func() *http.Response { return response("<rss><channel/></rss>") }
 	requests := 0
 	h.sources[readmeURL] = func() *http.Response { requests++; r := response("unavailable"); r.StatusCode = 503; return r }
@@ -256,7 +256,7 @@ func TestLinuxdoReadmeRetryDoesNotDelayGitHubCandidate(t *testing.T) {
 	if _, err := h.store.State("pending", &pending); err != nil {
 		t.Fatal(err)
 	}
-	pending = append(pending, map[string]any{"type": "github", "repoId": "R_0", "name": "acme/one", "listedAt": h.clock.at})
+	pending = append(pending, map[string]any{"type": "github", "repoId": "R_0", "name": "acme/one"})
 	if err := h.store.SetState("pending", pending); err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func cleanupProgress(t *testing.T, h *collectionHarness) cleanupReport {
 func copyLinuxProjects(t *testing.T, h *collectionHarness) {
 	t.Helper()
 	for _, sql := range []string{
-		`INSERT INTO projects SELECT 'linux.do:'||repo_id,cycle||'-linux',name,description,language,topics,entered_at,listed_at,observed_at,attempted_at,error,stars,trends,metadata_at,'linux.do',repo_id,homepage FROM projects WHERE type='github'`,
+		`INSERT INTO projects SELECT 'linux.do:'||repo_id,cycle||'-linux',name,description,language,topics,entered_at,observed_at,attempted_at,error,stars,trends,metadata_at,'linux.do',repo_id,homepage FROM projects WHERE type='github'`,
 		`INSERT INTO snapshot_days SELECT cycle||'-linux',day,hours FROM snapshot_days WHERE cycle NOT LIKE '%-linux'`,
 		`DELETE FROM system_state WHERE key='linuxdo_cleanup_v1'`,
 	} {
@@ -517,7 +517,7 @@ func TestLinuxdoCleanupRequiresBackupAndFencesReplacementCycle(t *testing.T) {
 	if _, err := h.store.DB.Exec(`DELETE FROM projects WHERE type='linux.do'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.store.DB.Exec(`INSERT INTO projects SELECT 'linux.do:'||repo_id,'replacement',name,description,language,topics,entered_at,listed_at,observed_at,attempted_at,error,stars,trends,metadata_at,'linux.do',repo_id,homepage FROM projects WHERE type='github'`); err != nil {
+	if _, err := h.store.DB.Exec(`INSERT INTO projects SELECT 'linux.do:'||repo_id,'replacement',name,description,language,topics,entered_at,observed_at,attempted_at,error,stars,trends,metadata_at,'linux.do',repo_id,homepage FROM projects WHERE type='github'`); err != nil {
 		t.Fatal(err)
 	}
 	h.sources[readmeURL] = func() *http.Response { return response("no marker") }

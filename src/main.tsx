@@ -595,8 +595,8 @@ function Details({
         <dt>保护期</dt>
         <dd>{protectedNow ? "保护中" : "已结束"}</dd>
       </dl>
-      <details className="record-times">
-        <summary>观测详情</summary>
+      <section className="record-times" aria-labelledby="observation-title">
+        <h3 id="observation-title">观测详情</h3>
         <dl className="observation">
           <dt>观测状态</dt>
           <dd>
@@ -624,8 +624,6 @@ function Details({
           </dd>
           <dt>本次入库</dt>
           <dd>{time(project.enteredAt)}</dd>
-          <dt>最近上榜</dt>
-          <dd>{project.listedAt === null ? "尚未上榜" : time(project.listedAt)}</dd>
           <dt>最后成功观测</dt>
           <dd>{time(project.observedAt)}</dd>
         </dl>
@@ -634,7 +632,7 @@ function Details({
             实际区间：{time(trend.start)} 至 {time(trend.end)}
           </p>
         ) : null}
-      </details>
+      </section>
       <a
         className="repo-link"
         href={`https://github.com/${project.name}`}
@@ -852,7 +850,6 @@ function App() {
       </button>
     </th>
   );
-  const collection = data?.status.collection as RunState | undefined;
   const failures = [
     data?.status.scheduler,
     data?.status.collection,
@@ -1332,34 +1329,6 @@ function App() {
                     : "从榜单中选择一个项目，查看它的 Star 变化。"}
                 </p>
               )}
-              <details className="method" id="method">
-                <summary>
-                  数据说明<span aria-hidden="true">＋</span>
-                </summary>
-                <p>
-                  {query.tab === "linuxdo"
-                    ? "项目来自 Linux.do 开发板块 RSS 正文中的 GitHub 仓库链接。"
-                    : "项目来自 GitHub Trending、HelloGithub 和 OpenGithubs。"}
-                  GitHub 日榜、Linux.do RSS 与 Star 采样均在北京时间 09:00–21:00 每小时、其余时间每两小时开始（01、03、05、07、09 至 21 每个整点、23 点），分批完成；其余来源每天 09:00 开始抓取。新收录项目复用同仓库本轮的真实观测，尚无本轮观测时立即采样。所有访客共享观测，无需登录。
-                </p>
-                <p>
-                  趋势窗口为滚动 24、72、168、720
-                  小时，以项目最新成功观测为终点，仅保留最近 30
-                  天内的实际快照，完整窗口的端点容差按应采时段及 10 分钟宽限判断。历史不足显示部分观测，不足两次快照显示积累中。负净增量原样展示，缺测区间断线，不补零或推算。
-                </p>
-                <p>
-                  顶部净增量为当前来源已知项目窗口的合计，含部分观测，各项目实际区间可能不同；积累中项目不参与合计。语言数与项目数量也仅统计当前来源。
-                </p>
-                <p>
-                  错过应采时段并超过 10 分钟宽限标为数据过期，正常的 1/2 小时间隔不算缺测。旧历史保留原有缺测含义。每日北京时间 04:00
-                  按保留评分分别清理，每个来源目标保留 500
-                  项；保护期、观测数据过期或观测不足的项目暂缓淘汰，因此可能超额。
-                </p>
-                <p>
-                  最近成功采集：{time(collection?.succeededAt)}。最近采集尝试：
-                  {time(collection?.attemptedAt)}。
-                </p>
-              </details>
           </aside>
         </section>
       </main>

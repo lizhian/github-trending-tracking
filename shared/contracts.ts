@@ -25,7 +25,6 @@ export interface Project {
   topics: string[];
   stars: number;
   enteredAt: number;
-  listedAt: number | null;
   observedAt: number;
   attemptedAt: number;
   error: string | null;

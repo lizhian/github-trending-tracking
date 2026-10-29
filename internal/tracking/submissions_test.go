@@ -181,7 +181,7 @@ func TestSubmissionHTTPBoundariesAndProxyLimits(t *testing.T) {
 }
 
 func TestMigrationPreservesExistingDataAndBackup(t *testing.T) {
-	for _, version := range []int{3, 4} {
+	for _, version := range []int{3, 4, 5} {
 		t.Run(fmt.Sprintf("schema-%d", version), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), DatabaseName)
 			db, err := database(path, "rwc")
@@ -197,10 +197,16 @@ func TestMigrationPreservesExistingDataAndBackup(t *testing.T) {
 			if _, err = db.Exec(fmt.Sprintf("PRAGMA user_version=%d", version)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err = db.Exec(`INSERT INTO projects(id,cycle,name,topics,entered_at,listed_at,observed_at,attempted_at,stars,trends,type,repo_id) VALUES('github:R1','old-cycle','a/b','[]',1,2,3,3,10,'{}','github','R1'); INSERT INTO snapshot_days VALUES('old-cycle',0,'{"0":[3,10]}'); INSERT INTO system_state VALUES('pending','[{"name":"a/c","nextAt":99}]')`); err != nil {
+			if _, err = db.Exec(`INSERT INTO projects(id,cycle,name,topics,entered_at,listed_at,observed_at,attempted_at,stars,trends,type,repo_id) VALUES('github:R1','old-cycle','a/b','[]',1,2,3,3,10,'{}','github','R1'); INSERT INTO snapshot_days VALUES('old-cycle',0,'{"0":[3,10]}'); INSERT INTO system_state VALUES('pending','[{"name":"a/c","listedAt":2,"nextAt":99,"readmeNextAt":100,"failure":"retry"}]'); INSERT INTO system_state VALUES('discoverySources','{"details":[{"url":"https://hellogithub.com/repository/one","listedAt":2,"nextAt":88,"error":"retry"}],"sources":{"github-daily":{"nextAt":200}}}')`); err != nil {
 				t.Fatal(err)
 			}
-			legacyProjectQuery := "SELECT json_array(" + strings.Join(columnsForVersion("projects", 3), ",") + ") FROM projects"
+			if version == 5 {
+				if _, err = db.Exec("UPDATE projects SET homepage='https://example.com/project'"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			preservedColumns := strings.Replace(strings.Join(columnsForVersion("projects", version), ","), ",listed_at", "", 1)
+			legacyProjectQuery := "SELECT json_array(" + preservedColumns + ") FROM projects"
 			var beforeProject string
 			if err = db.QueryRow(legacyProjectQuery).Scan(&beforeProject); err != nil {
 				t.Fatal(err)
@@ -231,19 +237,31 @@ func TestMigrationPreservesExistingDataAndBackup(t *testing.T) {
 				t.Fatal(err)
 			}
 			for table, digest := range before.Tables {
-				if table == "projects" {
+				if table == "projects" || table == "system_state" {
 					continue
 				}
 				if !reflect.DeepEqual(digest, after.Tables[table]) {
 					t.Fatalf("migration changed %s", table)
 				}
 			}
+			var pending []map[string]any
+			if found, err := store.State("pending", &pending); err != nil || !found || len(pending) != 1 || pending[0]["listedAt"] != nil || pending[0]["nextAt"] != float64(99) || pending[0]["readmeNextAt"] != float64(100) || pending[0]["failure"] != "retry" {
+				t.Fatal("migration changed pending retry state", pending, err)
+			}
+			var discovery map[string]any
+			if found, err := store.State("discoverySources", &discovery); err != nil || !found {
+				t.Fatal("migration lost discovery state", err)
+			}
+			detail := discovery["details"].([]any)[0].(map[string]any)
+			if detail["listedAt"] != nil || detail["nextAt"] != float64(88) || detail["error"] != "retry" || discovery["sources"].(map[string]any)["github-daily"].(map[string]any)["nextAt"] != float64(200) {
+				t.Fatal("migration changed discovery retry state", discovery)
+			}
 			var afterProject string
 			if err = store.DB.QueryRow(legacyProjectQuery).Scan(&afterProject); err != nil || afterProject != beforeProject {
 				t.Fatal("migration changed existing project fields", beforeProject, afterProject, err)
 			}
 			rows, err := store.ProjectRows("")
-			if err != nil || len(rows) != 1 || rows[0].Homepage != nil || before.Tables["projects"].Rows != after.Tables["projects"].Rows {
+			if err != nil || len(rows) != 1 || (version < 5 && rows[0].Homepage != nil) || before.Tables["projects"].Rows != after.Tables["projects"].Rows {
 				t.Fatal("migration lost projects or supplied a homepage", rows, err)
 			}
 			if err = Migrate(path); err == nil {

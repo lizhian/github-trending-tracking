@@ -13,7 +13,6 @@ type observation struct {
 	repo                   *repository
 	previous               *ProjectRow
 	typ                    string
-	listedAt               *int64
 	observedAt, metadataAt int64
 }
 
@@ -164,16 +163,10 @@ func (s *Store) saveObservationsAnd(ctx context.Context, items []observation, no
 				metadataAt = o.previous.MetadataAt
 			}
 		}
-		listed := now
-		if o.listedAt != nil {
-			listed = *o.listedAt
-		} else if o.previous != nil {
-			listed = o.previous.ListedAt
-		}
 		if o.previous != nil {
-			_, e = tx.ExecContext(ctx, `UPDATE projects SET name=?,description=?,homepage=?,language=?,topics=?,observed_at=?,attempted_at=?,stars=?,trends=?,error=NULL,metadata_at=?,listed_at=MAX(listed_at,?) WHERE id=? AND cycle=? AND observed_at<?`, name, description, homepage, language, topics, at, at, *o.repo.Stars, jsonText(trends), metadataAt, listed, id, cycle, at)
+			_, e = tx.ExecContext(ctx, `UPDATE projects SET name=?,description=?,homepage=?,language=?,topics=?,observed_at=?,attempted_at=?,stars=?,trends=?,error=NULL,metadata_at=? WHERE id=? AND cycle=? AND observed_at<?`, name, description, homepage, language, topics, at, at, *o.repo.Stars, jsonText(trends), metadataAt, id, cycle, at)
 		} else {
-			_, e = tx.ExecContext(ctx, `INSERT INTO projects(id,type,repo_id,cycle,name,description,homepage,language,topics,observed_at,attempted_at,stars,trends,entered_at,listed_at,metadata_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, id, typ, o.repo.ID, cycle, name, description, homepage, language, topics, at, at, *o.repo.Stars, jsonText(trends), now, listed, metadataAt)
+			_, e = tx.ExecContext(ctx, `INSERT INTO projects(id,type,repo_id,cycle,name,description,homepage,language,topics,observed_at,attempted_at,stars,trends,entered_at,metadata_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, id, typ, o.repo.ID, cycle, name, description, homepage, language, topics, at, at, *o.repo.Stars, jsonText(trends), now, metadataAt)
 		}
 		if e != nil {
 			return e

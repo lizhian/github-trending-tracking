@@ -281,7 +281,7 @@ func (w *SubmissionWorker) admit(ctx context.Context, sub *Submission, repo *rep
 		}
 	}
 	if !tracked {
-		item := observation{repo: repo, typ: kind, listedAt: ptr(int64(0)), observedAt: now, metadataAt: now}
+		item := observation{repo: repo, typ: kind, observedAt: now, metadataAt: now}
 		if len(rows) > 0 && rows[0].ObservedAt >= SamplingSlot(now, policy) {
 			item.repo, err = rowRepository(rows[0])
 			if err != nil {

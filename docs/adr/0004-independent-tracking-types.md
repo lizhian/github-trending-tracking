@@ -4,6 +4,8 @@ status: accepted
 
 # 按发现体系独立追踪，共享仓库采集
 
+[ADR-0011](0011-remove-listing-time.md) 删除了下文的最近上榜时间及刷新规则；独立追踪和共享采集规则继续有效。
+
 采样时段、重试下限及 Linux.do 主 RSS 的后续调整见 [ADR-0009](0009-hourly-daytime-sampling-and-five-minute-retries.md)；下文保留原决策背景。
 
 Linux.do 候选仓库的收录资格及上线前存量清洗由 [ADR-0007](0007-linuxdo-readme-admission.md) 补充：RSS 中的依赖和示例链接仅构成候选，须通过主 README 校验后才能入库。独立追踪与共享观测语义继续有效。

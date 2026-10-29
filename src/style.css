@@ -653,32 +653,6 @@ td.numeric {
 .repo-link:active {
   transform: translateY(1px);
 }
-.method {
-  border-top: 1px solid var(--color-rule);
-  border-bottom: 1px solid var(--color-rule);
-  margin-top: var(--space-lg);
-  padding-block: var(--space-md);
-  font-size: 11px;
-}
-.method summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  list-style: none;
-  min-height: 32px;
-}
-.method summary::-webkit-details-marker {
-  display: none;
-}
-.method summary:hover {
-  color: var(--color-muted);
-}
-.method p {
-  font-size: 12px;
-  margin-top: var(--space-sm);
-  color: var(--color-muted);
-  line-height: 1.8;
-}
 .inspector-colophon {
   display: flex;
   flex-direction: column;
@@ -986,7 +960,6 @@ td.numeric {
     font-size: 12px;
   }
   .observation,
-  .method,
   .repo-link {
     font-size: 12px;
   }
@@ -1099,8 +1072,12 @@ td.numeric {
   font-size: 12px;
   margin-top: var(--space-md);
 }
-.record-times summary {
-  min-height: 32px;
+.record-times h3 {
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  letter-spacing: normal;
 }
 .record-times .observation {
   margin-top: var(--space-sm);

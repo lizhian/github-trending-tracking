@@ -147,10 +147,6 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		}
 		key := entry.Type + ":" + strings.ToLower(entry.Name)
 		if previous := byName[key]; previous != nil {
-			if entry.ListedAt > previous.ListedAt {
-				previous.ListedAt = entry.ListedAt
-				previous.Name = entry.Name
-			}
 			if previous.RepoID == "" {
 				previous.RepoID = entry.RepoID
 			}
@@ -190,9 +186,6 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		tracked := false
 		for _, row := range rows {
 			if row.Type == entry.Type && row.RepoID == entry.RepoID {
-				if _, e = s.store.DB.ExecContext(ctx, "UPDATE projects SET listed_at=MAX(listed_at,?) WHERE id=? AND cycle=?", entry.ListedAt, row.ID, row.Cycle); e != nil {
-					return false, e
-				}
 				tracked = true
 				break
 			}
@@ -351,7 +344,6 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			key = entry.Type + ":" + entry.RepoID
 		}
 		if previous := byID[key]; previous != nil {
-			previous.ListedAt = max(previous.ListedAt, entry.ListedAt)
 			previous.NextAt = max(previous.NextAt, entry.NextAt)
 			previous.ReadmeNextAt = max(previous.ReadmeNextAt, entry.ReadmeNextAt)
 			if previous.Failure == "" {
@@ -405,9 +397,6 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			}
 		}
 		if tracked != nil {
-			if _, e = s.store.DB.ExecContext(ctx, "UPDATE projects SET listed_at=MAX(listed_at,?) WHERE id=? AND cycle=?", entry.ListedAt, tracked.ID, tracked.Cycle); e != nil {
-				return false, e
-			}
 			completed[entry] = true
 			continue
 		}
@@ -439,7 +428,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			if e != nil {
 				return false, e
 			}
-			reuse = append(reuse, observation{repo: repo, typ: entry.Type, listedAt: ptr(entry.ListedAt), observedAt: latest.ObservedAt, metadataAt: latest.MetadataAt})
+			reuse = append(reuse, observation{repo: repo, typ: entry.Type, observedAt: latest.ObservedAt, metadataAt: latest.MetadataAt})
 			completed[entry] = true
 			record("admission", entry.Type, true, "")
 		} else if retryAt > 0 {
@@ -576,7 +565,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 					record("collection", row.Type, true, "")
 				}
 				for _, entry := range additions {
-					observations = append(observations, observation{repo: repo, typ: entry.Type, listedAt: ptr(entry.ListedAt), metadataAt: latestMetadata})
+					observations = append(observations, observation{repo: repo, typ: entry.Type, metadataAt: latestMetadata})
 					completed[entry] = true
 					record("admission", entry.Type, true, "")
 				}
@@ -597,7 +586,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 							continue
 						}
 						if confirmErr == nil {
-							observations = append(observations, observation{repo: recovered, typ: entry.Type, listedAt: ptr(entry.ListedAt), metadataAt: now})
+							observations = append(observations, observation{repo: recovered, typ: entry.Type, metadataAt: now})
 							completed[entry] = true
 							record("admission", entry.Type, true, "")
 							continue

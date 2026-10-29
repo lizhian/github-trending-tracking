@@ -262,7 +262,7 @@ func TestCandidateAndSamplingFailuresHaveIndependentStatus(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	first := beijing("2026-10-01T09:00:00")
 	h.tick(first)
-	if err := h.store.SetState("pending", []map[string]any{{"type": "github", "name": "acme/missing", "listedAt": first}}); err != nil {
+	if err := h.store.SetState("pending", []map[string]any{{"type": "github", "name": "acme/missing"}}); err != nil {
 		t.Fatal(err)
 	}
 	h.tick(first + 5*60_000)
@@ -387,7 +387,7 @@ func TestFailedAdmissionSharesRetryAcrossNewTypesAndRediscovery(t *testing.T) {
 		t.Fatal("failed admission created project")
 	}
 	// The new type is persisted while no tracked project exists, as it can be after discovery.
-	if e := h.store.SetState("pending", []map[string]any{{"name": "acme/one", "repoId": "R_0", "listedAt": first, "nextAt": first + 30*60_000}, {"type": "linux.do", "name": "acme/one", "listedAt": first + 5*60_000}}); e != nil {
+	if e := h.store.SetState("pending", []map[string]any{{"name": "acme/one", "repoId": "R_0", "nextAt": first + 30*60_000}, {"type": "linux.do", "name": "acme/one"}}); e != nil {
 		t.Fatal(e)
 	}
 	h.failed["R_0"] = false
@@ -504,7 +504,7 @@ func seedMatureProjects(t *testing.T, h *collectionHarness, count int, at int64)
 		if i == 0 {
 			errorValue = "GitHub repository unavailable"
 		}
-		if _, e = tx.Exec(`INSERT INTO projects(id,type,repo_id,cycle,name,topics,entered_at,listed_at,observed_at,attempted_at,error,stars,trends,metadata_at) VALUES(?,'github',?,?,?,'[]',?,?,?,?,?,?,?,?)`, "github:"+id, id, "cycle-"+id, name, entered, entered, at, at, errorValue, stars, mustJSON(trends), at); e != nil {
+		if _, e = tx.Exec(`INSERT INTO projects(id,type,repo_id,cycle,name,topics,entered_at,observed_at,attempted_at,error,stars,trends,metadata_at) VALUES(?,'github',?,?,?,'[]',?,?,?,?,?,?,?)`, "github:"+id, id, "cycle-"+id, name, entered, at, at, errorValue, stars, mustJSON(trends), at); e != nil {
 			t.Fatal(e)
 		}
 		for _, p := range [][2]int64{{at - tracking.Day, 100}, {at, stars}} {
@@ -552,6 +552,56 @@ func TestCleanupRunsDuringStartupWaitProtectsYoungProjectsAndReentryStartsNewHis
 		t.Fatal("reentry inherited old cycle", history)
 	}
 }
+func TestCleanupOrdersByScoreDeltaStarsEntryTimeAndID(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		deltas    [2][4]int64
+		stars     [2]int64
+		ageDays   [2]int64
+		removedID string
+	}{
+		{"score before delta", [2][4]int64{{1, 0, 0, 0}, {0, 10, 10, 10}}, [2]int64{200, 100}, [2]int64{2, 3}, "github:R_0"},
+		{"delta before stars", [2][4]int64{{-2, 0, 0, 0}, {-1, 0, 0, 0}}, [2]int64{200, 100}, [2]int64{2, 3}, "github:R_0"},
+		{"stars before entry time", [2][4]int64{}, [2]int64{200, 100}, [2]int64{3, 2}, "github:R_1"},
+		{"entry time before ID", [2][4]int64{}, [2]int64{100, 100}, [2]int64{2, 3}, "github:R_1"},
+		{"stable ID", [2][4]int64{}, [2]int64{100, 100}, [2]int64{2, 2}, "github:R_0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCollectionHarness(t, beijing("2026-10-02T03:50:00"))
+			observed := beijing("2026-10-02T01:00:00")
+			seedMatureProjects(t, h, 501, observed)
+			if err := h.store.SetState("sampling_policy", map[string]any{"version": 2, "effectiveAt": observed - 7*tracking.Day}); err != nil {
+				t.Fatal(err)
+			}
+			trends := func(deltas [4]int64) string {
+				values := map[string]any{}
+				for i, width := range tracking.Windows {
+					values[fmt.Sprint(width)] = map[string]any{"start": observed - tracking.Day, "end": observed, "delta": deltas[i], "gaps": []any{}}
+				}
+				return mustJSON(values)
+			}
+			if _, err := h.store.DB.Exec("UPDATE projects SET trends=?", trends([4]int64{100, 100, 100, 100})); err != nil {
+				t.Fatal(err)
+			}
+			for i := range 2 {
+				if _, err := h.store.DB.Exec("UPDATE projects SET trends=?,stars=?,entered_at=? WHERE id=?", trends(tc.deltas[i]), tc.stars[i], observed-tc.ageDays[i]*tracking.Day, fmt.Sprintf("github:R_%d", i)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h.tick(beijing("2026-10-02T04:00:00"))
+			rows, err := h.store.ProjectRows("")
+			if err != nil || len(rows) != 500 {
+				t.Fatal("cleanup did not reach capacity", len(rows), err)
+			}
+			for _, row := range rows {
+				if row.ID == tc.removedID {
+					t.Fatal("wrong project removed", tc.removedID)
+				}
+			}
+		})
+	}
+}
+
 func TestLinuxPrimaryFallbackAndAuthoritativeSourceParsing(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	h.names = []string{"acme/one", "acme/two", "acme/dependency", "acme/detail"}
@@ -598,7 +648,7 @@ func TestLinuxPrimaryFallbackAndAuthoritativeSourceParsing(t *testing.T) {
 		t.Fatal(status)
 	}
 }
-func TestDiscoveryBudgetDefersHelloDetailsWithoutFailuresAndPreservesListingTime(t *testing.T) {
+func TestDiscoveryBudgetDefersHelloDetailsWithoutFailures(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	h.names = []string{"acme/one"}
 	h.stars = []int64{100}
@@ -621,16 +671,12 @@ func TestDiscoveryBudgetDefersHelloDetailsWithoutFailuresAndPreservesListingTime
 	if status["failed"] != float64(0) {
 		t.Fatal("budget became failure", status)
 	}
-	// Remaining details finish in subsequent ticks; they keep initial listing time.
+	// Remaining details finish in subsequent ticks.
 	h.tick(first + 10*60_000)
 	h.tick(first + 20*60_000)
 	got := h.list("github")
 	if got["total"] != float64(1) {
 		t.Fatal(got)
-	}
-	item := got["items"].([]any)[0].(map[string]any)
-	if item["listedAt"] != float64(first) {
-		t.Fatal(item)
 	}
 }
 func TestHundredRepositoryBatchesUpdateBothTypesAndCompletedRoundStaysIdle(t *testing.T) {
@@ -644,7 +690,7 @@ func TestHundredRepositoryBatchesUpdateBothTypesAndCompletedRoundStaysIdle(t *te
 	}
 	observed := beijing("2026-10-02T09:00:00")
 	seedMatureProjects(t, h, 500, observed)
-	if _, e := h.store.DB.Exec(`INSERT INTO projects SELECT 'linux.do:'||repo_id,cycle||'-linux',name,description,language,topics,entered_at,listed_at,observed_at,attempted_at,error,stars,trends,metadata_at,'linux.do',repo_id,homepage FROM projects WHERE type='github'`); e != nil {
+	if _, e := h.store.DB.Exec(`INSERT INTO projects SELECT 'linux.do:'||repo_id,cycle||'-linux',name,description,language,topics,entered_at,observed_at,attempted_at,error,stars,trends,metadata_at,'linux.do',repo_id,homepage FROM projects WHERE type='github'`); e != nil {
 		t.Fatal(e)
 	}
 	if _, e := h.store.DB.Exec(`INSERT INTO snapshot_days SELECT cycle||'-linux',day,hours FROM snapshot_days WHERE cycle NOT LIKE '%-linux'`); e != nil {
@@ -734,7 +780,7 @@ func TestLateObservationCannotWriteIntoReplacementTrackingCycle(t *testing.T) {
 			if _, e = tx.Exec(`DELETE FROM projects WHERE id='github:R_0'`); e != nil {
 				t.Fatal(e)
 			}
-			if _, e = tx.Exec(`INSERT INTO projects(id,cycle,name,description,language,topics,entered_at,listed_at,observed_at,attempted_at,error,stars,trends,metadata_at,type,repo_id) VALUES(?,'replacement',?,?,?,?,?,?,?,?,NULL,999,?,?,?,?)`, v.ID, v.Name, v.Description, v.Language, v.Topics, at, at, at, at, mustJSON(trends), at, v.Type, v.RepoID); e != nil {
+			if _, e = tx.Exec(`INSERT INTO projects(id,cycle,name,description,language,topics,entered_at,observed_at,attempted_at,error,stars,trends,metadata_at,type,repo_id) VALUES(?,'replacement',?,?,?,?,?,?,?,NULL,999,?,?,?,?)`, v.ID, v.Name, v.Description, v.Language, v.Topics, at, at, at, mustJSON(trends), at, v.Type, v.RepoID); e != nil {
 				t.Fatal(e)
 			}
 			if _, e = tx.Exec(`INSERT INTO snapshot_days VALUES('replacement',?,?)`, at/tracking.Day, mustJSON(map[string]any{fmt.Sprint(at / tracking.Hour): [2]int64{at, 999}})); e != nil {

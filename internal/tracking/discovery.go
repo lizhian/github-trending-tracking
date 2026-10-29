@@ -26,10 +26,9 @@ type sourceState struct {
 	RetryAfter int64 `json:"retryAfter,omitempty"`
 }
 type detailTask struct {
-	URL      string  `json:"url"`
-	ListedAt int64   `json:"listedAt"`
-	NextAt   int64   `json:"nextAt"`
-	Error    *string `json:"error"`
+	URL    string  `json:"url"`
+	NextAt int64   `json:"nextAt"`
+	Error  *string `json:"error"`
 }
 type resolvedDetail struct {
 	Day  int64  `json:"day"`
@@ -45,7 +44,6 @@ type discoveryEntry struct {
 	Failure      string `json:"failure,omitempty"`
 	Type         string `json:"type"`
 	Name         string `json:"name"`
-	ListedAt     int64  `json:"listedAt"`
 	RepoID       string `json:"repoId,omitempty"`
 	NextAt       int64  `json:"nextAt,omitempty"`
 	ReadmeNextAt int64  `json:"readmeNextAt,omitempty"`
@@ -346,14 +344,12 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 		}
 	}
 	entries := []*discoveryEntry{}
-	indices := map[string]int{}
-	add := func(name string, at int64, typ string) {
+	seen := map[string]bool{}
+	add := func(name, typ string) {
 		key := typ + ":" + strings.ToLower(name)
-		if i, ok := indices[key]; ok {
-			entries[i].ListedAt = max(entries[i].ListedAt, at)
-		} else {
-			indices[key] = len(entries)
-			entries = append(entries, &discoveryEntry{Type: typ, Name: name, ListedAt: at})
+		if !seen[key] {
+			seen[key] = true
+			entries = append(entries, &discoveryEntry{Type: typ, Name: name})
 		}
 	}
 	attempted, succeeded := false, false
@@ -421,14 +417,14 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 		if source.kind == "hellogithub" {
 			for _, raw := range values {
 				if cached, ok := state.Resolved[raw]; ok {
-					add(cached.Name, now, "github")
+					add(cached.Name, "github")
 				} else if !slices.ContainsFunc(state.Details, func(task *detailTask) bool { return task.URL == raw }) {
-					state.Details = append(state.Details, &detailTask{URL: raw, ListedAt: now, NextAt: now})
+					state.Details = append(state.Details, &detailTask{URL: raw, NextAt: now})
 				}
 			}
 		} else {
 			for _, name := range values {
-				add(name, now, source.typ)
+				add(name, source.typ)
 			}
 		}
 		next = (floorDiv(u.clock.Now()-Hour, Day)+1)*Day + Hour
@@ -474,7 +470,7 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 		}
 		attempted = true
 		attemptedTypes["github"] = true
-		add(name, task.ListedAt, "github")
+		add(name, "github")
 		state.Resolved[task.URL] = resolvedDetail{beijingDay(u.clock.Now()), name}
 		state.Details = slices.DeleteFunc(state.Details, func(v *detailTask) bool { return v == task })
 		succeeded = true

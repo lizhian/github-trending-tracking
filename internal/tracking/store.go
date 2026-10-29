@@ -18,10 +18,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 5
+const SchemaVersion = 6
 const DatabaseName = "tracking.sqlite"
 
-var MigrationNames = []string{"0001_tracking.sql", "0002_free_tier.sql", "0003_tracking_types.sql", "0004_submissions.sql", "0005_homepage.sql"}
+var MigrationNames = []string{"0001_tracking.sql", "0002_free_tier.sql", "0003_tracking_types.sql", "0004_submissions.sql", "0005_homepage.sql", "0006_remove_listing_time.sql"}
 
 type Store struct {
 	DB           *sql.DB
@@ -179,14 +179,17 @@ func Initialize(path string) error {
 }
 
 var tableColumns = map[string][]string{
-	"projects":      {"id", "cycle", "name", "description", "language", "topics", "entered_at", "listed_at", "observed_at", "attempted_at", "error", "stars", "trends", "metadata_at", "type", "repo_id", "homepage"},
+	"projects":      {"id", "cycle", "name", "description", "language", "topics", "entered_at", "observed_at", "attempted_at", "error", "stars", "trends", "metadata_at", "type", "repo_id", "homepage"},
 	"snapshot_days": {"cycle", "day", "hours"},
 	"system_state":  {"key", "value"},
 	"submissions":   {"id", "name", "repo_id", "phase", "github", "linuxdo", "repository_attempts", "readme_attempts", "next_at", "created_at", "finished_at", "message", "merged_into"},
 }
 
 func columnsForVersion(table string, version int) []string {
-	columns := tableColumns[table]
+	columns := slices.Clone(tableColumns[table])
+	if table == "projects" && version < 6 {
+		columns = slices.Insert(columns, 7, "listed_at")
+	}
 	if table == "projects" && version < 5 {
 		return columns[:len(columns)-1]
 	}
@@ -277,21 +280,21 @@ func (s *Store) Policy() (*SamplingPolicy, error) {
 }
 
 type ProjectRow struct {
-	ID, Cycle, Name                              string
-	Description, Language, Homepage              *string
-	Topics                                       string
-	EnteredAt, ListedAt, ObservedAt, AttemptedAt int64
-	Error                                        *string
-	Stars                                        int64
-	Trends                                       string
-	MetadataAt                                   int64
-	Type, RepoID                                 string
+	ID, Cycle, Name                    string
+	Description, Language, Homepage    *string
+	Topics                             string
+	EnteredAt, ObservedAt, AttemptedAt int64
+	Error                              *string
+	Stars                              int64
+	Trends                             string
+	MetadataAt                         int64
+	Type, RepoID                       string
 }
 
-const projectColumns = "id,cycle,name,description,language,topics,entered_at,listed_at,observed_at,attempted_at,error,stars,trends,metadata_at,type,repo_id,homepage"
+const projectColumns = "id,cycle,name,description,language,topics,entered_at,observed_at,attempted_at,error,stars,trends,metadata_at,type,repo_id,homepage"
 
 func scanProject(row interface{ Scan(...any) error }) (p ProjectRow, err error) {
-	err = row.Scan(&p.ID, &p.Cycle, &p.Name, &p.Description, &p.Language, &p.Topics, &p.EnteredAt, &p.ListedAt, &p.ObservedAt, &p.AttemptedAt, &p.Error, &p.Stars, &p.Trends, &p.MetadataAt, &p.Type, &p.RepoID, &p.Homepage)
+	err = row.Scan(&p.ID, &p.Cycle, &p.Name, &p.Description, &p.Language, &p.Topics, &p.EnteredAt, &p.ObservedAt, &p.AttemptedAt, &p.Error, &p.Stars, &p.Trends, &p.MetadataAt, &p.Type, &p.RepoID, &p.Homepage)
 	return
 }
 func (s *Store) ProjectRows(where string, args ...any) ([]ProjectRow, error) {

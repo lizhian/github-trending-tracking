@@ -83,6 +83,6 @@ go run ./cmd/trending verify --db /private/path/restored-data/tracking.sqlite \
 
 实现已通过真实 WAL 并发事务一致快照、停止应用后恢复到空目录、完整审计等价及 HTTP 历史查询验证；生产恢复与下一轮真实采集证据记录在 [#26](https://github.com/lizhian/github-trending-tracking/issues/26)。
 
-## 投稿版本升级
+## 数据库版本升级
 
-当前 schema 为 5，在投稿表（schema 4）基础上为项目增加 Homepage；旧 schema 3、4 备份仍可验证和恢复，但运行前必须在停机状态执行 `trending migrate --db /data/tracking.sqlite`。命令不会创建缺失数据库。先制作一致备份，再停止服务、迁移并启动兼容镜像；完整流程及可信代理限流配置见[仓库投稿](submissions.md)。
+当前 schema 为 6，删除最近上榜列和候选、发现任务中的旧时间字段，保留项目身份、追踪周期、入库时间、Star 历史与重试状态；旧 schema 3、4、5 备份仍可验证和恢复，但运行前必须在停机状态执行 `trending migrate --db /data/tracking.sqlite`。命令不会创建缺失数据库。先制作一致备份，再停止服务、迁移并启动兼容镜像；完整流程及可信代理限流配置见[仓库投稿](submissions.md)。

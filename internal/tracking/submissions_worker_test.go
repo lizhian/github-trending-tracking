@@ -102,7 +102,7 @@ func (h *submissionHarness) result(t *testing.T, id string) Submission {
 	return sub
 }
 
-func TestSubmissionAdmissionIndependentStagesAndNoArtificialListing(t *testing.T) {
+func TestSubmissionAdmissionIndependentStages(t *testing.T) {
 	h := newSubmissionHarness(t)
 	sub := h.enqueue(t, "acme/tool")
 	// Startup's ordinary sampling wait must not postpone intake.
@@ -114,7 +114,7 @@ func TestSubmissionAdmissionIndependentStagesAndNoArtificialListing(t *testing.T
 		t.Fatal(got)
 	}
 	github, _ := h.store.ProjectRows("WHERE type='github'")
-	if len(github) != 1 || github[0].ListedAt != 0 {
+	if len(github) != 1 {
 		t.Fatal(github)
 	}
 	h.step(t)
@@ -132,16 +132,13 @@ func TestSubmissionAdmissionIndependentStagesAndNoArtificialListing(t *testing.T
 		if row.Homepage == nil || *row.Homepage != "https://example.com/tool" {
 			t.Fatal("submission lost homepage", row)
 		}
-		if row.ListedAt != 0 {
-			t.Fatal("submission recorded an artificial listing")
-		}
 	}
 	handler := Handler(h.store, HTTPOptions{Now: func() time.Time { return time.UnixMilli(h.clock.Now()) }})
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/projects", nil))
 	var list ListResult
-	if err = json.Unmarshal(w.Body.Bytes(), &list); err != nil || list.Items[0].ListedAt != nil {
-		t.Fatal("not represented as null", w.Body, err)
+	if err = json.Unmarshal(w.Body.Bytes(), &list); err != nil || len(list.Items) != 1 || strings.Contains(w.Body.String(), `"listedAt"`) {
+		t.Fatal("unexpected submitted projects", w.Body, err)
 	}
 	original := github[0]
 	readmes := h.readmes
@@ -155,20 +152,10 @@ func TestSubmissionAdmissionIndependentStagesAndNoArtificialListing(t *testing.T
 	if github[0].Cycle != original.Cycle || github[0].EnteredAt != original.EnteredAt {
 		t.Fatal("duplicate reset protection/cycle")
 	}
-	// Existing discovery writes a real listing through the same observation writer.
-	repo, _ := rowRepository(github[0])
-	listed := h.clock.Now() + Hour
-	if err = h.store.saveObservations(context.Background(), []observation{{repo: repo, previous: &github[0], listedAt: &listed, observedAt: listed}}, listed, nil); err != nil {
-		t.Fatal(err)
-	}
-	github, _ = h.store.ProjectRows("WHERE type='github'")
-	if github[0].ListedAt != listed {
-		t.Fatal("real discovery did not replace absent listing")
-	}
 	if _, err = h.store.DB.Exec("DELETE FROM projects WHERE type='github'"); err != nil {
 		t.Fatal(err)
 	}
-	h.clock.advance(listed + Hour)
+	h.clock.advance(h.clock.Now() + 2*Hour)
 	reentered := h.enqueue(t, "acme/tool")
 	h.step(t)
 	h.step(t)

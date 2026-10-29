@@ -105,7 +105,7 @@ func TestInitialEmptyTypeIsNotCachedAndNonemptyQueriesExpire(t *testing.T) {
 		t.Fatal("not initially empty")
 	}
 	trends := `{"24":{"delta":null,"state":"accumulating","start":1,"end":1,"gaps":[]},"72":{"delta":null,"state":"accumulating","start":1,"end":1,"gaps":[]},"168":{"delta":null,"state":"accumulating","start":1,"end":1,"gaps":[]},"720":{"delta":null,"state":"accumulating","start":1,"end":1,"gaps":[]}}`
-	_, err = store.DB.Exec("INSERT INTO projects(id,cycle,name,topics,entered_at,listed_at,observed_at,attempted_at,stars,trends,type,repo_id) VALUES('linux.do:R_1','new-cycle','acme/new','[]',1,1,1,1,100,?,'linux.do','R_1')", trends)
+	_, err = store.DB.Exec("INSERT INTO projects(id,cycle,name,topics,entered_at,observed_at,attempted_at,stars,trends,type,repo_id) VALUES('linux.do:R_1','new-cycle','acme/new','[]',1,1,1,100,?,'linux.do','R_1')", trends)
 	if err != nil {
 		t.Fatal(err)
 	}

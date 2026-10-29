@@ -35,7 +35,6 @@ type Project struct {
 	Topics      []string             `json:"topics"`
 	Stars       int64                `json:"stars"`
 	EnteredAt   int64                `json:"enteredAt"`
-	ListedAt    *int64               `json:"listedAt"`
 	ObservedAt  int64                `json:"observedAt"`
 	AttemptedAt int64                `json:"attemptedAt"`
 	Error       *string              `json:"error"`

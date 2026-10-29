@@ -78,16 +78,22 @@ func (s *Scheduler) cleanup(ctx context.Context, now int64, policy *SamplingPoli
 			if a.score > b.score {
 				return 1
 			}
-			if a.row.ListedAt < b.row.ListedAt {
-				return -1
-			}
-			if a.row.ListedAt > b.row.ListedAt {
-				return 1
-			}
 			if a.delta < b.delta {
 				return -1
 			}
 			if a.delta > b.delta {
+				return 1
+			}
+			if a.row.Stars < b.row.Stars {
+				return -1
+			}
+			if a.row.Stars > b.row.Stars {
+				return 1
+			}
+			if a.row.EnteredAt < b.row.EnteredAt {
+				return -1
+			}
+			if a.row.EnteredAt > b.row.EnteredAt {
 				return 1
 			}
 			return EnglishCompare(a.row.ID, b.row.ID)

@@ -36,7 +36,7 @@ func backupFixture(t *testing.T) (*tracking.Store, string, time.Time) {
 		trends[width] = tracking.TrendSummary{Delta: &delta, State: "partial", Start: &a, End: &b, Gaps: []tracking.Gap{}}
 	}
 	raw, _ := json.Marshal(trends)
-	_, err = store.DB.Exec("INSERT INTO projects(id,cycle,name,topics,entered_at,listed_at,observed_at,attempted_at,stars,trends,type,repo_id) VALUES('github:R_1','original','acme/one','[\"tools\"]',?,?,?,?,110,?,'github','R_1')", start-tracking.Day, start, end, end, string(raw))
+	_, err = store.DB.Exec("INSERT INTO projects(id,cycle,name,topics,entered_at,observed_at,attempted_at,stars,trends,type,repo_id) VALUES('github:R_1','original','acme/one','[\"tools\"]',?,?,?,110,?,'github','R_1')", start-tracking.Day, end, end, string(raw))
 	if err != nil {
 		t.Fatal(err)
 	}

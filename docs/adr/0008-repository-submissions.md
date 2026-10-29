@@ -4,6 +4,8 @@ status: accepted
 
 # 通过持久化队列异步处理仓库投稿
 
+[ADR-0011](0011-remove-listing-time.md) 删除了下文的最近上榜和尚未上榜语义，相关字段通过后续迁移移除；投稿流程继续有效。
+
 采样时段、重试下限及 Linux.do 主 RSS 的后续调整见 [ADR-0009](0009-hourly-daytime-sampling-and-five-minute-retries.md)；下文保留原决策背景。
 
 2026-10-29，用户要求允许匿名访客提交 GitHub 仓库地址，无需登录或人工审核，经过基本频率限制后自动处理。用户已确认面向 Go + SQLite 版本：HTTP 请求先将投稿写入独立持久化队列表，再由后台 goroutine 获取仓库资料并处理收录，避免请求响应依赖 GitHub 请求完成。此决定补充 ADR-0005 原先“不引入队列”的范围；普通采集的重启恢复语义不因此改变。
