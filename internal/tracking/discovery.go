@@ -95,7 +95,7 @@ var sources = []source{
 var projectTypes = []string{"github", "linux.do"}
 
 // strptr 返回字符串地址，用于可空文本；用途与 trends.go 的 ptr 相同。
-func strptr(s string) *string   { return &s }
+func strptr(s string) *string { return &s }
 
 // beijingDay 将 Unix 毫秒换成北京时间日序号，只用于分日，返回值不是毫秒时间戳。
 func beijingDay(at int64) int64 { return floorDiv(at+8*Hour, Day) }
@@ -369,19 +369,26 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 		}
 		priorTypes[typ] = v
 	}
+	sourcePolicy := policy
+	if policy != nil {
+		copy := *policy
+		copy.HourlyAt = 0
+		copy.Version = min(copy.Version, 3)
+		sourcePolicy = &copy
+	}
 	u := s.upstream
 	// 预算只约束本轮发现来源与详情请求；后续仓库准入/采样有自己的单请求超时。
 	deadline := u.clock.Now() + 3*60_000
 	changed := false
-	if policy != nil && now >= policy.EffectiveAt && state.ScheduleVersion != policy.Version {
+	if policy != nil && now >= policy.EffectiveAt && state.ScheduleVersion != sourcePolicy.Version {
 		for _, source := range sources {
 			previous := state.Sources[source.id]
 			if !source.scheduled || previous == nil {
 				continue
 			}
-			next := SamplingSlot(now, policy)
+			next := SamplingSlot(now, sourcePolicy)
 			if previous.SucceededAt != nil {
-				next = nextExpected(*previous.SucceededAt, policy)
+				next = nextExpected(*previous.SucceededAt, sourcePolicy)
 			}
 			backoff := int64(0)
 			if previous.Failed > 0 {
@@ -389,7 +396,7 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 			}
 			previous.NextAt = max(next, backoff)
 		}
-		state.ScheduleVersion = policy.Version
+		state.ScheduleVersion = sourcePolicy.Version
 		changed = true
 	}
 	for key, v := range state.Resolved {
@@ -410,6 +417,9 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 	attemptedTypes, succeededTypes := map[string]bool{}, map[string]bool{}
 	for _, source := range sources {
 		previous := state.Sources[source.id]
+		if source.scheduled && previous == nil && now < nextSlot(s.options.StartedAt, SamplingHours) {
+			continue
+		}
 		next := int64(0)
 		if previous != nil {
 			next = previous.NextAt
@@ -495,7 +505,7 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 		next = (floorDiv(u.clock.Now()-Hour, Day)+1)*Day + Hour
 		if source.scheduled {
 			if policy != nil && u.clock.Now() >= policy.EffectiveAt {
-				next = nextExpected(u.clock.Now(), policy)
+				next = nextExpected(u.clock.Now(), sourcePolicy)
 			} else {
 				next = (floorDiv(u.clock.Now(), Hour) + 1) * Hour
 			}

@@ -72,7 +72,11 @@ func beijing(s string) int64 {
 // 默认解码到 any 的 JSON 数字是 float64，因此下面断言常写 float64(1)，不是 Go 隐式数值转换。
 func requestJSON(t *testing.T, s *tracking.Store, c *testClock, path string) map[string]any {
 	t.Helper()
-	h := tracking.Handler(s, tracking.HTTPOptions{Now: func() time.Time { return time.UnixMilli(c.at) }})
+	lists := tracking.NewListCache(s, func() time.Time { return time.UnixMilli(c.at) })
+	if e := lists.Refresh(); e != nil {
+		t.Fatal(e)
+	}
+	h := tracking.Handler(s, tracking.HTTPOptions{Lists: lists, Now: func() time.Time { return time.UnixMilli(c.at) }})
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
 	if w.Code != 200 {
@@ -270,9 +274,9 @@ func (h *collectionHarness) list(typ string) map[string]any {
 	return requestJSON(h.t, h.store, h.clock, "/api/projects?type="+typ)
 }
 
-// history 通过公开历史 API 读取 30 天窗口，避免只检查内部实现而漏掉响应错误。
+// history 通过公开历史 API 读取 24 小时窗口，避免只检查内部实现而漏掉响应错误。
 func (h *collectionHarness) history(id string) map[string]any {
-	return requestJSON(h.t, h.store, h.clock, "/api/projects/"+id+"/history?window=720")
+	return requestJSON(h.t, h.store, h.clock, "/api/projects/"+id+"/history?window=24")
 }
 
 // TestAttachmentLinksNeverBecomeCandidatesAndOldPendingIsPersistentlyRemoved 验证附件链接不成为仓库候选，
@@ -360,8 +364,8 @@ func TestLegacyMixedStatusUsesActualProjectErrorsBeforeNextSamplingSlot(t *testi
 	if _, err := h.store.DB.Exec("UPDATE projects SET error='GitHub HTTP 503',attempted_at=? WHERE id='github:R_0'", first+5*60_000); err != nil {
 		t.Fatal(err)
 	}
-	// 即使筛选隐藏了失败项目，也必须继续显示当前追踪类型的更新异常。
-	status = requestJSON(t, h.store, h.clock, "/api/projects?type=github&q=two")["status"].(map[string]any)
+	// 全量列表必须继续显示当前追踪类型的更新异常。
+	status = requestJSON(t, h.store, h.clock, "/api/projects?type=github")["status"].(map[string]any)
 	if status["collection"].(map[string]any)["failed"] != float64(1) || status["collection"].(map[string]any)["error"] != "GitHub HTTP 503" || status["admission"].(map[string]any)["failed"] != float64(1) {
 		t.Fatal("legacy compatibility hid a real sampling failure", status)
 	}
@@ -562,8 +566,8 @@ func seedMatureProjects(t *testing.T, h *collectionHarness, count int, at int64)
 		if _, e = tx.Exec(`INSERT INTO projects(id,type,repo_id,cycle,name,topics,entered_at,observed_at,attempted_at,error,stars,trends,metadata_at) VALUES(?,'github',?,?,?,'[]',?,?,?,?,?,?,?)`, "github:"+id, id, "cycle-"+id, name, entered, at, at, errorValue, stars, mustJSON(trends), at); e != nil {
 			t.Fatal(e)
 		}
-		for _, p := range [][2]int64{{at - tracking.Day, 100}, {at, stars}} {
-			if _, e = tx.Exec(`INSERT INTO snapshot_days(cycle,day,hours) VALUES(?,?,?)`, "cycle-"+id, p[0]/tracking.Day, mustJSON(map[string]any{fmt.Sprint(p[0] / tracking.Hour): p})); e != nil {
+		for _, p := range [][2]int64{{at - tracking.Day - 3*tracking.Hour, 100}, {at - tracking.Day, 100}, {at, stars}} {
+			if _, e = tx.Exec(`INSERT INTO snapshot_days(cycle,day,hours) VALUES(?,?,?) ON CONFLICT(cycle,day) DO UPDATE SET hours=json_patch(hours,excluded.hours)`, "cycle-"+id, p[0]/tracking.Day, mustJSON(map[string]any{fmt.Sprint(p[0] / tracking.Hour): p})); e != nil {
 				t.Fatal(e)
 			}
 		}
@@ -576,7 +580,7 @@ func seedMatureProjects(t *testing.T, h *collectionHarness, count int, at int64)
 // TestCleanupRunsDuringStartupWaitProtectsYoungProjectsAndReentryStartsNewHistory 确认启动等待期间仍可常规淘汰、保护年轻项目；淘汰项目再发现时开启新历史，
 // 不能继承旧周期。
 func TestCleanupRunsDuringStartupWaitProtectsYoungProjectsAndReentryStartsNewHistory(t *testing.T) {
-	start := beijing("2026-10-02T03:50:00")
+	start := beijing("2026-10-02T04:01:00")
 	h := newCollectionHarness(t, start)
 	h.names = make([]string, 504)
 	h.stars = make([]int64, 504)
@@ -584,9 +588,9 @@ func TestCleanupRunsDuringStartupWaitProtectsYoungProjectsAndReentryStartsNewHis
 		h.names[i] = fmt.Sprintf("acme/repo-%d", i)
 		h.stars[i] = 200
 	}
-	observed := beijing("2026-10-02T01:00:00")
+	observed := beijing("2026-10-02T03:00:00")
 	seedMatureProjects(t, h, 504, observed)
-	if e := h.store.SetState("sampling_policy", map[string]any{"version": 2, "effectiveAt": observed - 7*tracking.Day}); e != nil {
+	if e := h.store.SetState("sampling_policy", map[string]any{"version": 4, "effectiveAt": observed - 40*tracking.Day, "hourlyAt": observed - 31*tracking.Day}); e != nil {
 		t.Fatal(e)
 	}
 	h.tick(beijing("2026-10-02T04:00:00"))
@@ -628,26 +632,39 @@ func TestCleanupOrdersByScoreDeltaStarsEntryTimeAndID(t *testing.T) {
 		{"stable ID", [2][4]int64{}, [2]int64{100, 100}, [2]int64{2, 2}, "github:R_0"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := newCollectionHarness(t, beijing("2026-10-02T03:50:00"))
-			observed := beijing("2026-10-02T01:00:00")
+			h := newCollectionHarness(t, beijing("2026-10-02T04:01:00"))
+			observed := beijing("2026-10-02T03:00:00")
 			seedMatureProjects(t, h, 501, observed)
-			if err := h.store.SetState("sampling_policy", map[string]any{"version": 2, "effectiveAt": observed - 7*tracking.Day}); err != nil {
+			if err := h.store.SetState("sampling_policy", map[string]any{"version": 4, "effectiveAt": observed - 40*tracking.Day, "hourlyAt": observed - 31*tracking.Day}); err != nil {
 				t.Fatal(err)
 			}
-			trends := func(deltas [4]int64) string {
-				values := map[string]any{}
-				for i, width := range tracking.Windows {
-					values[fmt.Sprint(width)] = map[string]any{"start": observed - tracking.Day, "end": observed, "delta": deltas[i], "gaps": []any{}}
-				}
-				return mustJSON(values)
-			}
-			if _, err := h.store.DB.Exec("UPDATE projects SET trends=?", trends([4]int64{100, 100, 100, 100})); err != nil {
+			if _, err := h.store.DB.Exec("UPDATE projects SET stars=200"); err != nil {
 				t.Fatal(err)
 			}
-			// range 也能遍历非负整数：这里 i 依次为 0、1，不是遍历名为 2 的集合。
+			path := fmt.Sprintf(`$."%d"`, observed/tracking.Hour)
+			if _, err := h.store.DB.Exec("UPDATE snapshot_days SET hours=json_set(hours,?,json(?)) WHERE day=?", path, mustJSON([2]int64{observed, 200}), observed/tracking.Day); err != nil {
+				t.Fatal(err)
+			}
+			// Set independent window baselines in real retained history, not cached summaries.
 			for i := range 2 {
-				if _, err := h.store.DB.Exec("UPDATE projects SET trends=?,stars=?,entered_at=? WHERE id=?", trends(tc.deltas[i]), tc.stars[i], observed-tc.ageDays[i]*tracking.Day, fmt.Sprintf("github:R_%d", i)); err != nil {
+				id := fmt.Sprintf("github:R_%d", i)
+				if _, err := h.store.DB.Exec("UPDATE projects SET stars=?,entered_at=? WHERE id=?", tc.stars[i], observed-tc.ageDays[i]*tracking.Day, id); err != nil {
 					t.Fatal(err)
+				}
+				cycle := fmt.Sprintf("cycle-R_%d", i)
+				if _, err := h.store.DB.Exec("DELETE FROM snapshot_days WHERE cycle=?", cycle); err != nil {
+					t.Fatal(err)
+				}
+				times := []int64{observed - tracking.Day, observed - 3*tracking.Day, observed - 7*tracking.Day + 3*tracking.Hour, observed - 30*tracking.Day + 21*tracking.Hour, observed}
+				for j, at := range times {
+					stars := tc.stars[i]
+					if j < 4 {
+						stars -= tc.deltas[i][j]
+					}
+					raw := mustJSON(map[string]any{fmt.Sprint(at / tracking.Hour): [2]int64{at, stars}})
+					if _, err := h.store.DB.Exec(`INSERT INTO snapshot_days VALUES(?,?,?) ON CONFLICT(cycle,day) DO UPDATE SET hours=json_patch(hours,excluded.hours)`, cycle, at/tracking.Day, raw); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			h.tick(beijing("2026-10-02T04:00:00"))
@@ -800,7 +817,7 @@ func TestHundredRepositoryBatchesUpdateBothTypesAndCompletedRoundStaysIdle(t *te
 		for i := 0; i < 500; i += 99 {
 			history := h.history(fmt.Sprintf("%s:R_%d", typ, i))
 			points := history["points"].([]any)
-			if len(points) != 3 || points[2].([]any)[1] != float64(300) {
+			if len(points) != 2 || points[1].([]any)[1] != float64(300) {
 				t.Fatal(history)
 			}
 		}

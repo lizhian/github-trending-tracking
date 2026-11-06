@@ -2,7 +2,7 @@
 
 [线上站点](https://github.lizhian.cc.cd/) · [实施与迁移记录](https://github.com/lizhian/github-trending-tracking/issues/21)
 
-无需登录的中文只读趋势站，从 GitHub Trending、HelloGithub、OpenGithubs 与 Linux.do 发现项目，记录真实 Star 变化。可切换 GitHub / Linux.do 追踪类型，搜索筛选、排序分页，查看 24 小时、3 天、7 天和 30 天趋势。保留移动端、浅深色主题、键盘操作和 URL 状态恢复。
+无需登录的中文只读趋势站，从 GitHub Trending、HelloGithub、OpenGithubs 与 Linux.do 发现项目，记录真实 Star 变化。可切换 GitHub / Linux.do 追踪类型，前端搜索筛选、排序并全量展示，查看 24 小时、3 天、7 天和 30 天趋势。保留移动端、浅深色主题、键盘操作和 URL 状态恢复。
 
 单个 Go 应用容器提供 React/TypeScript 静态前端、同源只读 API 和串行采集循环，SQLite 整个数据目录挂载本地磁盘。镜像同时支持 `linux/amd64` 与 `linux/arm64`，服务器手动按 digest 更新。后续运行、发布与恢复统一使用 Go、SQLite 和 Docker。
 
@@ -29,7 +29,7 @@ BACKUP_DIR="$PWD/backups" ALLOWED_ORIGIN=http://localhost:8080 npm run dev:go
 
 ## 数据与维护
 
-两种类型独立收录和淘汰，同仓库共享一次 Star 请求，各自保留周期和历史。每类型目标 500 项，24 小时保护期和可靠观测要求优先，允许暂时超额。查询严格取最近 30 天真实观测，负净增量照常显示，缺测不补零或插值；不足两个有效快照显示“积累中”。列表最多缓存 10 分钟。
+两种类型独立收录和淘汰，同仓库共享一次 Star 请求，各自保留周期和历史。每类型目标 500 项，24 小时保护期和可靠观测要求优先，允许暂时超额。查询取最近 30 天真实观测并始终保留最新快照，负净增量照常显示，缺测不补零或插值；不足两个有效快照显示“积累中”。Star 全天每小时采集；历史按 24 小时全小时、3 天每 3 小时、7 天每 6 小时、30 天每日零点分层保留，各窗口附加最新快照。两类全量列表后台每 10 分钟生成原始 JSON 与 gzip 缓存，失败保留上次结果；页面只在首次进入、切换类型或手动刷新时获取列表，筛选排序在本地完成。
 
 每天一次同机全量一致备份，保留三天；备份和活动数据库使用独立持久目录。恢复需停应用、保留故障文件并校验备份，重启仍等待下一轮。具体时段、趋势和淘汰规则见 [采集说明](docs/go-collection.md)、[术语表](GLOSSARY.md) 与 [架构决策](docs/adr/)。
 

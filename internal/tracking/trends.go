@@ -5,7 +5,6 @@ package tracking
 
 import (
 	"encoding/json"
-	"fmt"
 	"math"
 )
 
@@ -18,16 +17,18 @@ const SamplingGrace int64 = 10 * 60_000
 
 // 趋势宽度以小时为单位；与毫秒常量 Hour 相乘后才是时间跨度。
 var Windows = []int{24, 72, 168, 720}
-// 当前北京时间计划：09–21 每小时，夜间每两小时，共十八轮；legacy 仅用于解释旧历史。
+
+// 趋势源继续使用十八轮计划；Star 的当前计划为全天逐小时。
 var SamplingHours = []int64{1, 3, 5, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 23}
 var legacySamplingHours = []int64{1, 5, 9, 11, 13, 15, 17, 19, 21}
 
-// SamplingPolicy 记录历史采样规则的两个生效边界，避免用新时刻表误判旧历史缺测。
+// SamplingPolicy 记录历史采样规则的生效边界，避免用新时刻表误判旧历史缺测。
 // omitempty 仅控制 JSON 编码时省略零值，不会改变字段本身的 Go 零值。
 type SamplingPolicy struct {
 	Version         int   `json:"version"`
 	EffectiveAt     int64 `json:"effectiveAt"`
 	HourlyDaytimeAt int64 `json:"hourlyDaytimeAt,omitempty"`
+	HourlyAt        int64 `json:"hourlyAt,omitempty"`
 }
 
 // Point 一个 Star 快照：[Unix 毫秒时间, Star 总数]。
@@ -56,14 +57,14 @@ type Trend struct {
 
 // ptr 返回数值的地址，用指针表达“有值”。Go 允许返回局部变量地址，编译器保证其存活期，
 // 不需要像手动内存管理语言那样担心这里返回悬空栈指针。
-func ptr(n int64) *int64        { return &n }
+func ptr(n int64) *int64 { return &n }
 
 // floorDiv 向负无穷取整的除法，用于时间桶；Go 整数除法向零截断，负时间时语义不同。
 func floorDiv(a, b int64) int64 { return int64(math.Floor(float64(a) / float64(b))) }
 
 // LatestSlot 返回当前时刻表中不晚于 at 的最近采样时段，单位为 Unix 毫秒。
 func LatestSlot(at int64) int64 {
-	return latestSlot(at, SamplingHours)
+	return floorDiv(at, Hour) * Hour
 }
 
 // latestSlot 按给定升序时刻表从后向前查找最近时段；当天尚未开始则退到前一天末次时段。
@@ -81,7 +82,7 @@ func latestSlot(at int64, hours []int64) int64 {
 
 // NextSlot 返回严格晚于 at 的下一采样时段；恰逢整点启动也等待下一轮，不补跑当前轮。
 func NextSlot(at int64) int64 {
-	return nextSlot(at, SamplingHours)
+	return (floorDiv(at, Hour) + 1) * Hour
 }
 
 // nextSlot 按给定升序时刻表找下一个时段，跨日时转到明天的首个时段。
@@ -104,14 +105,17 @@ func SamplingSlot(at int64, p *SamplingPolicy) int64 {
 	return observationSlot(at, p)
 }
 
-// observationSlot 依据两个生效边界选择历史规则：早期逐小时、旧九时段、当前十八时段。
+// observationSlot 依据生效边界选择早期小时制、九时段、十八时段和全天小时制。
 // 边界前的递归回退避免将尚未生效的新时段当作真实应采时段。
 func observationSlot(at int64, p *SamplingPolicy) int64 {
 	if p == nil || at < p.EffectiveAt {
 		return floorDiv(at, Hour) * Hour
 	}
+	if p.HourlyAt > 0 && at >= p.HourlyAt {
+		return floorDiv(at, Hour) * Hour
+	}
 	if p.HourlyDaytimeAt > 0 && at >= p.HourlyDaytimeAt {
-		slot := LatestSlot(at)
+		slot := latestSlot(at, SamplingHours)
 		if slot >= p.HourlyDaytimeAt {
 			return slot
 		}
@@ -130,12 +134,22 @@ func nextExpected(at int64, p *SamplingPolicy) int64 {
 	if p == nil || hourly < p.EffectiveAt {
 		return hourly
 	}
+	if p.HourlyAt > 0 && hourly >= p.HourlyAt {
+		return hourly
+	}
 	if p.HourlyDaytimeAt > 0 && at >= p.HourlyDaytimeAt {
-		return NextSlot(at)
+		next := nextSlot(at, SamplingHours)
+		if p.HourlyAt > 0 && next >= p.HourlyAt {
+			return p.HourlyAt
+		}
+		return next
 	}
 	next := nextSlot(max(at, p.EffectiveAt-1), legacySamplingHours)
 	if p.HourlyDaytimeAt > 0 && next >= p.HourlyDaytimeAt {
-		return NextSlot(p.HourlyDaytimeAt - 1)
+		next = nextSlot(p.HourlyDaytimeAt-1, SamplingHours)
+	}
+	if p.HourlyAt > 0 && next >= p.HourlyAt {
+		return p.HourlyAt
 	}
 	return next
 }
@@ -161,9 +175,16 @@ func IsStale(observedAt, now int64, p *SamplingPolicy) bool {
 // 完整观测仅指覆盖范围足够，并不保证窗口内部没有缺测。
 func CompleteWindow(start, end int64, hours int, p *SamplingPolicy) bool {
 	boundary := end - int64(hours)*Hour
-	latestStart := boundary + Hour
-	if p != nil && boundary >= p.EffectiveAt {
-		latestStart = nextExpected(boundary-1, p) + SamplingGrace
+	latestStart := nextWindowSlot(boundary-1, hours, p)
+	if latestStart > boundary+2*Day {
+		latestStart = boundary + windowStep(hours)*Hour
+	}
+	latestStart += SamplingGrace
+	if hours == 24 {
+		latestStart = boundary + Hour
+		if p != nil && boundary >= p.EffectiveAt {
+			latestStart = nextExpected(boundary-1, p) + SamplingGrace
+		}
 	}
 	return start <= latestStart
 }
@@ -173,7 +194,7 @@ func CompleteWindow(start, end int64, hours int, p *SamplingPolicy) bool {
 func WindowTrend(points []Point, hours int, now int64, p *SamplingPolicy) Trend {
 	valid := []Point{}
 	for _, point := range points {
-		if point[0] >= now-Retention && point[0] <= now {
+		if point[0] <= now && (point[0] >= now-Retention || point == points[len(points)-1]) {
 			valid = append(valid, point)
 		}
 	}
@@ -181,7 +202,7 @@ func WindowTrend(points []Point, hours int, now int64, p *SamplingPolicy) Trend 
 	if len(valid) > 0 {
 		end := valid[len(valid)-1][0]
 		for _, point := range valid {
-			if point[0] >= end-int64(hours)*Hour {
+			if point[0] >= end-int64(hours)*Hour && (point[0] == end || windowSlot(SamplingSlot(point[0], p), hours)) {
 				selected = append(selected, point)
 			}
 		}
@@ -201,49 +222,77 @@ func WindowTrend(points []Point, hours int, now int64, p *SamplingPolicy) Trend 
 		}
 	}
 	for i := 1; i < len(selected); i++ {
-		if MissedSampling(selected[i-1][0], selected[i][0], p) {
+		if nextWindowSlot(SamplingSlot(selected[i-1][0], p), hours, p) < SamplingSlot(selected[i][0], p) {
 			summary.Gaps = append(summary.Gaps, Gap{selected[i-1][0], selected[i][0]})
 		}
 	}
 	return Trend{TrendSummary: summary, Points: selected}
 }
 
-// ProjectViews 将持久化行转换为 API 项目，保留有效摘要，仅对基准已超出 30 天范围的窗口重算。
-// 这里读取历史，不改写数据库；同时按当前时间计算过期状态，避免陈旧摘要伪装成完整观测。
-func (s *Store) ProjectViews(rows []ProjectRow, now int64, policy *SamplingPolicy) ([]Project, error) {
-	// 预留长度上限可减少 append 扩容；当前 len=0，不能直接 items[0] 赋值。
-	items := make([]Project, 0, len(rows))
-	expired := []string{}
-	// map/slice 的零值都是 nil：nil slice 可遍历和 append，nil map 可查询但不能写入。
-	// 下面 json.Unmarshal 解码 JSON 对象时会初始化 map；若手工新增键，须先用 make 或 map 字面量初始化。
-	for _, row := range rows {
-		var trends map[int]TrendSummary
-		if err := json.Unmarshal([]byte(row.Trends), &trends); err != nil {
-			return nil, err
+// windowSlot selects Beijing sampling rounds for a trend window.
+func windowStep(hours int) int64 {
+	switch hours {
+	case 72:
+		return 3
+	case 168:
+		return 6
+	case 720:
+		return 24
+	default:
+		return 1
+	}
+}
+
+func windowSlot(slot int64, hours int) bool {
+	return floorDiv(slot+8*Hour, Hour)%windowStep(hours) == 0
+}
+
+func nextWindowSlot(at int64, hours int, p *SamplingPolicy) int64 {
+	// Historical schedules may contain no matching round (e.g. no midnight).
+	// Search a full repeating schedule, then jump only to a future policy boundary.
+	for slot := nextExpected(at, p); slot <= at+2*Day; slot = nextExpected(slot, p) {
+		if windowSlot(slot, hours) {
+			return slot
 		}
-		needsHistory := false
+	}
+	if p != nil {
+		for _, boundary := range []int64{p.EffectiveAt, p.HourlyDaytimeAt, p.HourlyAt} {
+			if boundary > at+2*Day {
+				return nextWindowSlot(boundary-1, hours, p)
+			}
+		}
+	}
+	return math.MaxInt64 - SamplingGrace
+}
+
+// projectHistory pins history to the project version already read. Collection may
+// commit between row and history reads; never mix its newer points into old metadata.
+func projectHistory(row ProjectRow, history []Point) []Point {
+	points := make([]Point, 0, len(history)+1)
+	for _, point := range history {
+		if point[0] < row.ObservedAt {
+			points = append(points, point)
+		}
+	}
+	return append(points, Point{row.ObservedAt, row.Stars})
+}
+
+// ProjectViews computes all summaries from the same retained history used by details.
+func (s *Store) ProjectViews(rows []ProjectRow, now int64, policy *SamplingPolicy) ([]Project, error) {
+	cycles := make([]string, 0, len(rows))
+	for _, row := range rows {
+		cycles = append(cycles, row.Cycle)
+	}
+	histories, err := s.Histories(cycles, now)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]Project, 0, len(rows))
+	for _, row := range rows {
+		trends := map[int]TrendSummary{}
+		points := projectHistory(row, histories[row.Cycle])
 		for _, width := range Windows {
-			trend, ok := trends[width]
-			if !ok {
-				return nil, fmt.Errorf("project %s is missing a trend window", row.ID)
-			}
-			if trend.Gaps == nil {
-				trend.Gaps = []Gap{}
-			}
-			if trend.Delta == nil {
-				trend.State = "accumulating"
-			} else if trend.Start == nil || trend.End == nil {
-				return nil, fmt.Errorf("project %s has an invalid trend", row.ID)
-			} else if CompleteWindow(*trend.Start, *trend.End, width, policy) {
-				trend.State = "complete"
-			} else {
-				trend.State = "partial"
-			}
-			if trend.Start != nil && *trend.Start < now-Retention {
-				needsHistory = true
-			}
-			// 从 map 取出的结构体 trend 是副本；修改后要放回 map，才能保留字段更新。
-			trends[width] = trend
+			trends[width] = WindowTrend(points, width, now, policy).TrendSummary
 		}
 		var topics []string
 		if err := json.Unmarshal([]byte(row.Topics), &topics); err != nil {
@@ -253,46 +302,6 @@ func (s *Store) ProjectViews(rows []ProjectRow, now int64, policy *SamplingPolic
 			topics = []string{}
 		}
 		items = append(items, Project{ID: row.ID, Type: row.Type, RepoID: row.RepoID, Name: row.Name, Description: row.Description, Homepage: row.Homepage, Language: row.Language, Topics: topics, Stars: row.Stars, EnteredAt: row.EnteredAt, ObservedAt: row.ObservedAt, AttemptedAt: row.AttemptedAt, Error: row.Error, Stale: IsStale(row.ObservedAt, now, policy), Trends: trends})
-		if needsHistory {
-			expired = append(expired, row.Cycle)
-		}
-	}
-	histories, err := s.Histories(expired, now)
-	if err != nil {
-		return nil, err
-	}
-	for i, item := range items {
-		for _, width := range Windows {
-			trend := item.Trends[width]
-			if trend.Start == nil || *trend.Start >= now-Retention {
-				continue
-			}
-			updated := TrendSummary{State: "accumulating", Gaps: []Gap{}}
-			if item.ObservedAt >= now-Retention {
-				first := Point{item.ObservedAt, item.Stars}
-				for _, point := range histories[rows[i].Cycle] {
-					if point[0] >= max(now-Retention, item.ObservedAt-int64(width)*Hour) && point[0] <= item.ObservedAt {
-						first = point
-						break
-					}
-				}
-				updated.Start = ptr(first[0])
-				updated.End = ptr(item.ObservedAt)
-				if item.ObservedAt > first[0] {
-					updated.Delta = ptr(item.Stars - first[1])
-					updated.State = "partial"
-					if CompleteWindow(first[0], item.ObservedAt, width, policy) {
-						updated.State = "complete"
-					}
-				}
-				for _, gap := range item.Trends[720].Gaps {
-					if gap[0] >= first[0] && gap[1] <= item.ObservedAt {
-						updated.Gaps = append(updated.Gaps, gap)
-					}
-				}
-			}
-			items[i].Trends[width] = updated
-		}
 	}
 	return items, nil
 }

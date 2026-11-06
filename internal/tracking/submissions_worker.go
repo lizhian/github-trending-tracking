@@ -316,9 +316,6 @@ func (w *SubmissionWorker) admit(ctx context.Context, sub *Submission, repo *rep
 		}
 		return w.checkpoint(ctx, tx, sub)
 	})
-	if err == nil && !tracked {
-		s.store.listRevision.Add(1)
-	}
 	return err
 }
 

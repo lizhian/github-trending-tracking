@@ -24,7 +24,7 @@ type submissionTestClock struct {
 }
 
 // Now 加锁读取当前模拟时间；短方法中的 defer 仍在方法返回前释放锁。
-func (c *submissionTestClock) Now() int64       { c.mu.Lock(); defer c.mu.Unlock(); return c.at }
+func (c *submissionTestClock) Now() int64 { c.mu.Lock(); defer c.mu.Unlock(); return c.at }
 
 // advance 将模拟时间设置到指定毫秒，常用于精确抵达重试边界。
 func (c *submissionTestClock) advance(at int64) { c.mu.Lock(); c.at = at; c.mu.Unlock() }
@@ -159,7 +159,11 @@ func TestSubmissionAdmissionIndependentStages(t *testing.T) {
 			t.Fatal("submission lost homepage", row)
 		}
 	}
-	handler := Handler(h.store, HTTPOptions{Now: func() time.Time { return time.UnixMilli(h.clock.Now()) }})
+	lists := NewListCache(h.store, func() time.Time { return time.UnixMilli(h.clock.Now()) })
+	if err := lists.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	handler := Handler(h.store, HTTPOptions{Lists: lists, Now: func() time.Time { return time.UnixMilli(h.clock.Now()) }})
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/projects", nil))
 	var list ListResult
@@ -466,8 +470,8 @@ func TestSubmissionAdmissionCheckpointIsAtomicAndCancellationIsFree(t *testing.T
 	}
 }
 
-// TestSubmissionListCacheInvalidatesAndCleanupGateRejects 先生成可缓存列表再收录新项目，验证立即失效；随后设置清洗门禁，确认消费者暂停且不请求上游。
-func TestSubmissionListCacheInvalidatesAndCleanupGateRejects(t *testing.T) {
+// TestSubmissionListWaitsForRefreshAndCleanupGateRejects 先生成可缓存列表再收录新项目，验证立即失效；随后设置清洗门禁，确认消费者暂停且不请求上游。
+func TestSubmissionListWaitsForRefreshAndCleanupGateRejects(t *testing.T) {
 	h := newSubmissionHarness(t)
 	var repo repository
 	if err := json.Unmarshal([]byte(submissionRepository), &repo); err != nil {
@@ -478,7 +482,11 @@ func TestSubmissionListCacheInvalidatesAndCleanupGateRejects(t *testing.T) {
 	if err := h.store.saveObservations(context.Background(), []observation{{repo: &repo}}, h.clock.Now(), nil); err != nil {
 		t.Fatal(err)
 	}
-	handler := Handler(h.store, HTTPOptions{Submissions: h.worker, Now: func() time.Time { return time.UnixMilli(h.clock.Now()) }})
+	lists := NewListCache(h.store, func() time.Time { return time.UnixMilli(h.clock.Now()) })
+	if err := lists.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	handler := Handler(h.store, HTTPOptions{Lists: lists, Submissions: h.worker, Now: func() time.Time { return time.UnixMilli(h.clock.Now()) }})
 	read := func() int {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/projects", nil))
@@ -493,8 +501,14 @@ func TestSubmissionListCacheInvalidatesAndCleanupGateRejects(t *testing.T) {
 	}
 	h.enqueue(t, "acme/tool")
 	h.step(t)
+	if read() != 1 {
+		t.Fatal("admission replaced the cached version")
+	}
+	if err := lists.Refresh(); err != nil {
+		t.Fatal(err)
+	}
 	if read() != 2 {
-		t.Fatal("successful admission left old ten-minute list cache")
+		t.Fatal("background generation did not include admission")
 	}
 	// 清洗门禁是新投稿请求与已入队消费者共同使用的暂停依据；这里继续验证消费者读取。
 	if err := h.store.SetState(linuxdoCleanupKey, linuxdoCleanupState{StartedAt: h.clock.Now()}); err != nil {

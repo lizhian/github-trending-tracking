@@ -108,49 +108,16 @@ func (s *Store) saveObservationsAnd(ctx context.Context, items []observation, no
 			}
 			cycle = hex.EncodeToString(token[:])
 		}
-		gaps := []Gap{}
-		if previous := o.previous; previous != nil {
-			var stored map[int]TrendSummary
-			if e = json.Unmarshal([]byte(previous.Trends), &stored); e != nil {
-				return e
-			}
-			gaps = stored[720].Gaps
-			if gaps == nil {
-				gaps = []Gap{}
-			}
-			if previous.ObservedAt < at {
-				if floorDiv(previous.ObservedAt, Hour) == floorDiv(at, Hour) {
-					if len(gaps) > 0 && gaps[len(gaps)-1][1] == previous.ObservedAt {
-						gaps[len(gaps)-1][1] = at
-					}
-				} else if MissedSampling(previous.ObservedAt, at, policy) {
-					gaps = append(gaps, Gap{previous.ObservedAt, at})
-				}
+		points := []Point{}
+		for _, point := range histories[cycle] {
+			if floorDiv(point[0], Hour) != floorDiv(at, Hour) && point[0] < at {
+				points = append(points, point)
 			}
 		}
+		points = append(points, Point{at, *o.repo.Stars})
 		trends := map[int]TrendSummary{}
 		for _, width := range Windows {
-			first := Point{at, *o.repo.Stars}
-			for _, p := range histories[cycle] {
-				if p[0] >= max(now-Retention, at-int64(width)*Hour) && p[0] <= at && floorDiv(p[0], Hour) != floorDiv(at, Hour) {
-					first = p
-					break
-				}
-			}
-			v := TrendSummary{Start: ptr(first[0]), End: ptr(at), State: "accumulating", Gaps: []Gap{}}
-			if at > first[0] {
-				v.Delta = ptr(*o.repo.Stars - first[1])
-				v.State = "partial"
-				if CompleteWindow(first[0], at, width, policy) {
-					v.State = "complete"
-				}
-			}
-			for _, gap := range gaps {
-				if gap[0] >= first[0] && gap[1] <= at {
-					v.Gaps = append(v.Gaps, gap)
-				}
-			}
-			trends[width] = v
+			trends[width] = WindowTrend(points, width, now, policy).TrendSummary
 		}
 		// (*string)(nil) 是带具体类型的 nil，便于多重短声明推断 language 为 *string。
 		// Go 不能单独用 x := nil 推断类型；必须通过上下文或显式类型确定。

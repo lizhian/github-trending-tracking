@@ -4,10 +4,13 @@ package tracking_test
 // NewRecorder 记录状态码/响应头/正文，不需启动服务器；时钟通过函数注入以精确验证失效边界。
 
 import (
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,7 +35,11 @@ func TestEmptyDatabaseIsExplicitAndTypeQueriesRemainReadOnly(t *testing.T) {
 		t.Fatal("second writer opened same directory")
 	}
 	now := time.Date(2026, 10, 1, 5, 4, 0, 0, time.UTC)
-	h := tracking.Handler(store, tracking.HTTPOptions{AllowedOrigin: "https://site.test", Now: func() time.Time { return now }})
+	lists := tracking.NewListCache(store, func() time.Time { return now })
+	if err := lists.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	h := tracking.Handler(store, tracking.HTTPOptions{Lists: lists, AllowedOrigin: "https://site.test", Now: func() time.Time { return now }})
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/api/projects?type=linux.do", nil))
 	if w.Code != 200 {
@@ -42,7 +49,7 @@ func TestEmptyDatabaseIsExplicitAndTypeQueriesRemainReadOnly(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got["items"] == nil || got["languages"] == nil || got["topics"] == nil || got["pages"] != float64(1) {
+	if got["items"] == nil || got["languages"] == nil || got["topics"] == nil || got["pages"] != nil {
 		t.Fatalf("invalid empty list %s", w.Body)
 	}
 	// 用一张用例表检查不同 method/path/origin；t.Errorf 记录失败后继续其他用例，t.Fatal 则终止当前测试。
@@ -81,50 +88,63 @@ func TestEmptyDatabaseIsExplicitAndTypeQueriesRemainReadOnly(t *testing.T) {
 	reopened.Close()
 }
 
-// TestInitialEmptyTypeIsNotCachedAndNonemptyQueriesExpire 先查空类型再插入项目，验证初始空列表不缓存；已有项目的零匹配查询可缓存，600 秒整失效。
-func TestInitialEmptyTypeIsNotCachedAndNonemptyQueriesExpire(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "tracking.sqlite")
-	if err := tracking.Initialize(path); err != nil {
-		t.Fatal(err)
-	}
-	store, err := tracking.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	now := time.Date(2026, 10, 1, 5, 4, 0, 0, time.UTC)
-	h := tracking.Handler(store, tracking.HTTPOptions{Now: func() time.Time { return now }})
-	request := func(path string) map[string]any {
-		t.Helper()
+func TestListCacheIsExplicitFullAndCompressed(t *testing.T) {
+	store := newStore(t)
+	clock := &testClock{beijing("2026-11-05T12:00:00")}
+	cache := tracking.NewListCache(store, func() time.Time { return time.UnixMilli(clock.at) })
+	h := tracking.Handler(store, tracking.HTTPOptions{Lists: cache, Now: func() time.Time { return time.UnixMilli(clock.at) }})
+	request := func(encoding string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", "/api/projects?type=github", nil)
+		r.Header.Set("Accept-Encoding", encoding)
 		w := httptest.NewRecorder()
-		h.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
-		if w.Code != 200 {
-			t.Fatal(w.Code, w.Body)
-		}
-		var value map[string]any
-		if err := json.Unmarshal(w.Body.Bytes(), &value); err != nil {
-			t.Fatal(err)
-		}
-		return value
+		h.ServeHTTP(w, r)
+		return w
 	}
-	if request("/api/projects?type=linux.do")["total"] != float64(0) {
-		t.Fatal("not initially empty")
+	if w := request(""); w.Code != 503 {
+		t.Fatal("not preparing", w.Code)
 	}
-	trends := `{"24":{"delta":null,"state":"accumulating","start":1,"end":1,"gaps":[]},"72":{"delta":null,"state":"accumulating","start":1,"end":1,"gaps":[]},"168":{"delta":null,"state":"accumulating","start":1,"end":1,"gaps":[]},"720":{"delta":null,"state":"accumulating","start":1,"end":1,"gaps":[]}}`
-	_, err = store.DB.Exec("INSERT INTO projects(id,cycle,name,topics,entered_at,observed_at,attempted_at,stars,trends,type,repo_id) VALUES('linux.do:R_1','new-cycle','acme/new','[]',1,1,1,100,?,'linux.do','R_1')", trends)
+	if err := cache.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	empty := request("").Body.String()
+	harness := &collectionHarness{store: store}
+	seedMatureProjects(t, harness, 105, clock.at)
+	if w := request(""); w.Body.String() != empty {
+		t.Fatal("query rebuilt cached empty list")
+	}
+	clock.at += 600000
+	if err := cache.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	plain := request("")
+	var result tracking.ListResult
+	if err := json.Unmarshal(plain.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Items) != 105 || result.AsOf != clock.at {
+		t.Fatalf("not full %d", len(result.Items))
+	}
+	zipped := request("gzip")
+	reader, err := gzip.NewReader(zipped.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if request("/api/projects?type=linux.do")["total"] != float64(1) {
-		t.Fatal("initial empty type was cached")
+	body, err := io.ReadAll(reader)
+	reader.Close()
+	if err != nil || string(body) != plain.Body.String() || zipped.Header().Get("Content-Encoding") != "gzip" || !strings.Contains(zipped.Header().Get("Vary"), "Accept-Encoding") {
+		t.Fatal("gzip mismatch", err)
 	}
-	before := request("/api/projects?type=linux.do&q=missing")
-	now = now.Add(599 * time.Second)
-	if got := request("/api/projects?type=linux.do&q=missing"); got["asOf"] != before["asOf"] {
-		t.Fatal("zero-match query with tracked projects was not cached")
+	if w := request("gzip;q=0, *;q=1"); w.Header().Get("Content-Encoding") != "" {
+		t.Fatal("ignored gzip refusal")
 	}
-	now = now.Add(time.Second)
-	if got := request("/api/projects?type=linux.do&q=missing"); got["asOf"] == before["asOf"] {
-		t.Fatal("list cache exceeded 600 seconds")
+	// A failed build must leave the successful version readable.
+	if _, err := store.DB.Exec("UPDATE projects SET topics='broken'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.Refresh(); err == nil {
+		t.Fatal("expected generation failure")
+	}
+	if w := request(""); w.Body.String() != plain.Body.String() {
+		t.Fatal("failed refresh replaced cache")
 	}
 }

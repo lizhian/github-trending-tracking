@@ -1,7 +1,7 @@
 package tracking
 
 // 本文件将数据库数据转换成 HTTP 查询结果，并提供前端静态文件。
-// 先看 Handler → ServeHTTP → api，再看 list 的筛选、排序、分页；投稿接口在 submissions_http.go。
+// 先看 Handler → ServeHTTP → api；全量列表由后台缓存生成，投稿接口在 submissions_http.go。
 
 import (
 	"encoding/json"
@@ -13,16 +13,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
 
-	"golang.org/x/text/cases"
 	"golang.org/x/text/collate"
 	"golang.org/x/text/language"
 )
@@ -32,24 +29,24 @@ import (
 // 可空字段用指针，集合用 slice/map；默认 nil 集合编码为 null，显式空 slice 编码为 []。
 type Project struct {
 	// ID 是追踪项目身份（类型+仓库 ID），RepoID 是 GitHub 稳定仓库身份；同仓库可有两个项目。
-	ID          string               `json:"id"`
-	Type        string               `json:"type"`
-	RepoID      string               `json:"repoId"`
-	Name        string               `json:"name"`
-	Description *string              `json:"description"`
-	Homepage    *string              `json:"homepage"`
-	Language    *string              `json:"language"`
-	Topics      []string             `json:"topics"`
-	Stars       int64                `json:"stars"`
+	ID          string   `json:"id"`
+	Type        string   `json:"type"`
+	RepoID      string   `json:"repoId"`
+	Name        string   `json:"name"`
+	Description *string  `json:"description"`
+	Homepage    *string  `json:"homepage"`
+	Language    *string  `json:"language"`
+	Topics      []string `json:"topics"`
+	Stars       int64    `json:"stars"`
 	// EnteredAt 决定本周期保护期；ObservedAt 是最后成功观测，AttemptedAt 包含失败尝试。
 	// 三者不能互相替代；共享旧观测收录新类型时，入库时间可能晚于观测时间。
-	EnteredAt   int64                `json:"enteredAt"`
-	ObservedAt  int64                `json:"observedAt"`
-	AttemptedAt int64                `json:"attemptedAt"`
+	EnteredAt   int64 `json:"enteredAt"`
+	ObservedAt  int64 `json:"observedAt"`
+	AttemptedAt int64 `json:"attemptedAt"`
 	// Error 记录采样失败；Stale 独立按时间判断。Trends 的整数键是窗口小时数，JSON 编码为字符串键。
-	Error       *string              `json:"error"`
-	Stale       bool                 `json:"stale"`
-	Trends      map[int]TrendSummary `json:"trends"`
+	Error  *string              `json:"error"`
+	Stale  bool                 `json:"stale"`
+	Trends map[int]TrendSummary `json:"trends"`
 }
 
 // Summary 当前追踪类型的全量统计，先于关键词/语言/标签筛选计算；Net24 为 nil 表示没有可比较项目。
@@ -61,13 +58,10 @@ type Summary struct {
 	Comparable24 int    `json:"comparable24"`
 }
 
-// ListResult 列表 API 的 JSON 响应，包含分页、筛选选项、汇总和运行状态。
+// ListResult 全量列表响应，包含筛选选项、汇总、运行状态与生成时间。
 type ListResult struct {
 	Items     []Project                  `json:"items"`
 	Total     int                        `json:"total"`
-	Page      int                        `json:"page"`
-	PageSize  int                        `json:"pageSize"`
-	Pages     int                        `json:"pages"`
 	Languages []string                   `json:"languages"`
 	Topics    []string                   `json:"topics"`
 	Summary   Summary                    `json:"summary"`
@@ -86,25 +80,17 @@ type HistoryResult struct {
 
 // HTTPOptions HTTP 层依赖与配置；Now 函数字段可注入测试时钟，Submissions 只暴露所需控制能力。
 type HTTPOptions struct {
+	Lists                    *ListCache
 	AllowedOrigin, StaticDir string
 	Now                      func() time.Time
 	Submissions              SubmissionControl
 	TrustedProxies           []netip.Prefix
 }
 
-// cacheEntry 保存已编码响应、失效毫秒时间和数据版本，避免数据变化后继续命中过时列表。
-type cacheEntry struct {
-	body     []byte
-	expires  int64
-	revision uint64
-}
-
-// handler HTTP 处理器的具体实现；多个请求可并发调用它，因此缓存和限流状态需要锁保护。
+// handler serves prepared lists and on-demand details.
 type handler struct {
 	store   *Store
 	options HTTPOptions
-	mu      sync.Mutex
-	cache   map[string]cacheEntry
 	limiter submissionLimiter
 }
 
@@ -115,7 +101,10 @@ func Handler(store *Store, options HTTPOptions) http.Handler {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
-	return &handler{store: store, options: options, cache: map[string]cacheEntry{}}
+	if options.Lists == nil {
+		options.Lists = NewListCache(store, options.Now)
+	}
+	return &handler{store: store, options: options}
 }
 
 // parameterError 以 string 为底层类型的自定义错误；添加 Error 方法后即可满足 error 接口。
@@ -125,40 +114,27 @@ type parameterError string
 func (e parameterError) Error() string { return string(e) }
 
 // parameters 保存已校验、带默认值的列表参数；小写字段仅供本包使用。
-type parameters struct {
-	q, language, topic, sort, direction, kind string
-	page                                      int
-}
+type parameters struct{ kind string }
 
-var pagePattern = regexp.MustCompile(`^[1-9]\d{0,5}$`)
-
-// listParameters 校验查询键、单值约束、长度、排序与类型，返回规范化参数或可展示的参数错误。
-// 长度按 UTF-16 计数以保持前端契约，不能用 Go 的 len(string) 代替字符数。
+// listParameters accepts only a tracking type; all user filtering is local.
 func listParameters(u *url.URL) (parameters, error) {
 	values, err := searchParameters(u.RawQuery)
 	if err != nil {
 		return parameters{}, parameterError("查询参数无效")
 	}
-	// Go string 存字节（本项目文本为 UTF-8），len 给字节数；range string 解码为 rune（Unicode 码点）。
-	// Java String.length 按 UTF-16 码元计数；这里显式转换以保持原前端长度契约。
-	for key, values := range values {
-		if !slices.Contains([]string{"q", "language", "topic", "sort", "direction", "page", "type"}, key) || len(values) != 1 || len(utf16.Encode([]rune(values[0]))) > 200 {
+	for key, v := range values {
+		if key != "type" || len(v) != 1 {
 			return parameters{}, parameterError("查询参数无效")
 		}
 	}
-	value := func(key, def string) string {
-		if a, ok := values[key]; ok {
-			return a[0]
-		}
-		return def
+	kind := values.Get("type")
+	if kind == "" {
+		kind = "github"
 	}
-	p := parameters{q: cases.Lower(language.Und).String(strings.TrimSpace(value("q", ""))), language: value("language", ""), topic: value("topic", ""), sort: value("sort", "24"), direction: value("direction", "desc"), kind: value("type", "github")}
-	page := value("page", "1")
-	if !slices.Contains([]string{"name", "stars", "24", "72", "168", "720"}, p.sort) || !slices.Contains([]string{"asc", "desc"}, p.direction) || !slices.Contains([]string{"github", "linux.do"}, p.kind) || !pagePattern.MatchString(page) {
-		return p, parameterError("排序或页码无效")
+	if kind != "github" && kind != "linux.do" {
+		return parameters{}, parameterError("追踪类型无效")
 	}
-	p.page, _ = strconv.Atoi(page)
-	return p, nil
+	return parameters{kind: kind}, nil
 }
 
 // jsStringCompare 按 UTF-16 码元比较字符串，使选项排序与 JavaScript 行为一致。
@@ -169,8 +145,8 @@ func jsStringCompare(a, b string) int {
 // EnglishCompare 按英语排序规则比较文本，供淘汰等需要稳定决胜顺序的逻辑使用。
 func EnglishCompare(a, b string) int { return collate.New(language.English).CompareString(a, b) }
 
-// list 读取某追踪类型项目，构造全量统计与选项，再筛选、排序、分页并汇总运行状态。
-// 无可比较净增量的项目放在末尾；旧混合采集状态从项目行还原，避免候选失败污染存量采样状态。
+// list 供后台构造某追踪类型的全量项目、统计、选项和运行状态。
+// 旧混合采集状态从项目行还原，避免候选失败污染存量采样状态。
 func (s *Store) list(p parameters, now int64) (ListResult, error) {
 	rows, err := s.ProjectRows("WHERE type=?", p.kind)
 	if err != nil {
@@ -184,10 +160,8 @@ func (s *Store) list(p parameters, now int64) (ListResult, error) {
 	if err != nil {
 		return ListResult{}, err
 	}
-	result := ListResult{Items: []Project{}, Languages: []string{}, Topics: []string{}, PageSize: 100, AsOf: now, Status: map[string]json.RawMessage{}}
+	result := ListResult{Items: []Project{}, Languages: []string{}, Topics: []string{}, AsOf: now, Status: map[string]json.RawMessage{}}
 	languages, topics := map[string]bool{}, map[string]bool{}
-	filtered := []Project{}
-	lower := cases.Lower(language.Und)
 	net := int64(0)
 	for _, project := range projects {
 		if project.Language != nil && *project.Language != "" {
@@ -207,20 +181,7 @@ func (s *Store) list(p parameters, now int64) (ListResult, error) {
 		} else {
 			result.Summary.Accumulating++
 		}
-		description := ""
-		if project.Description != nil {
-			description = *project.Description
-		}
-		if p.q != "" && !strings.Contains(lower.String(project.Name+" "+description), p.q) {
-			continue
-		}
-		if p.language != "" && (project.Language == nil || *project.Language != p.language) {
-			continue
-		}
-		if p.topic != "" && !slices.Contains(project.Topics, p.topic) {
-			continue
-		}
-		filtered = append(filtered, project)
+		result.Items = append(result.Items, project)
 	}
 	if result.Summary.Comparable24 > 0 {
 		result.Summary.Net24 = &net
@@ -233,45 +194,7 @@ func (s *Store) list(p parameters, now int64) (ListResult, error) {
 	}
 	slices.SortFunc(result.Languages, jsStringCompare)
 	slices.SortFunc(result.Topics, jsStringCompare)
-	collator := collate.New(language.English)
-	// 排序回调是捕获参数与 collator 的闭包；比较净增量之前先处理 nil，避免解引用空指针。
-	slices.SortStableFunc(filtered, func(a, b Project) int {
-		comparison := 0
-		if p.sort == "name" {
-			comparison = collator.CompareString(lower.String(a.Name), lower.String(b.Name))
-		} else {
-			av, bv := &a.Stars, &b.Stars
-			if p.sort != "stars" {
-				width, _ := strconv.Atoi(p.sort)
-				av, bv = a.Trends[width].Delta, b.Trends[width].Delta
-			}
-			if av == nil || bv == nil {
-				if av != bv {
-					if av == nil {
-						return 1
-					}
-					return -1
-				}
-				return collator.CompareString(a.Name, b.Name)
-			}
-			if *av < *bv {
-				comparison = -1
-			} else if *av > *bv {
-				comparison = 1
-			}
-		}
-		if p.direction == "desc" {
-			comparison = -comparison
-		}
-		if comparison == 0 {
-			return collator.CompareString(a.Name, b.Name)
-		}
-		return comparison
-	})
-	result.Total = len(filtered)
-	result.Pages = max(1, (len(filtered)+99)/100)
-	result.Page = min(p.page, result.Pages)
-	result.Items = filtered[min((result.Page-1)*100, len(filtered)):min(result.Page*100, len(filtered))]
+	result.Total = len(result.Items)
 	for _, key := range []string{"discovery", "collection", "admission", "cleanup", "scheduler"} {
 		var raw json.RawMessage
 		ok, err := s.State(key+":"+p.kind, &raw)
@@ -386,42 +309,20 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 		var p parameters
 		p, err = listParameters(r.URL)
 		if err == nil {
-			key := r.URL.EscapedPath() + "?" + r.URL.RawQuery
-			h.mu.Lock()
-			entry, ok := h.cache[key]
-			h.mu.Unlock()
-			// 版本号原子读取，配合有效期一起判缓存。锁只保护 map 访问，不覆盖耗时的数据库查询。
-			revision := h.store.listRevision.Load()
-			if ok && entry.expires > now && entry.revision == revision {
-				w.Header().Set("Content-Type", "application/json")
-				w.Write(entry.body)
+			entry, ok := h.options.Lists.get(p.kind)
+			if !ok {
+				fail(503, "列表正在准备，请稍后手动刷新")
 				return
 			}
-			var list ListResult
-			// 此处用 = 保留外层 err，让函数末尾统一转换 HTTP 错误；若误用 := 可能遮蔽外层变量。
-			list, err = h.store.list(p, now)
-			result = list
-			if err == nil && list.Summary.Tracked > 0 {
-				var body []byte
-				body, err = json.Marshal(list)
-				if err == nil {
-					h.mu.Lock()
-					for key, entry := range h.cache {
-						if entry.expires <= now {
-							delete(h.cache, key)
-						}
-					}
-					// map 无遍历顺序保证，这里任意驱逐一项控制大小，并不是 LRU 缓存。
-					if len(h.cache) >= 128 {
-						for key := range h.cache {
-							delete(h.cache, key)
-							break
-						}
-					}
-					h.cache[key] = cacheEntry{body: body, expires: now + 600_000, revision: revision}
-					h.mu.Unlock()
-				}
+			w.Header().Set("Vary", "Origin, Accept-Encoding")
+			w.Header().Set("Content-Type", "application/json")
+			body := entry.body
+			if acceptsGzip(r.Header.Get("Accept-Encoding")) {
+				w.Header().Set("Content-Encoding", "gzip")
+				body = entry.gzip
 			}
+			w.Write(body)
+			return
 		}
 	} else {
 		path := r.URL.EscapedPath()
@@ -478,7 +379,7 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 				if err == nil {
 					var policy *SamplingPolicy
 					policy, err = h.store.Policy()
-					trend := WindowTrend(histories[row.Cycle], hours, now, policy)
+					trend := WindowTrend(projectHistory(row, histories[row.Cycle]), hours, now, policy)
 					result = HistoryResult{Points: trend.Points, Trend: trend, Gaps: trend.Gaps, ObservedAt: row.ObservedAt, Stale: IsStale(row.ObservedAt, now, policy)}
 				}
 			}

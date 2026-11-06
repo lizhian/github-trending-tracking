@@ -148,7 +148,11 @@ func run(args []string) error {
 		}
 		// &T{...} 创建结构体值并取指针；字段名初始化比按位置填写更直观。
 		// Duration 以 time.Second 等单位构造；1 << 20 是左移，表示 1 MiB 的请求头上限。
-		server := &http.Server{Addr: *listen, Handler: tracking.Handler(store, tracking.HTTPOptions{AllowedOrigin: os.Getenv("ALLOWED_ORIGIN"), StaticDir: *static, Submissions: submissions, TrustedProxies: proxies}), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
+		lists := tracking.NewListCache(store, nil)
+		listsDone := make(chan struct{})
+		go func() { defer close(listsDone); lists.Run(ctx) }()
+		defer func() { stop(); <-listsDone }()
+		server := &http.Server{Addr: *listen, Handler: tracking.Handler(store, tracking.HTTPOptions{Lists: lists, AllowedOrigin: os.Getenv("ALLOWED_ORIGIN"), StaticDir: *static, Submissions: submissions, TrustedProxies: proxies}), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 		go func() {
 			<-ctx.Done()
 			// 父 ctx 已取消，关闭服务器需另用未取消的根上下文创建十秒超时，给在途请求收尾机会。

@@ -166,7 +166,7 @@ sequenceDiagram
 
 `Open` 不会自动创建空库，也不自动迁移旧 schema。初始化由 `init` 命令显式完成，升级由 `migrate` 完成；正常服务启动只接受符合当前版本的已有数据库。
 
-普通采集从 `NextSlot(startedAt)` 开始。例如 11:10 启动等 12:00；12:00 整启动也等待 13:00。约每分钟 `Tick` 一次与每天十八个应采时段是两回事：前者检查“现在有没有工作”，后者定义观测轮次。启动等待期间，HTTP、每日备份和符合门禁条件的常规清理仍可工作。投稿不受普通采样启动门槛限制，但仍受清洗维护门禁约束。
+普通采集从 `NextSlot(startedAt)` 开始。例如 11:10 启动等 12:00；12:00 整启动也等待 13:00。约每分钟 `Tick` 一次与Star 每天二十四个应采时段（来源发现仍十八轮）是两回事：前者检查“现在有没有工作”，后者定义观测轮次。启动等待期间，HTTP、每日备份和符合门禁条件的常规清理仍可工作。投稿不受普通采样启动门槛限制，但仍受清洗维护门禁约束。
 
 退出依靠协作取消。`context` 不会强行终止 goroutine；循环与请求需要检查它。`run` 的 `defer` 按后登记先执行的顺序，先等待调度/投稿和备份循环，再释放数据库。HTTP 的 `Shutdown` 使用新的十秒超时上下文，因为原任务上下文已经取消。当前入口通过独立 goroutine 发起 HTTP 关闭，并没有另外 join 等待 `Shutdown` 调用返回；不要把示意图读成代码对所有请求完成作出了额外保证。
 
@@ -219,7 +219,7 @@ flowchart TB
 
 错误处理也分层：参数错误返回 400，找不到项目返回 404，数据暂不可用返回安全的 503 提示。读取失败不会自动触发 GitHub 请求来“顺便修复数据”。
 
-**源码对照**：[http.go](../internal/tracking/http.go) `Handler/ServeHTTP/api/list/writeJSON`；[store.go](../internal/tracking/store.go) `ProjectRows/Histories`；[trends.go](../internal/tracking/trends.go) `ProjectViews/WindowTrend`。**测试对照**：[http_test.go](../internal/tracking/http_test.go) `TestInitialEmptyTypeIsNotCachedAndNonemptyQueriesExpire`。
+**源码对照**：[http.go](../internal/tracking/http.go) `Handler/ServeHTTP/api/list/writeJSON`；[store.go](../internal/tracking/store.go) `ProjectRows/Histories`；[trends.go](../internal/tracking/trends.go) `ProjectViews/WindowTrend`。**测试对照**：[http_test.go](../internal/tracking/http_test.go) `TestListCacheIsExplicitFullAndCompressed`。
 
 ### 4.2 JSON 与类型的三个层次
 
@@ -436,7 +436,7 @@ Linux.do 的 `entered_at=11:30` 决定保护期，`observed_at` 最初是 11:00�
 
 ```mermaid
 flowchart TB
-    Requests["并发 HTTP 请求"] --> Cache["handler.mu：仅保护列表缓存"]
+    Requests["并发 HTTP 请求"] --> Cache["ListCache.mu：仅保护已生成列表版本"]
     Requests --> Limiter["limiter.mu：IP 配额检查与记录"]
     Requests --> Pool["Store.DB：最多一个连接"]
     Sampler["采集 goroutine：Tick"] --> Lock["Scheduler.mu / lockUpstream"]
@@ -468,7 +468,7 @@ WAL 有利于数据库读写协作和一致快照，但同一个 `Store` 仍只�
 
 | 状态 | 保存位置 | 重启后的行为 |
 | --- | --- | --- |
-| 列表响应缓存、revision | 进程内 map / 原子计数器 | 清空，按当前库重新生成 |
+| 列表响应缓存 | 进程内两份 JSON/gzip 版本 | 清空，后台启动时异步生成 |
 | IP 一分钟限流 | 进程内 map | 清空，不是跨进程配额服务 |
 | 投稿 Wake 通知 | 内存 channel | 丢失通知不丢任务，消费者扫描持久队列 |
 | 投稿阶段、次数、NextAt | `submissions` | 继续未完成阶段，不等普通采样时段 |
@@ -636,10 +636,10 @@ func (s *Store) Close() error {
 先阅读 [http_test.go](../internal/tracking/http_test.go)，再运行：
 
 ```sh
-go test ./internal/tracking -run '^TestInitialEmptyTypeIsNotCachedAndNonemptyQueriesExpire$' -count=1 -v
+go test ./internal/tracking -run '^TestListCacheIsExplicitFullAndCompressed$' -count=1 -v
 ```
 
-预期通过：初始空类型不会被缓存；已有项目的零匹配查询会缓存，599 秒仍命中，600 秒失效。重点看注入的 `Now` 闭包如何随着测试里的 `now` 改变而返回新时间。
+预期通过：首次生成前返回准备中，空列表可以缓存；写入不改变查询版本，显式后台生成后返回超过 100 项的全量列表，gzip 解压与原始 JSON 一致，生成失败保留旧版本。时钟与刷新入口用于避免真实等待十分钟。
 
 ### 12.2 启动门槛与共享观测
 
@@ -679,7 +679,7 @@ go test ./internal/tracking -run '^TestSubmission(AdmissionIndependentStages|Adm
 <details>
 <summary>1. 11:10 启动服务后，刷新页面为什么不会立刻获得 11:10 的新 Star？</summary>
 
-查询只读取 SQLite 或进程内缓存；普通采集严格等下一应采时段 12:00。页面刷新不执行 `collect`，也没有公开手动采集入口。投稿是独立的异步业务，不能用普通查询触发。
+列表查询只读取后台预生成缓存，详情历史按需读取 SQLite；普通采集严格等下一应采时段 12:00。页面刷新不执行 `collect`，也没有公开手动采集入口。投稿是独立的异步业务，不能用普通查询触发。
 
 </details>
 

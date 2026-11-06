@@ -2,6 +2,7 @@ import React, {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -64,14 +65,12 @@ interface QueryState {
   tab: "github" | "linuxdo";
   sort: string;
   direction: "asc" | "desc";
-  page: number;
   project: string;
   window: WindowHours;
 }
 function readLocation(): QueryState {
   const params = new URLSearchParams(location.search);
   const text = (key: string) => (params.get(key) ?? "").slice(0, 200);
-  const page = text("page");
   const hours = Number(text("window")) as WindowHours;
   return {
     q: text("q"),
@@ -80,31 +79,26 @@ function readLocation(): QueryState {
     tab: text("tab") === "linuxdo" ? "linuxdo" : "github",
     sort: sorts.includes(text("sort")) ? text("sort") : "24",
     direction: text("direction") === "asc" ? "asc" : "desc",
-    page: /^[1-9]\d{0,5}$/.test(page) ? Number(page) : 1,
     project: text("project"),
     window: WINDOWS.includes(hours) ? hours : 720,
   };
 }
-function listParameters(query: QueryState) {
+function locationParameters(query: QueryState) {
   return new URLSearchParams({
-    type: query.tab === "linuxdo" ? "linux.do" : "github",
     q: query.q,
     language: query.language,
     topic: query.topic,
     sort: query.sort,
     direction: query.direction,
-    page: String(query.page),
   });
 }
 function locationFor(query: QueryState) {
-  const params = listParameters(query);
-  params.delete("type");
+  const params = locationParameters(query);
   for (const [key, value] of [...params]) {
     if (
       !value ||
       (key === "sort" && value === "24") ||
-      (key === "direction" && value === "desc") ||
-      (key === "page" && value === "1")
+      (key === "direction" && value === "desc")
     )
       params.delete(key);
   }
@@ -516,16 +510,16 @@ function Details({
           <span className="detail-muted">仓库尚未提供 Topics</span>
         )}
       </div>
-      {(project.stale || project.error) && (
+      {((current?.stale ?? project.stale) || project.error) && (
         <p className="notice" role="status">
-          {project.stale ? "数据过期，未在应采时段及 10 分钟宽限内成功更新。" : ""}
+          {(current?.stale ?? project.stale) ? "数据过期，未在应采时段及 10 分钟宽限内成功更新。" : ""}
           {project.error ? "项目更新异常，继续显示有效观测。" : ""}
         </p>
       )}
       <div className="detail-stat">
         <span>Star 总数</span>
         <div className="detail-star-line">
-          <strong>{number(project.stars)}</strong>
+          <strong>{number(current?.points.at(-1)?.[1] ?? project.stars)}</strong>
           {trend && !history.loading && (
             <span
               className={`delta-badge ${trend.delta !== null && trend.delta < 0 ? "negative" : ""}`}
@@ -632,7 +626,7 @@ function Details({
           <dt>本次入库</dt>
           <dd>{time(project.enteredAt)}</dd>
           <dt>最后成功观测</dt>
-          <dd>{time(project.observedAt)}</dd>
+          <dd>{time(current?.observedAt ?? project.observedAt)}</dd>
         </dl>
       </section>
       <a
@@ -658,7 +652,6 @@ function App() {
   const [refresh, setRefresh] = useState(0);
   const [submissionOpen, setSubmissionOpen] = useState(false);
   const messagesDialog = useRef<HTMLDialogElement>(null);
-  const submissionChanged = useCallback(() => setRefresh((value) => value + 1), []);
   const [dark, setDark] = useState(() => {
     try {
       return localStorage.getItem("theme") === "dark";
@@ -679,14 +672,35 @@ function App() {
     pushNext.current = push;
     setQuery((previous) => ({ ...previous, ...patch }));
   }, []);
-  const listPath = `/api/projects?${listParameters(query)}`;
+  const listPath = `/api/projects?type=${query.tab === "linuxdo" ? "linux.do" : "github"}`;
   const previousListPath = useRef(listPath);
   const resource = useApi<ListResult>(listPath, refresh);
   const data = resource.value;
   const options = data;
-  const selected =
-    data?.items.find((project) => project.id === query.project) ??
-    data?.items[0];
+  const items = useMemo(() => {
+    const keyword = query.q.trim().toLowerCase();
+    const compare = new Intl.Collator("en").compare;
+    return (data?.items ?? []).filter((project) =>
+      (!keyword || `${project.name} ${project.description ?? ""}`.toLowerCase().includes(keyword)) &&
+      (!query.language || project.language === query.language) &&
+      (!query.topic || project.topics.includes(query.topic)),
+    ).sort((a, b) => {
+      let order: number;
+      if (query.sort === "name") order = compare(a.name.toLowerCase(), b.name.toLowerCase());
+      else {
+        const av = query.sort === "stars" ? a.stars : a.trends[Number(query.sort) as WindowHours].delta;
+        const bv = query.sort === "stars" ? b.stars : b.trends[Number(query.sort) as WindowHours].delta;
+        if (av === null || bv === null) {
+          if (av !== bv) return av === null ? 1 : -1;
+          return compare(a.name, b.name);
+        }
+        order = av - bv;
+      }
+      return (query.direction === "desc" ? -order : order) || compare(a.name, b.name);
+    });
+  }, [data, query.q, query.language, query.topic, query.sort, query.direction]);
+  // Filtering changes the list, not the open detail or its request lifecycle.
+  const selected = data?.items.find((project) => project.id === query.project) ?? items[0] ?? data?.items[0];
   useEffect(() => {
     const next = locationFor(query);
     if (next !== `${location.pathname}${location.search}${location.hash}`) {
@@ -707,21 +721,20 @@ function App() {
   }, []);
   useEffect(() => {
     if (draft === query.q) return;
-    const timer = setTimeout(() => commit({ q: draft, page: 1 }), 300);
+    const timer = setTimeout(() => commit({ q: draft }), 300);
     return () => clearTimeout(timer);
   }, [draft, query.q, commit]);
   useEffect(() => {
     if (!data || resource.loading || resource.error)
       return;
     const project = selected?.id ?? "";
-    if (query.page !== data.page || query.project !== project)
-      commit({ page: data.page, project }, false);
+    if (query.project !== project)
+      commit({ project }, false);
   }, [
     data,
     resource.loading,
     resource.error,
     selected?.id,
-    query.page,
     query.project,
     query.tab,
     commit,
@@ -807,14 +820,13 @@ function App() {
   }, []);
   const clear = () => {
     setDraft("");
-    commit({ q: "", language: "", topic: "", page: 1 });
+    commit({ q: "", language: "", topic: "" });
   };
   const changeSort = (sort: string) =>
     commit({
       sort,
       direction:
         query.sort === sort && query.direction === "desc" ? "asc" : "desc",
-      page: 1,
     });
   const selectProject = (project: Project) => {
     commit({ project: project.id });
@@ -953,7 +965,7 @@ function App() {
           </div>
         </div>
       </header>
-      {submissionOpen && <SubmissionDialog apiBase={apiBase} onClose={() => setSubmissionOpen(false)} onChanged={submissionChanged} />}
+      {submissionOpen && <SubmissionDialog apiBase={apiBase} onClose={() => setSubmissionOpen(false)} />}
       <dialog
         id="collection-messages"
         className="collection-dialog"
@@ -1030,7 +1042,7 @@ function App() {
                     aria-pressed={query.tab === tab}
                     onClick={() => {
                       setDraft("");
-                      commit({ tab, q: "", language: "", topic: "", page: 1, project: "" });
+                      commit({ tab, q: "", language: "", topic: "", project: "" });
                     }}
                   >
                     {label}
@@ -1063,7 +1075,7 @@ function App() {
                       name="language"
                       value={query.language}
                       options={options?.languages ?? []}
-                      onChange={(language) => commit({ language, page: 1 })}
+                      onChange={(language) => commit({ language })}
                     />
                     <SearchSelect
                       label="仓库 Topics"
@@ -1071,7 +1083,7 @@ function App() {
                       name="topic"
                       value={query.topic}
                       options={options?.topics ?? []}
-                      onChange={(topic) => commit({ topic, page: 1 })}
+                      onChange={(topic) => commit({ topic })}
                     />
                     <button
                       type="button"
@@ -1139,7 +1151,7 @@ function App() {
                   {resource.loading
                     ? "正在读取趋势数据…"
                     : data
-                      ? `共 ${data.total} 个项目，第 ${data.page} / ${data.pages} 页`
+                      ? `共 ${items.length} 个项目`
                       : ""}
                 </div>
                 <div
@@ -1189,8 +1201,8 @@ function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {data?.items.length ? (
-                        data.items.map((project, index) => {
+                      {items.length ? (
+                        items.map((project, index) => {
                           const [owner, ...name] = project.name.split("/");
                           const admissionLabel = newAdmissionLabel(project.enteredAt, now);
                           return (
@@ -1203,7 +1215,7 @@ function App() {
                             >
                               <td className="rank">
                                 {String(
-                                  (data.page - 1) * data.pageSize + index + 1,
+                                  index + 1,
                                 ).padStart(2, "0")}
                               </td>
                               <td className="repo-cell">
@@ -1292,32 +1304,10 @@ function App() {
                 <div className="list-footer">
                   <span>
                     {data
-                      ? `每页 ${data.pageSize} 项，共 ${number(data.total)} 项`
+                      ? `显示 ${number(items.length)} / ${number(data.total)} 项 · 列表生成于 ${time(data.asOf)}`
                       : "正在读取列表"}
                   </span>
-                  <nav className="pagination" aria-label="项目列表分页">
-                    <button
-                      type="button"
-                      className="icon-button"
-                      aria-label="上一页"
-                      disabled={!data || resource.loading || data.page <= 1}
-                      onClick={() => commit({ page: (data?.page ?? 1) - 1 })}
-                    >
-                      <Icon name="previous" />
-                    </button>
-                    <span>{data ? `${data.page} / ${data.pages}` : "…"}</span>
-                    <button
-                      type="button"
-                      className="icon-button"
-                      aria-label="下一页"
-                      disabled={
-                        !data || resource.loading || data.page >= data.pages
-                      }
-                      onClick={() => commit({ page: (data?.page ?? 1) + 1 })}
-                    >
-                      <Icon name="next" />
-                    </button>
-                  </nav>
+
                 </div>
             </>
           </div>
@@ -1334,7 +1324,7 @@ function App() {
                   refresh={refresh}
                   asOf={data.asOf}
                   onWindow={(window) => commit({ window })}
-                  onTopic={(topic) => commit({ topic, page: 1 })}
+                  onTopic={(topic) => commit({ topic })}
                   onRefresh={() => setRefresh((value) => value + 1)}
                 />
               ) : (

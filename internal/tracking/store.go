@@ -18,7 +18,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 
 	"github.com/lizhian/github-trending-tracking/migrations"
 	"golang.org/x/sys/unix"
@@ -28,6 +27,7 @@ import (
 
 // SchemaVersion 是当前运行所要求的 schema；Initialize/Migrate 写入，Open 严格核对。
 const SchemaVersion = 6
+
 // DatabaseName 是命令行默认文件名；路径仍可由配置覆盖。
 const DatabaseName = "tracking.sqlite"
 
@@ -35,16 +35,15 @@ const DatabaseName = "tracking.sqlite"
 // []string 是 slice，长度可变；这里 var 而非 const，因为 Go 的常量不能是 slice。
 var MigrationNames = []string{"0001_tracking.sql", "0002_free_tier.sql", "0003_tracking_types.sql", "0004_submissions.sql", "0005_homepage.sql", "0006_remove_listing_time.sql"}
 
-// Store 持有数据库连接池、目录写锁和进程内缓存版本。
+// Store 持有数据库连接池与目录写锁。
 // struct 可类比“带字段的数据类型”，方法在类型外声明；它没有 Java 的继承体系。
-// 包含 sync.Once 和 atomic 字段的 Store 使用后不能复制，调用方传递 *Store。
+// 包含 sync.Once 的 Store 使用后不能复制，调用方传递 *Store。
 type Store struct {
 	// DB 暴露标准 SQL 连接池；lock 保存文件句柄以持续持有内核锁。
-	// closeOnce 保证一次清理；listRevision 是原子计数器，让 HTTP 缓存识别数据变化。
-	DB           *sql.DB
-	lock         *os.File
-	closeOnce    sync.Once
-	listRevision atomic.Uint64
+	// closeOnce 保证一次清理。
+	DB        *sql.DB
+	lock      *os.File
+	closeOnce sync.Once
 }
 
 // database 根据文件路径和 SQLite mode 建立连接池并验证连接；rw 不创建缺失文件，ro 为只读。
@@ -380,7 +379,7 @@ func (s *Store) ProjectRows(where string, args ...any) ([]ProjectRow, error) {
 	return result, rows.Err()
 }
 
-// Histories 每批最多查询 90 个追踪周期，返回最近 30 天、按时间升序排列的快照。
+// Histories 每批最多查询 90 个追踪周期，返回最近 30 天和最新快照，按时间升序排列。
 // 数据库按 UTC 日/小时存 JSON 桶；map 遍历没有顺序保证，所以读出后必须显式排序。
 func (s *Store) Histories(cycles []string, now int64) (map[string][]Point, error) {
 	output := map[string][]Point{}
@@ -393,13 +392,14 @@ func (s *Store) Histories(cycles []string, now int64) (map[string][]Point, error
 			args = append(args, cycle)
 		}
 		args = append(args, (now-Retention)/Day)
-		rows, err := s.DB.Query("SELECT cycle,hours FROM snapshot_days WHERE cycle IN ("+strings.TrimSuffix(strings.Repeat("?,", len(group)), ",")+") AND day>=? ORDER BY day", args...)
+		rows, err := s.DB.Query("SELECT d.cycle,d.hours,p.observed_at FROM snapshot_days d JOIN projects p ON p.cycle=d.cycle WHERE d.cycle IN ("+strings.TrimSuffix(strings.Repeat("?,", len(group)), ",")+") AND (day>=? OR day=CAST(p.observed_at/86400000 AS INTEGER)) ORDER BY day", args...)
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
 			var cycle, raw string
-			if err = rows.Scan(&cycle, &raw); err != nil {
+			var latest int64
+			if err = rows.Scan(&cycle, &raw, &latest); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -409,7 +409,7 @@ func (s *Store) Histories(cycles []string, now int64) (map[string][]Point, error
 				return nil, err
 			}
 			for _, p := range hours {
-				if p[0] >= now-Retention && p[0] <= now {
+				if (p[0] >= now-Retention || p[0] == latest) && p[0] <= now {
 					output[cycle] = append(output[cycle], p)
 				}
 			}

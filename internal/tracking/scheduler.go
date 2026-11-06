@@ -18,10 +18,10 @@ import (
 // SchedulerOptions 调度依赖和启动配置；Clock/Client 可注入替身，零值由构造函数补默认。
 // StartedAt 为 Unix 毫秒，决定普通采集重启后从哪一轮恢复。
 type SchedulerOptions struct {
-	Token          string
+	Token string
 	// 可替换的接口依赖，类似 Java 构造器注入；测试传模拟时钟，生产由 NewScheduler 补 realClock。
-	Clock          Clock
-	Client         *http.Client
+	Clock  Clock
+	Client *http.Client
 	// 0 表示由时钟取启动时间；清洗模式暂停普通采集并使用 BackupDir 保存清洗前快照。
 	StartedAt      int64
 	LinuxdoCleanup bool
@@ -102,18 +102,12 @@ func (s *Scheduler) Tick(ctx context.Context) (err error) {
 	if err != nil {
 		return err
 	}
-	if policy == nil || policy.Version < 3 {
+	if policy == nil || policy.Version < 4 {
 		policy = s.upgradeSamplingPolicy(policy, now)
 		if err = s.store.SetState("sampling_policy", policy); err != nil {
 			return err
 		}
-		s.store.listRevision.Add(1)
 	}
-	result, err := s.store.DB.ExecContext(ctx, "DELETE FROM snapshot_days WHERE day<?", floorDiv(now-Retention, Day))
-	if err != nil {
-		return err
-	}
-	pruned, _ := result.RowsAffected()
 	collected := false
 	if now >= s.startAt {
 		collected, err = s.collect(ctx, now, policy)
@@ -121,11 +115,15 @@ func (s *Scheduler) Tick(ctx context.Context) (err error) {
 			return err
 		}
 	}
+	pruned, err := s.store.pruneHistory(ctx, now, policy)
+	if err != nil {
+		return err
+	}
 	cleaned, err := s.cleanup(ctx, now, policy)
 	if err != nil {
 		return err
 	}
-	if collected || cleaned || pruned > 0 {
+	if collected || cleaned || pruned {
 		return s.store.SetState("scheduler", runState{AttemptedAt: now, SucceededAt: ptr(now), Succeeded: 1})
 	}
 	return nil
@@ -140,6 +138,10 @@ func (s *Scheduler) upgradeSamplingPolicy(policy *SamplingPolicy, now int64) *Sa
 	if policy.Version < 3 {
 		policy.Version = 3
 		policy.HourlyDaytimeAt = s.startAt
+	}
+	if policy.Version < 4 {
+		policy.Version = 4
+		policy.HourlyAt = s.startAt
 	}
 	return policy
 }
@@ -747,7 +749,6 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		if e = tx.Commit(); e != nil {
 			return false, e
 		}
-		s.store.listRevision.Add(1)
 	}
 	return d.changed || pendingChanged || len(changes) > 0, nil
 }

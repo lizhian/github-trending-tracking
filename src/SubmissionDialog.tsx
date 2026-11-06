@@ -33,11 +33,9 @@ function savedSubmission() {
 export function SubmissionDialog({
   apiBase,
   onClose,
-  onChanged,
 }: {
   apiBase: string;
   onClose: () => void;
-  onChanged: () => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [url, setURL] = useState("");
@@ -46,7 +44,6 @@ export function SubmissionDialog({
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const postController = useRef<AbortController | null>(null);
-  const notified = useRef("");
 
   useEffect(() => {
     dialog.current?.showModal();
@@ -58,18 +55,6 @@ export function SubmissionDialog({
     setResult(next);
     setError("");
   }, []);
-
-  useEffect(() => {
-    if (!result) return;
-    const signature = `${result.id}:${result.github}:${result.linuxdo}`;
-    if (
-      signature !== notified.current &&
-      (result.github === "tracked" || result.linuxdo === "tracked")
-    ) {
-      notified.current = signature;
-      onChanged();
-    }
-  }, [result, onChanged]);
 
   useEffect(() => {
     if (!id) return;

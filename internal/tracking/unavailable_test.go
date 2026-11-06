@@ -216,9 +216,9 @@ func TestUnavailableCacheSurvivesRestartAndRequiresRediscovery(t *testing.T) {
 	}
 }
 
-// TestUnavailableCandidateRetainsOtherFailuresAndClearsCachedList 结束明确不可访问候选后立即刷新缓存状态，
+// TestUnavailableCandidateRetainsOtherFailuresUntilCachedListRefresh 结束明确不可访问候选后立即刷新缓存状态，
 // 仍保留同批其他真实失败，空闲扫描不伪造新尝试时间。
-func TestUnavailableCandidateRetainsOtherFailuresAndClearsCachedList(t *testing.T) {
+func TestUnavailableCandidateRetainsOtherFailuresUntilCachedListRefresh(t *testing.T) {
 	h := newSubmissionHarness(t)
 	// 准备：先收录项目激活列表缓存，再检查候选状态变化是否使缓存及时失效。
 	h.enqueue(t, "acme/tool")
@@ -241,7 +241,11 @@ func TestUnavailableCandidateRetainsOtherFailuresAndClearsCachedList(t *testing.
 	if err := h.store.SetState("admission:linux.do", runState{Failed: 2, Error: strptr("old failure")}); err != nil {
 		t.Fatal(err)
 	}
-	handler := Handler(h.store, HTTPOptions{Now: func() time.Time { return time.UnixMilli(h.clock.Now()) }})
+	lists := NewListCache(h.store, func() time.Time { return time.UnixMilli(h.clock.Now()) })
+	if err := lists.Refresh(); err != nil {
+		t.Fatal(err)
+	}
+	handler := Handler(h.store, HTTPOptions{Lists: lists, Now: func() time.Time { return time.UnixMilli(h.clock.Now()) }})
 	read := func() runState {
 		t.Helper()
 		w := httptest.NewRecorder()
@@ -259,6 +263,12 @@ func TestUnavailableCandidateRetainsOtherFailuresAndClearsCachedList(t *testing.
 	}
 	h.response = candidateResponse
 	if err := h.scheduler.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if read().Failed != 2 {
+		t.Fatal("query rebuilt cache")
+	}
+	if err := lists.Refresh(); err != nil {
 		t.Fatal(err)
 	}
 	if got := read(); got.Failed != 1 || got.Error == nil || *got.Error != "GitHub HTTP 503" {

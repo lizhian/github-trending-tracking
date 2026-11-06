@@ -41,9 +41,6 @@ export interface RunState {
 export interface ListResult {
   items: Project[];
   total: number;
-  page: number;
-  pageSize: number;
-  pages: number;
   languages: string[];
   topics: string[];
   summary: {

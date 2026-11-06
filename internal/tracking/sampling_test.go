@@ -10,10 +10,10 @@ import (
 	"github.com/lizhian/github-trending-tracking/internal/tracking"
 )
 
-// TestDaytimeHourlyScheduleAcrossMidnight 依次验证北京时间十八个应采整点，以及跨午夜的最近/下一时段计算。
-func TestDaytimeHourlyScheduleAcrossMidnight(t *testing.T) {
+// TestHourlyScheduleAcrossMidnight 依次验证北京时间十八个应采整点，以及跨午夜的最近/下一时段计算。
+func TestHourlyScheduleAcrossMidnight(t *testing.T) {
 	previous := beijing("2026-10-01T23:00:00")
-	for _, hour := range []string{"01", "03", "05", "07", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "23"} {
+	for _, hour := range []string{"00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23"} {
 		want := beijing("2026-10-02T" + hour + ":00:00")
 		if got := tracking.NextSlot(previous); got != want {
 			t.Fatalf("next after %d: got %d, want %d", previous, got, want)
@@ -23,10 +23,10 @@ func TestDaytimeHourlyScheduleAcrossMidnight(t *testing.T) {
 		}
 		previous = want
 	}
-	if got := tracking.LatestSlot(beijing("2026-10-03T00:59:59")); got != previous {
+	if got := tracking.LatestSlot(beijing("2026-10-03T00:59:59")); got != beijing("2026-10-03T00:00:00") {
 		t.Fatal("lost previous day's 23:00 observation", got)
 	}
-	if got := tracking.NextSlot(previous); got != beijing("2026-10-03T01:00:00") {
+	if got := tracking.NextSlot(previous); got != beijing("2026-10-03T00:00:00") {
 		t.Fatal("wrong next-day slot", got)
 	}
 }
@@ -101,7 +101,7 @@ func TestScheduleUpgradeReplansBothSourcesAndPreservesCooldowns(t *testing.T) {
 		t.Fatal("sources retained their old timetable or bypassed cooling", daily, direct, proxy)
 	}
 	policy, err := h.store.Policy()
-	if err != nil || policy.Version != 3 || policy.EffectiveAt != effective || policy.HourlyDaytimeAt != first {
+	if err != nil || policy.Version != 4 || policy.EffectiveAt != effective || policy.HourlyDaytimeAt != first {
 		t.Fatal("lost sampling boundaries", policy, err)
 	}
 	var hosts map[string]struct {
@@ -163,5 +163,35 @@ func TestSourceAndCandidateFailuresRetryAfterFiveMinutes(t *testing.T) {
 	h.tick(retry)
 	if h.list("github")["total"] != float64(1) {
 		t.Fatal("candidate did not retry after five minutes")
+	}
+}
+
+func TestStarCollectsAtNightWithoutRediscoveringSources(t *testing.T) {
+	h := newCollectionHarness(t, beijing("2026-10-02T20:50:00"))
+	daily := 0
+	h.sources["https://rsshub-balancer.virworks.moe/github/trending/daily/any"] = func() *http.Response {
+		daily++
+		return response(`<rss><channel><item><link>https://github.com/acme/one</link></item></channel></rss>`)
+	}
+	h.tick(beijing("2026-10-02T21:00:00"))
+	h.stars[0] = 123
+	h.tick(beijing("2026-10-02T22:12:00"))
+	got := h.history("github:R_0")
+	if got["observedAt"] != float64(beijing("2026-10-02T22:12:00")) || daily != 1 {
+		t.Fatalf("night collection or source schedule wrong: %v daily=%d", got, daily)
+	}
+}
+
+func TestFreshNightStartupKeepsSourceDiscoveryGate(t *testing.T) {
+	h := newCollectionHarness(t, beijing("2026-11-05T21:10:00"))
+	requests := 0
+	h.sources["https://rsshub-balancer.virworks.moe/github/trending/daily/any"] = func() *http.Response { requests++; return response(`<rss><channel/></rss>`) }
+	h.tick(beijing("2026-11-05T22:00:00"))
+	if requests != 0 {
+		t.Fatal("source discovery moved to new Star slot")
+	}
+	h.tick(beijing("2026-11-05T23:00:00"))
+	if requests != 1 {
+		t.Fatal("source did not run at its original next slot")
 	}
 }
