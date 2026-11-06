@@ -35,7 +35,13 @@ for attempt in {1..30}; do
   sleep 1
 done
 test "$ready" = true
-jq -e '.items == [] and .total == 0 and .pages == 1 and (.summary | type == "object") and (.status | type == "object")' "$work/list.json" >/dev/null
+jq -e '
+  .items == [] and .total == 0
+  and (has("page") or has("pageSize") or has("pages") | not)
+  and (.languages == []) and (.topics == [])
+  and (.summary | type == "object") and (.status | type == "object")
+  and (.asOf | type == "number")
+' "$work/list.json" >/dev/null
 curl --silent --fail --max-time 5 "http://$address/" > "$work/index.html"
 grep -Fq '<title>' "$work/index.html"
 asset="$(sed -n 's/.*src="\(\/assets\/[^" ]*\)".*/\1/p' "$work/index.html" | head -n 1)"
