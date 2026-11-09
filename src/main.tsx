@@ -19,7 +19,6 @@ import {
   type WindowHours,
 } from "../shared/contracts";
 import { SubmissionDialog } from "./SubmissionDialog";
-import { SearchSelect } from "./SearchSelect";
 import "./style.css";
 
 const labels: Record<WindowHours, string> = {
@@ -60,8 +59,7 @@ const apiBase = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 const sorts = ["name", "stars", ...WINDOWS.map(String)];
 interface QueryState {
   q: string;
-  language: string;
-  topic: string;
+  admitted: "" | "24" | "72" | "168";
   tab: "github" | "linuxdo";
   sort: string;
   direction: "asc" | "desc";
@@ -73,9 +71,9 @@ function readLocation(): QueryState {
   const text = (key: string) => (params.get(key) ?? "").slice(0, 200);
   const hours = Number(text("window")) as WindowHours;
   return {
-    q: text("q"),
-    language: text("language"),
-    topic: text("topic"),
+    q: [text("q"), text("language"), text("topic")].filter(Boolean).join(" "),
+    admitted: ["24", "72", "168"].includes(text("admitted"))
+      ? text("admitted") as QueryState["admitted"] : "",
     tab: text("tab") === "linuxdo" ? "linuxdo" : "github",
     sort: sorts.includes(text("sort")) ? text("sort") : "24",
     direction: text("direction") === "asc" ? "asc" : "desc",
@@ -86,8 +84,7 @@ function readLocation(): QueryState {
 function locationParameters(query: QueryState) {
   return new URLSearchParams({
     q: query.q,
-    language: query.language,
-    topic: query.topic,
+    admitted: query.admitted,
     sort: query.sort,
     direction: query.direction,
   });
@@ -676,14 +673,14 @@ function App() {
   const previousListPath = useRef(listPath);
   const resource = useApi<ListResult>(listPath, refresh);
   const data = resource.value;
-  const options = data;
   const items = useMemo(() => {
-    const keyword = query.q.trim().toLowerCase();
+    const keywords = query.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const cutoff = query.admitted ? now - Number(query.admitted) * 3_600_000 : null;
     const compare = new Intl.Collator("en").compare;
     return (data?.items ?? []).filter((project) =>
-      (!keyword || `${project.name} ${project.description ?? ""}`.toLowerCase().includes(keyword)) &&
-      (!query.language || project.language === query.language) &&
-      (!query.topic || project.topics.includes(query.topic)),
+      keywords.every((keyword) =>
+        `${project.name} ${project.description ?? ""} ${project.language ?? ""} ${project.topics.join(" ")}`.toLowerCase().includes(keyword),
+      ) && (cutoff === null || (project.enteredAt >= cutoff && project.enteredAt <= now)),
     ).sort((a, b) => {
       let order: number;
       if (query.sort === "name") order = compare(a.name.toLowerCase(), b.name.toLowerCase());
@@ -698,7 +695,7 @@ function App() {
       }
       return (query.direction === "desc" ? -order : order) || compare(a.name, b.name);
     });
-  }, [data, query.q, query.language, query.topic, query.sort, query.direction]);
+  }, [data, query.q, query.admitted, query.sort, query.direction, now]);
   // Filtering changes the list, not the open detail or its request lifecycle.
   const selected = data?.items.find((project) => project.id === query.project) ?? items[0] ?? data?.items[0];
   useEffect(() => {
@@ -820,7 +817,7 @@ function App() {
   }, []);
   const clear = () => {
     setDraft("");
-    commit({ q: "", language: "", topic: "" });
+    commit({ q: "", admitted: "" });
   };
   const changeSort = (sort: string) =>
     commit({
@@ -1042,7 +1039,7 @@ function App() {
                     aria-pressed={query.tab === tab}
                     onClick={() => {
                       setDraft("");
-                      commit({ tab, q: "", language: "", topic: "", project: "" });
+                      commit({ tab, q: "", admitted: "", project: "" });
                     }}
                   >
                     {label}
@@ -1054,7 +1051,7 @@ function App() {
                     <label className="search-field">
                       <Icon name="search" />
                       <span className="visually-hidden">
-                        搜索项目名称或简介
+                        搜索项目、描述、语言或 Topic
                       </span>
                       <input
                         ref={searchInput}
@@ -1065,26 +1062,22 @@ function App() {
                         onChange={(event) =>
                           setDraft(event.target.value.slice(0, 200))
                         }
-                        placeholder="搜索项目、描述…"
+                        placeholder="搜索项目、描述、语言、Topic…"
                       />
                       <kbd>/</kbd>
                     </label>
-                    <SearchSelect
-                      label="编程语言"
-                      all="全部语言"
-                      name="language"
-                      value={query.language}
-                      options={options?.languages ?? []}
-                      onChange={(language) => commit({ language })}
-                    />
-                    <SearchSelect
-                      label="仓库 Topics"
-                      all="全部 Topics"
-                      name="topic"
-                      value={query.topic}
-                      options={options?.topics ?? []}
-                      onChange={(topic) => commit({ topic })}
-                    />
+                    <select
+                      className="filter-select filter-trigger admission-filter"
+                      aria-label="最近入库"
+                      name="admitted"
+                      value={query.admitted}
+                      onChange={(event) => commit({ admitted: event.target.value as QueryState["admitted"] })}
+                    >
+                      <option value="">最近入库</option>
+                      <option value="24">24小时</option>
+                      <option value="72">3天</option>
+                      <option value="168">7天</option>
+                    </select>
                     <button
                       type="button"
                       className="icon-button reset"
@@ -1324,7 +1317,10 @@ function App() {
                   refresh={refresh}
                   asOf={data.asOf}
                   onWindow={(window) => commit({ window })}
-                  onTopic={(topic) => commit({ topic })}
+                  onTopic={(topic) => {
+                    setDraft(topic);
+                    commit({ q: topic });
+                  }}
                   onRefresh={() => setRefresh((value) => value + 1)}
                 />
               ) : (
