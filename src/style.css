@@ -1982,14 +1982,8 @@ html {
   .submission-open { padding-inline: 8px; }
 }
 
-.filters .admission-filter {
-  height: var(--control-height);
-  background: var(--color-paper-2);
-  border: 1px solid var(--color-control-edge);
-  border-radius: var(--radius-control);
-}
 @media (max-width: 760px) {
-  .list-controls .admission-filter {
+  .list-controls .filter-select:has([name="admitted"]) {
     grid-column: 1 / -1;
   }
 }

@@ -16,6 +16,8 @@ export function SearchSelect({
   value,
   options,
   onChange,
+  searchable = true,
+  optionLabel = (option: string) => option,
 }: {
   label: string;
   all: string;
@@ -23,6 +25,8 @@ export function SearchSelect({
   value: string;
   options: string[];
   onChange: (value: string) => void;
+  searchable?: boolean;
+  optionLabel?: (value: string) => string;
 }) {
   const id = useId();
   const trigger = useRef<HTMLButtonElement>(null);
@@ -39,7 +43,7 @@ export function SearchSelect({
   });
   const choices = ["", ...new Set([...options, ...(value ? [value] : [])])];
   const filtered = choices.filter((option) =>
-    (option || all)
+    (option ? optionLabel(option) : all)
       .toLocaleLowerCase()
       .includes(search.trim().toLocaleLowerCase()),
   );
@@ -65,7 +69,7 @@ export function SearchSelect({
       const above = rect.top - top - 16;
       const flip = below < 220 && above > below;
       const maxHeight = Math.max(100, Math.min(360, flip ? above : below));
-      const width = Math.min(Math.max(rect.width, 240), innerWidth - 24);
+      const width = Math.min(Math.max(rect.width, searchable ? 240 : 144), innerWidth - 24);
       setPosition({
         top: flip ? undefined : rect.bottom + 8,
         bottom: flip ? innerHeight - rect.top + 8 : undefined,
@@ -75,7 +79,7 @@ export function SearchSelect({
       });
     };
     place();
-    input.current?.focus({ preventScroll: true });
+    (searchable ? input.current : panel.current)?.focus({ preventScroll: true });
     addEventListener("resize", place);
     addEventListener("scroll", place, true);
     visualViewport?.addEventListener("resize", place);
@@ -86,7 +90,7 @@ export function SearchSelect({
       visualViewport?.removeEventListener("resize", place);
       visualViewport?.removeEventListener("scroll", place);
     };
-  }, [open]);
+  }, [open, searchable]);
   useEffect(() => {
     if (!open) return;
     const outside = (event: Event) => {
@@ -114,7 +118,7 @@ export function SearchSelect({
         type="button"
         className="filter-trigger"
         name={name}
-        aria-label={`${label}：${value || all}`}
+        aria-label={`${label}：${value ? optionLabel(value) : all}`}
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? `${id}-panel` : undefined}
@@ -135,7 +139,7 @@ export function SearchSelect({
           }
         }}
       >
-        <span>{value || all}</span>
+        <span>{value ? optionLabel(value) : all}</span>
         <svg
           width="14"
           height="14"
@@ -153,10 +157,18 @@ export function SearchSelect({
             id={`${id}-panel`}
             className="filter-popover"
             role="dialog"
+            tabIndex={-1}
             aria-label={`${label}筛选`}
             style={position}
             onKeyDown={(event) => {
-              if (event.key === "Escape") {
+              if (!searchable && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+                event.preventDefault();
+                setActive((previous) => (previous + (event.key === "ArrowDown" ? 1 : -1) + filtered.length) % filtered.length);
+              } else if (!searchable && (event.key === "Enter" || event.key === " ")) {
+                event.preventDefault();
+                const option = filtered[active];
+                if (option !== undefined) choose(option);
+              } else if (event.key === "Escape") {
                 event.preventDefault();
                 close(true);
               } else if (event.key === "Tab") {
@@ -178,7 +190,7 @@ export function SearchSelect({
               }
             }}
           >
-            <div className="filter-search">
+            {searchable && <div className="filter-search">
               <label className="visually-hidden" htmlFor={`${id}-search`}>
                 搜索{label}
               </label>
@@ -222,7 +234,7 @@ export function SearchSelect({
                   }
                 }}
               />
-            </div>
+            </div>}
             <div
               id={`${id}-options`}
               className="filter-options"
@@ -244,7 +256,7 @@ export function SearchSelect({
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => choose(option)}
                 >
-                  <span>{option || all}</span>
+                  <span>{option ? optionLabel(option) : all}</span>
                   <span className="option-check" aria-hidden="true">
                     {value === option ? "✓" : ""}
                   </span>

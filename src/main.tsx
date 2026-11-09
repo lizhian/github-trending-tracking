@@ -19,6 +19,7 @@ import {
   type WindowHours,
 } from "../shared/contracts";
 import { SubmissionDialog } from "./SubmissionDialog";
+import { SearchSelect } from "./SearchSelect";
 import "./style.css";
 
 const labels: Record<WindowHours, string> = {
@@ -1066,18 +1067,16 @@ function App() {
                       />
                       <kbd>/</kbd>
                     </label>
-                    <select
-                      className="filter-select filter-trigger admission-filter"
-                      aria-label="最近入库"
+                    <SearchSelect
+                      label="最近入库"
+                      all="最近入库"
                       name="admitted"
                       value={query.admitted}
-                      onChange={(event) => commit({ admitted: event.target.value as QueryState["admitted"] })}
-                    >
-                      <option value="">最近入库</option>
-                      <option value="24">24小时</option>
-                      <option value="72">3天</option>
-                      <option value="168">7天</option>
-                    </select>
+                      options={["24", "72", "168"]}
+                      searchable={false}
+                      optionLabel={(value) => ({ "24": "24小时", "72": "3天", "168": "7天" })[value] ?? value}
+                      onChange={(admitted) => commit({ admitted: admitted as QueryState["admitted"] })}
+                    />
                     <button
                       type="button"
                       className="icon-button reset"
