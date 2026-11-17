@@ -22,6 +22,7 @@ import { SubmissionDialog } from "./SubmissionDialog";
 import { SearchSelect } from "./SearchSelect";
 import { projectProblems, ProjectProblemDetails, ProjectProblemIndicator } from "./ProjectProblems";
 import "./style.css";
+import "./apple.css";
 
 const labels: Record<WindowHours, string> = {
   24: "24 小时",
@@ -183,9 +184,7 @@ function Icon({
     | "external"
     | "previous"
     | "next"
-    | "sun"
-    | "bell"
-    | "moon";
+    | "bell";
   size?: number;
 }) {
   const paths = {
@@ -218,13 +217,6 @@ function Icon({
     external: <path d="M14 3h7v7M21 3 10 14M10 3H3v18h18v-7" />,
     previous: <path d="m15 5-7 7 7 7" />,
     next: <path d="m9 5 7 7-7 7" />,
-    sun: (
-      <>
-        <circle cx="12" cy="12" r="4" />
-        <path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2" />
-      </>
-    ),
-    moon: <path d="M20.5 13.5A9 9 0 0 1 10.5 3a9 9 0 1 0 10 10.5Z" />,
     bell: (
       <>
         <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
@@ -434,6 +426,7 @@ function Details({
   onWindow,
   onTopic,
   onRefresh,
+  onBack,
 }: {
   project: Project;
   window: WindowHours;
@@ -442,6 +435,7 @@ function Details({
   onWindow: (hours: WindowHours) => void;
   onTopic: (topic: string) => void;
   onRefresh: () => void;
+  onBack?: () => void;
 }) {
   const [retry, setRetry] = useState(0);
   const history = useApi<HistoryResult>(
@@ -459,6 +453,12 @@ function Details({
     : null;
   return (
     <section className="detail-content" aria-label={`${project.name} 详情`}>
+      <div className="detail-title-row">
+        {onBack && (
+          <button type="button" className="mobile-details-back" aria-label="返回项目榜单" onClick={onBack}>
+            <Icon name="previous" size={24} />
+          </button>
+        )}
       <h2 className="detail-title">
         <a
           href={`https://github.com/${project.name}`}
@@ -470,6 +470,7 @@ function Details({
           <span className="detail-repo-name">{name.join("/")}</span>
         </a>
       </h2>
+      </div>
       <p className="detail-description">
         {project.description || "仓库尚未提供简介。"}
       </p>
@@ -662,13 +663,29 @@ function App() {
   const [refresh, setRefresh] = useState(0);
   const [submissionOpen, setSubmissionOpen] = useState(false);
   const messagesDialog = useRef<HTMLDialogElement>(null);
-  const [dark, setDark] = useState(() => {
-    try {
-      return localStorage.getItem("theme") === "dark";
-    } catch {
-      return false;
-    }
-  });
+  const mobileDetails = useRef<HTMLDialogElement>(null);
+  const [isMobile, setIsMobile] = useState(() => matchMedia("(max-width:760px)").matches);
+  const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
+  useEffect(() => {
+    const media = matchMedia("(max-width:760px)");
+    const update = () => {
+      setIsMobile(media.matches);
+      if (!media.matches) setMobileDetailsOpen(false);
+    };
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  useEffect(() => {
+    const dialog = mobileDetails.current;
+    if (!isMobile || !mobileDetailsOpen || !dialog) return;
+    dialog.showModal();
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "clip";
+    return () => {
+      dialog.close();
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isMobile, mobileDetailsOpen]);
   const pushNext = useRef(false);
   const controls = useRef<HTMLDivElement>(null);
   const tableScroll = useRef<HTMLDivElement>(null);
@@ -725,6 +742,7 @@ function App() {
       pushNext.current = false;
       setDraft(next.q);
       setQuery(next);
+      setMobileDetailsOpen(false);
     };
     addEventListener("popstate", restore);
     return () => removeEventListener("popstate", restore);
@@ -749,14 +767,6 @@ function App() {
     query.tab,
     commit,
   ]);
-  useEffect(() => {
-    document.documentElement.dataset.theme = dark ? "dark" : "light";
-    try {
-      localStorage.setItem("theme", dark ? "dark" : "light");
-    } catch {
-      /* Preference storage is optional. */
-    }
-  }, [dark]);
   useLayoutEffect(() => {
     if (inspector.current) inspector.current.scrollTop = 0;
   }, [selected?.id]);
@@ -815,6 +825,7 @@ function App() {
   useEffect(() => {
     const focusSearch = (event: KeyboardEvent) => {
       if (
+        !isMobile &&
         event.key === "/" &&
         !event.ctrlKey &&
         !event.metaKey &&
@@ -827,7 +838,7 @@ function App() {
     };
     addEventListener("keydown", focusSearch);
     return () => removeEventListener("keydown", focusSearch);
-  }, []);
+  }, [isMobile]);
   const clear = () => {
     setDraft("");
     commit({ q: "", admitted: "" });
@@ -841,13 +852,7 @@ function App() {
   const selectProject = (project: Project) => {
     commit({ project: project.id });
     if (inspector.current) inspector.current.scrollTop = 0;
-    if (matchMedia("(max-width:760px)").matches)
-      requestAnimationFrame(() =>
-        inspector.current?.scrollIntoView({
-          block: "start",
-          behavior: "instant",
-        }),
-      );
+    if (isMobile) setMobileDetailsOpen(true);
   };
   const syncHorizontal = (
     source: HTMLDivElement,
@@ -890,6 +895,37 @@ function App() {
   const hasCollectionNotice =
     problemProjects.length > 0 || failure || discovery?.failed || admission?.failed ||
     (data && data.summary.fresh < data.summary.tracked);
+  const inspectorContent = (
+          <aside
+              className="inspector"
+              ref={inspector}
+              aria-label="选中项目详情"
+            >
+              {selected && data ? (
+                <Details
+                  key={selected.id}
+                  project={selected}
+                  window={query.window}
+                  refresh={refresh}
+                  asOf={data.asOf}
+                  onWindow={(window) => commit({ window })}
+                  onTopic={(topic) => {
+                    setMobileDetailsOpen(false);
+                    setDraft(topic);
+                    commit({ q: topic });
+                  }}
+                  onRefresh={() => setRefresh((value) => value + 1)}
+                  onBack={isMobile ? () => setMobileDetailsOpen(false) : undefined}
+                />
+              ) : (
+                <p className="detail-empty">
+                  {resource.loading
+                    ? "正在读取追踪项目…"
+                    : "从榜单中选择一个项目，查看它的 Star 变化。"}
+                </p>
+              )}
+          </aside>
+  );
   return (
     <div className="app-shell">
       <a className="skip-link" href="#rankings">
@@ -992,14 +1028,6 @@ function App() {
             >
               <Icon name="bell" size={20} />
               {!!hasCollectionNotice && <span className="message-dot" aria-hidden="true" />}
-            </button>
-            <button
-              type="button"
-              className="icon-button"
-              aria-label={dark ? "切换浅色主题" : "切换深色主题"}
-              onClick={() => setDark((value) => !value)}
-            >
-              <Icon name={dark ? "sun" : "moon"} size={20} />
             </button>
             <a
               className="icon-button source-link"
@@ -1331,33 +1359,11 @@ function App() {
                 </div>
             </>
           </div>
-          <aside
-              className="inspector"
-              ref={inspector}
-              aria-label="选中项目详情"
-            >
-              {selected && data ? (
-                <Details
-                  key={selected.id}
-                  project={selected}
-                  window={query.window}
-                  refresh={refresh}
-                  asOf={data.asOf}
-                  onWindow={(window) => commit({ window })}
-                  onTopic={(topic) => {
-                    setDraft(topic);
-                    commit({ q: topic });
-                  }}
-                  onRefresh={() => setRefresh((value) => value + 1)}
-                />
-              ) : (
-                <p className="detail-empty">
-                  {resource.loading
-                    ? "正在读取追踪项目…"
-                    : "从榜单中选择一个项目，查看它的 Star 变化。"}
-                </p>
-              )}
-          </aside>
+          {isMobile ? (
+            <dialog className="mobile-details-dialog" ref={mobileDetails} aria-label="项目详情" onCancel={() => setMobileDetailsOpen(false)} onClose={() => setMobileDetailsOpen(false)}>
+              {mobileDetailsOpen && inspectorContent}
+            </dialog>
+          ) : inspectorContent}
         </section>
       </main>
     </div>

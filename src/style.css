@@ -981,22 +981,7 @@ td.numeric {
   --color-overview: oklch(18% 0.006 60);
   --color-overview-ink: oklch(99.5% 0.005 85);
 }
-:root[data-theme="dark"] {
-  color-scheme: dark;
-  --color-paper: oklch(19% 0.01 65);
-  --color-paper-2: oklch(22% 0.01 65);
-  --color-paper-3: oklch(27% 0.012 65);
-  --color-ink: oklch(93% 0.012 85);
-  --color-ink-2: oklch(85% 0.01 85);
-  --color-muted: oklch(73% 0.015 85);
-  --color-rule: oklch(34% 0.014 65);
-  --color-selection: oklch(28% 0.035 55);
-  --color-green: oklch(78% 0.12 150);
-  --color-green-soft: oklch(28% 0.04 150);
-  --color-negative: oklch(77% 0.13 30);
-  --color-focus: oklch(78% 0.13 50);
-  --color-accent-soft: oklch(32% 0.05 50);
-}
+
 .mark-signal {
   stroke: var(--color-accent);
   stroke-width: 2.5;
