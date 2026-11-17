@@ -61,8 +61,7 @@ a:focus-visible,
 input:focus-visible,
 select:focus-visible,
 summary:focus-visible {
-  outline: 2px solid var(--color-focus);
-  outline-offset: 3px;
+  outline: none;
 }
 button:active {
   transform: translateY(1px);
@@ -292,12 +291,6 @@ nav a[aria-current]::after {
 .search-field svg {
   flex-shrink: 0;
 }
-.search-field kbd {
-  font: 12px var(--font-body);
-  padding: 0 var(--space-2xs);
-  border: 1px solid var(--color-rule);
-  border-radius: 2px;
-}
 .select-field select {
   background: var(--color-paper);
   border: 1px solid var(--color-muted);
@@ -414,7 +407,10 @@ tbody tr:not(.selected):hover td {
   overflow: clip;
 }
 .lang {
-  font-size: 11px;
+  display: inline-flex;
+  flex: none;
+  vertical-align: middle;
+  font-size: 16px;
   color: var(--color-muted);
 }
 .numeric {
@@ -647,8 +643,12 @@ td.numeric {
     color-mix(in oklab, var(--color-accent) 75%, var(--color-ink));
 }
 .repo-link:hover {
-  background: color-mix(in oklab, var(--color-accent) 90%, var(--color-ink));
+  background: transparent;
   text-decoration: none;
+}
+.repo-link:hover span {
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 .repo-link:active {
   transform: translateY(1px);
@@ -1197,9 +1197,6 @@ td.numeric {
 .rank-column {
   width: 40px;
 }
-.language-column {
-  width: 72px;
-}
 .number-column {
   width: 88px;
 }
@@ -1379,6 +1376,13 @@ html {
 .detail-title a:hover {
   text-decoration-color: var(--color-accent);
 }
+.detail-title-external {
+  display: inline-block;
+  margin-left: 8px;
+  vertical-align: baseline;
+  line-height: 1;
+  color: var(--color-muted);
+}
 .detail-title .detail-owner {
   display: inline;
   font: inherit;
@@ -1400,18 +1404,8 @@ html {
   height: calc(var(--control-height) - 2px);
   font-size: 13px;
 }
-/* The entire search surface carries the immediate ring, including its icon. */
-.search-field:has(input:focus-visible) {
-  outline: 2px solid var(--color-focus);
-  outline-offset: 2px;
-}
 .search-field input:focus-visible {
   outline: none;
-}
-.search-field kbd {
-  color: var(--color-muted);
-  background: transparent;
-  border-color: var(--color-control-edge);
 }
 .filters .filter-select {
   flex: 0 1 144px;
@@ -1454,9 +1448,6 @@ html {
 .filters .icon-button:disabled {
   background: transparent;
 }
-.search-field:focus-within {
-  border-color: var(--color-muted);
-}
 @media (hover: hover) {
   .search-field:hover,
   .filter-trigger:hover,
@@ -1496,9 +1487,6 @@ html {
   color: var(--color-ink);
   background: var(--color-paper);
   font-size: 13px;
-}
-.filter-search input:focus-visible {
-  outline-offset: -3px;
 }
 .filter-search input::placeholder {
   color: var(--color-muted);
@@ -1756,7 +1744,7 @@ html {
 }
 .heading-scroll table,
 .table-wrap table {
-  min-width: 784px;
+  min-width: 848px;
 }
 @media (max-width: 760px) {
   :root {
@@ -1825,23 +1813,22 @@ html {
   padding-top: var(--space-xs);
 }
 
-.language-column,
 .number-column {
-  width: 64px;
+  width: 56px;
 }
 .numeric {
-  padding-right: var(--space-2xs);
+  padding-right: 2px;
 }
 .heading-scroll th.numeric button {
-  padding-inline: var(--space-3xs);
+  padding-inline: 0;
 }
 @media (max-width: 760px) {
   .name-column {
-    width: 184px;
+    width: auto;
   }
   .heading-scroll table,
   .table-wrap table {
-    min-width: 608px;
+    min-width: 724px;
   }
 }
 

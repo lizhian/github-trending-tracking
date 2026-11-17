@@ -22,6 +22,8 @@ import { SubmissionDialog } from "./SubmissionDialog";
 import { SearchSelect } from "./SearchSelect";
 import { projectProblems, ProjectProblemDetails, ProjectProblemIndicator } from "./ProjectProblems";
 import { AITags } from "./AITags";
+import { LanguageIcon } from "./LanguageIcon";
+import { projectHeat } from "./heat";
 import "./style.css";
 import "./apple.css";
 
@@ -64,7 +66,7 @@ const stateLabel = (trend: TrendSummary) =>
           ? "部分观测"
           : "完整观测";
 const apiBase = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
-const sorts = ["name", "stars", ...WINDOWS.map(String)];
+const sorts = ["name", "heat", "stars", ...WINDOWS.map(String)];
 interface QueryState {
   q: string;
   admitted: "" | "24" | "72" | "168";
@@ -83,7 +85,7 @@ function readLocation(): QueryState {
     admitted: ["24", "72", "168"].includes(text("admitted"))
       ? text("admitted") as QueryState["admitted"] : "",
     tab: text("tab") === "linuxdo" ? "linuxdo" : "github",
-    sort: sorts.includes(text("sort")) ? text("sort") : "24",
+    sort: sorts.includes(text("sort")) ? text("sort") : "heat",
     direction: text("direction") === "asc" ? "asc" : "desc",
     project: text("project"),
     window: WINDOWS.includes(hours) ? hours : 720,
@@ -102,7 +104,7 @@ function locationFor(query: QueryState) {
   for (const [key, value] of [...params]) {
     if (
       !value ||
-      (key === "sort" && value === "24") ||
+      (key === "sort" && value === "heat") ||
       (key === "direction" && value === "desc")
     )
       params.delete(key);
@@ -179,7 +181,6 @@ function Icon({
   name:
     | "mark"
     | "search"
-    | "refresh"
     | "reset"
     | "github"
     | "external"
@@ -199,12 +200,6 @@ function Icon({
       <>
         <circle cx="10.5" cy="10.5" r="6.5" />
         <path d="m16 16 5 5" />
-      </>
-    ),
-    refresh: (
-      <>
-        <path d="M20 7v5h-5M4 17v-5h5" />
-        <path d="M6 6a8 8 0 0 1 14 6M4 12a8 8 0 0 0 14 6" />
       </>
     ),
     reset: (
@@ -379,11 +374,28 @@ function ProjectColumns() {
     <colgroup>
       <col className="rank-column" />
       <col className="name-column" />
-      <col className="language-column" />
-      {Array.from({ length: 5 }, (_, index) => (
+      {Array.from({ length: 6 }, (_, index) => (
         <col className="number-column" key={index} />
       ))}
     </colgroup>
+  );
+}
+const heatNumber = new Intl.NumberFormat("zh-CN", {
+  minimumFractionDigits: 1,
+  maximumFractionDigits: 1,
+});
+function HeatValue({ project }: { project: Project }) {
+  const heat = projectHeat(project);
+  const unknown = WINDOWS.some((hours) => project.trends[hours].basis === "unknown");
+  return (
+    <span
+      className={heat === null ? "accumulating" : undefined}
+      title={heat === null
+        ? unknown ? "观测数据过期，暂无法计算热度" : "至少实际观测 24 小时且四窗口均可计算后展示热度"
+        : "四窗口正向日均 Star 增长，按 60%、25%、10%、5% 加权"}
+    >
+      {heat === null ? unknown ? "—" : "积累中" : heat > 1000 ? `${(heat / 1000).toFixed(1)}k` : heatNumber.format(heat)}
+    </span>
   );
 }
 function TrendValue({ trend }: { trend: TrendSummary }) {
@@ -471,7 +483,10 @@ function Details({
         >
           <span className="detail-owner">{owner} / </span>
           <wbr />
-          <span className="detail-repo-name">{name.join("/")}</span>
+          <span className="detail-repo-name">
+            {name.join("/")}
+            <span className="detail-title-external"><Icon name="external" size={12} /></span>
+          </span>
         </a>
       </h2>
       </div>
@@ -506,7 +521,7 @@ function Details({
           {summary && <p className="detail-description" aria-label="AI 项目总结">{summary}</p>}
           {aiTags.length > 0 && (
             <div className="detail-ai-tags" aria-label="AI 项目标签">
-              {aiTags.map(tag => <span className="ai-tag" key={tag}>{tag}</span>)}
+              {aiTags.map(tag => <button type="button" className="ai-tag" key={tag} onClick={() => onTopic(tag)} aria-label={`搜索 AI 标签 ${tag}`}>{tag}</button>)}
             </div>
           )}
         </div>
@@ -709,6 +724,11 @@ function App() {
     pushNext.current = push;
     setQuery((previous) => ({ ...previous, ...patch }));
   }, []);
+  const searchTag = (tag: string) => {
+    setMobileDetailsOpen(false);
+    setDraft(tag);
+    commit({ q: tag });
+  };
   const listPath = `/api/projects?type=${query.tab === "linuxdo" ? "linux.do" : "github"}`;
   const previousListPath = useRef(listPath);
   const resource = useApi<ListResult>(listPath, refresh);
@@ -719,14 +739,14 @@ function App() {
     const compare = new Intl.Collator("en").compare;
     return (data?.items ?? []).filter((project) =>
       keywords.every((keyword) =>
-        `${project.name} ${project.description ?? ""} ${project.language ?? ""} ${project.topics.join(" ")}`.toLowerCase().includes(keyword),
+        `${project.name} ${project.description ?? ""} ${project.language ?? ""} ${project.topics.join(" ")} ${project.aiSummary ?? ""} ${(project.aiTags ?? []).join(" ")}`.toLowerCase().includes(keyword),
       ) && (cutoff === null || (project.enteredAt >= cutoff && project.enteredAt <= now)),
     ).sort((a, b) => {
       let order: number;
       if (query.sort === "name") order = compare(a.name.toLowerCase(), b.name.toLowerCase());
       else {
-        const av = query.sort === "stars" ? a.stars : a.trends[Number(query.sort) as WindowHours].delta;
-        const bv = query.sort === "stars" ? b.stars : b.trends[Number(query.sort) as WindowHours].delta;
+        const av = query.sort === "heat" ? projectHeat(a) : query.sort === "stars" ? a.stars : a.trends[Number(query.sort) as WindowHours].delta;
+        const bv = query.sort === "heat" ? projectHeat(b) : query.sort === "stars" ? b.stars : b.trends[Number(query.sort) as WindowHours].delta;
         if (av === null || bv === null) {
           if (av !== bv) return av === null ? 1 : -1;
           return compare(a.name, b.name);
@@ -919,11 +939,7 @@ function App() {
                   refresh={refresh}
                   asOf={data.asOf}
                   onWindow={(window) => commit({ window })}
-                  onTopic={(topic) => {
-                    setMobileDetailsOpen(false);
-                    setDraft(topic);
-                    commit({ q: topic });
-                  }}
+                  onTopic={searchTag}
                   onRefresh={() => setRefresh((value) => value + 1)}
                   onBack={isMobile ? () => setMobileDetailsOpen(false) : undefined}
                 />
@@ -979,7 +995,7 @@ function App() {
                     <label className="search-field">
                       <Icon name="search" />
                       <span className="visually-hidden">
-                        搜索项目、描述、语言或 Topic
+                        搜索项目、描述、语言、Topic、AI 总结或 AI 标签
                       </span>
                       <input
                         ref={searchInput}
@@ -990,9 +1006,8 @@ function App() {
                         onChange={(event) =>
                           setDraft(event.target.value.slice(0, 200))
                         }
-                        placeholder="搜索项目、描述、语言、Topic…"
+                        placeholder="搜索项目、语言、AI 总结或标签…"
                       />
-                      <kbd>/</kbd>
                     </label>
                     <SearchSelect
                       label="最近入库"
@@ -1012,16 +1027,6 @@ function App() {
                       onClick={clear}
                     >
                       <Icon name="reset" />
-                    </button>
-                    <button
-                      type="button"
-                      className="icon-button reset"
-                      disabled={resource.loading}
-                      aria-label="刷新数据"
-                      title="只查询已采集结果"
-                      onClick={() => setRefresh((value) => value + 1)}
-                    >
-                      <Icon name="refresh" />
                     </button>
                   </div>
           </div>
@@ -1137,9 +1142,7 @@ function App() {
                             排名
                           </th>
                           {sortHeading("name", "项目名称", "name-col")}
-                          <th scope="col" className="lang-col">
-                            语言
-                          </th>
+                          {sortHeading("heat", "热度")}
                           {sortHeading("stars", "Star 总数")}
                           {WINDOWS.map((hours) => (
                             <React.Fragment key={hours}>
@@ -1190,7 +1193,7 @@ function App() {
                   >
                     <ProjectColumns />
                     <caption className="visually-hidden">
-                      追踪项目及其 Star 净增量
+                      追踪项目、热度及其 Star 净增量
                     </caption>
                     <thead>
                       <tr>
@@ -1201,7 +1204,7 @@ function App() {
                           项目名称
                         </th>
                         <th className="visually-hidden" scope="col">
-                          语言
+                          热度
                         </th>
                         <th className="visually-hidden" scope="col">
                           Star 总数
@@ -1255,7 +1258,8 @@ function App() {
                                       </span>
                                     )}
                                   </button>
-                                  <AITags tags={project.aiTags ?? []} />
+                                  <LanguageIcon language={project.language} />
+                                  <AITags tags={project.aiTags ?? []} onTag={searchTag} />
                                   <ProjectProblemIndicator project={project} />
                                 </div>
                                 <p
@@ -1265,10 +1269,8 @@ function App() {
                                   {project.aiSummary || project.description || "暂无项目介绍"}
                                 </p>
                               </td>
-                              <td className="lang-col">
-                                <span className="lang">
-                                  {project.language || "未提供"}
-                                </span>
+                              <td className="numeric">
+                                <HeatValue project={project} />
                               </td>
                               <td className="numeric">
                                 <span
@@ -1304,7 +1306,7 @@ function App() {
                                 : resource.error
                                   ? "请重试列表查询。"
                                   : data?.summary.tracked
-                                    ? "试试其他关键词、语言或 Topic。"
+                                    ? "试试其他关键词、语言、Topic 或 AI 标签。"
                                     : "后台采集后，项目会自动出现在这里。"}
                             </p>
                             {!resource.loading &&

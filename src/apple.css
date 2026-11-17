@@ -195,8 +195,7 @@ button:focus-visible,
 a:focus-visible,
 input:focus-visible,
 summary:focus-visible {
-  outline: 2px solid var(--color-focus);
-  outline-offset: 3px;
+  outline: none;
 }
 button:active {
   transform: translateY(1px);
@@ -471,8 +470,7 @@ html .list-footer {
   }
 }
 html :focus-visible {
-  outline: 2px solid var(--color-focus);
-  outline-offset: 3px;
+  outline: none;
 }
 html button:active {
   transform: translateY(1px);
@@ -543,7 +541,7 @@ html .filter-trigger {
     width: 100%;
   }
   .table-wrap table {
-    min-width: 660px;
+    min-width: 724px;
   }
 }
 .periods {
@@ -645,4 +643,18 @@ html .detail-info > .detail-description,
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+}
+
+.ai-tag-tooltip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+button.ai-tag {
+  font-family: inherit;
+  cursor: pointer;
+}
+button.ai-tag:hover {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
 }

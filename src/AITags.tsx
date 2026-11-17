@@ -1,10 +1,17 @@
 import { createPortal } from "react-dom";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 // Measure complete tags so partially clipped labels never appear.
-export function AITags({ tags }: { tags: string[] }) {
+export function AITags({ tags, onTag }: { tags: string[]; onTag: (tag: string) => void }) {
   const root = useRef<HTMLDivElement>(null);
   const [tooltip, setTooltip] = useState<{left: number; top: number} | null>(null);
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const keepOpen = () => clearTimeout(closeTimer.current);
+  const closeSoon = () => {
+    keepOpen();
+    closeTimer.current = setTimeout(() => setTooltip(null), 150);
+  };
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
   const [visible, setVisible] = useState(tags.length);
   useLayoutEffect(() => {
     const element = root.current;
@@ -30,15 +37,21 @@ export function AITags({ tags }: { tags: string[] }) {
   const hidden = tags.slice(visible);
   return <div className="ai-tags" ref={root}>
     <span className="ai-tag-measure" aria-hidden="true">{tags.map(tag => <span className="ai-tag" key={tag}>{tag}</span>)}<span className="ai-tag ai-count-measure">+{tags.length}</span></span>
-    {tags.slice(0, visible).map(tag => <span className="ai-tag" key={tag}>{tag}</span>)}
-    {hidden.length > 0 && <span
-      onMouseEnter={event => { const rect = event.currentTarget.getBoundingClientRect(); setTooltip({left: Math.max(8, Math.min(rect.left, window.innerWidth - 268)), top: rect.bottom + 4}); }}
-      onMouseLeave={() => setTooltip(null)}
-      onFocus={event => { const rect = event.currentTarget.getBoundingClientRect(); setTooltip({left: Math.max(8, Math.min(rect.left, window.innerWidth - 268)), top: rect.bottom + 4}); }}
-      onBlur={() => setTooltip(null)} className="ai-tag-overflow" tabIndex={0} aria-label={`隐藏标签：${hidden.join("、")}`} onClick={event => event.stopPropagation()}>
-      <span className="ai-tag">+{hidden.length}</span>
-
-    </span>}
-    {tooltip && hidden.length > 0 && createPortal(<span className="ai-tag-tooltip" role="tooltip" style={{left: tooltip.left, top: tooltip.top}}>{hidden.join(" · ")}</span>, document.body)}
+    {tags.slice(0, visible).map(tag => <button type="button" className="ai-tag" key={tag} aria-label={`搜索 AI 标签 ${tag}`} onClick={event => { event.stopPropagation(); onTag(tag); }}>{tag}</button>)}
+    {hidden.length > 0 && <button
+      type="button"
+      onMouseEnter={event => { keepOpen(); const rect = event.currentTarget.getBoundingClientRect(); setTooltip({left: Math.max(8, Math.min(rect.left, window.innerWidth - 268)), top: rect.bottom + 4}); }}
+      onMouseLeave={closeSoon}
+      onFocus={event => { keepOpen(); const rect = event.currentTarget.getBoundingClientRect(); setTooltip({left: Math.max(8, Math.min(rect.left, window.innerWidth - 268)), top: rect.bottom + 4}); }}
+      onBlur={closeSoon}
+      className="ai-tag ai-tag-overflow" aria-expanded={!!tooltip} aria-label={`更多 AI 标签：${hidden.join("、")}`} onClick={event => { event.stopPropagation(); keepOpen(); const rect = event.currentTarget.getBoundingClientRect(); setTooltip({left: Math.max(8, Math.min(rect.left, window.innerWidth - 268)), top: rect.bottom + 4}); }}>
+      +{hidden.length}
+    </button>}
+    {tooltip && hidden.length > 0 && createPortal(<div
+      className="ai-tag-tooltip" role="group" aria-label="更多 AI 标签"
+      style={{left: tooltip.left, top: tooltip.top}}
+      onMouseEnter={keepOpen} onMouseLeave={closeSoon} onFocus={keepOpen} onBlur={closeSoon}
+      onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); setTooltip(null); } }}
+    >{hidden.map(tag => <button type="button" className="ai-tag" key={tag} aria-label={`搜索 AI 标签 ${tag}`} onClick={event => { event.stopPropagation(); setTooltip(null); onTag(tag); }}>{tag}</button>)}</div>, document.body)}
   </div>;
 }
