@@ -61,8 +61,16 @@ type Summary struct {
 	Comparable24 int    `json:"comparable24"`
 }
 
-// ListResult 全量列表响应，包含筛选选项、汇总、运行状态与生成时间。
+// SourceStatus 展示某个趋势源最近状态及受冷却约束的下次执行时间。
+type SourceStatus struct {
+	sourceState
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// ListResult 全量列表响应，包含筛选选项、汇总、来源状态与生成时间。
 type ListResult struct {
+	Sources   []SourceStatus             `json:"sources"`
 	Items     []Project                  `json:"items"`
 	Total     int                        `json:"total"`
 	Languages []string                   `json:"languages"`
@@ -165,6 +173,39 @@ func (s *Store) list(p parameters, now int64) (ListResult, error) {
 		return ListResult{}, err
 	}
 	result := ListResult{Items: []Project{}, Languages: []string{}, Topics: []string{}, AsOf: now, Status: map[string]json.RawMessage{}}
+	var discovery discoveryState
+	if _, err := s.State("discoverySources", &discovery); err != nil {
+		return result, err
+	}
+	hosts := map[string]*hostState{}
+	if _, err := s.State("upstream", &hosts); err != nil {
+		return result, err
+	}
+	if hosts == nil {
+		hosts = map[string]*hostState{}
+	}
+	upstream := &upstream{hosts: hosts}
+	result.Sources = []SourceStatus{}
+	for _, source := range sources {
+		if source.typ != p.kind {
+			continue
+		}
+		status := SourceStatus{ID: source.id, Name: sourceName(source)}
+		if previous := discovery.Sources[source.id]; previous != nil {
+			status.sourceState = *previous
+		}
+		blocked := upstream.blocked(source.url)
+		if source.kind == "linuxdo" {
+			for _, raw := range linuxRSSURLs[1:] {
+				blocked = min(blocked, upstream.blocked(raw))
+			}
+			if status.Failed > 0 && status.RetryAfter > 0 {
+				status.NextAt = min(status.NextAt, status.RetryAfter)
+			}
+		}
+		status.NextAt = max(status.NextAt, blocked)
+		result.Sources = append(result.Sources, status)
+	}
 	languages, topics := map[string]bool{}, map[string]bool{}
 	net := int64(0)
 	for _, project := range projects {

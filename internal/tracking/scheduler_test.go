@@ -98,6 +98,9 @@ func TestSchedulerWaitsForNextSlotAndAdmitsWithActualObservation(t *testing.T) {
 	// 闭包读取 h 的当前字段，因此测试稍后修改 stars/failed 就能影响后续响应；
 	// 所有外部 URL 最终都被 Transport 接管，不会误发到真实 GitHub。
 	client := &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/search/repositories" {
+			return response(`{"items":[],"incomplete_results":false}`), nil
+		}
 		if r.URL.Host == "api.github.com" {
 			b, _ := io.ReadAll(r.Body)
 			if !strings.Contains(string(b), "stargazerCount") {
@@ -105,7 +108,7 @@ func TestSchedulerWaitsForNextSlotAndAdmitsWithActualObservation(t *testing.T) {
 			}
 			return response(`{"data":{"nodes":[{"id":"R_1","nameWithOwner":"acme/one","stargazerCount":100,"repositoryTopics":{"nodes":[]}}]}}`), nil
 		}
-		if strings.Contains(r.URL.Path, "github/trending/daily") {
+		if r.URL.Path == "/github/trending/daily/any" {
 			return response(`<rss><channel><item><link>https://github.com/acme/one</link></item></channel></rss>`), nil
 		}
 		return response(`<rss><channel/></rss>`), nil
@@ -188,7 +191,7 @@ func newCollectionHarness(t *testing.T, start int64) *collectionHarness {
 			if strings.Contains(r.URL.Path, "raw.githubusercontent") {
 				return response(""), nil
 			}
-			if strings.Contains(r.URL.Path, "github/trending/daily") {
+			if r.URL.Path == "/github/trending/daily/any" {
 				links := ""
 				for _, n := range h.names {
 					links += "<item><link>https://github.com/" + n + "</link></item>"
@@ -196,6 +199,9 @@ func newCollectionHarness(t *testing.T, start int64) *collectionHarness {
 				return response("<rss><channel>" + links + "</channel></rss>"), nil
 			}
 			return response("<rss><channel/></rss>"), nil
+		}
+		if r.URL.Path == "/search/repositories" {
+			return response(`{"items":[],"incomplete_results":false}`), nil
 		}
 		b, _ := io.ReadAll(r.Body)
 		var payload map[string]string
@@ -836,7 +842,7 @@ func TestPartialGraphQLResultsSurviveRateLimitsAndRespectLongerRetryAfter(t *tes
 	h.tick(beijing("2026-10-01T09:00:00"))
 	base := h.client.Transport
 	h.client.Transport = transportFunc(func(r *http.Request) (*http.Response, error) {
-		if r.URL.Host == "api.github.com" {
+		if r.URL.Host == "api.github.com" && r.URL.Path != "/search/repositories" {
 			b, _ := io.ReadAll(r.Body)
 			r.Body = io.NopCloser(strings.NewReader(string(b)))
 			if strings.Contains(string(b), "stargazerCount") {

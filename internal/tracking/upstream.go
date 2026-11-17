@@ -85,12 +85,35 @@ func (u *upstream) host(raw string) *hostState {
 }
 
 // blocked 返回该主机冷却截止的 Unix 毫秒时间，0 表示尚未设置冷却。
-func (u *upstream) blocked(raw string) int64 { return u.host(raw).BlockedUntil }
+func (u *upstream) blocked(raw string) int64 {
+	until := u.host(raw).BlockedUntil
+	if isSearchURL(raw) {
+		until = max(until, u.searchQuota().BlockedUntil)
+	}
+	return until
+}
+
+func isSearchURL(raw string) bool {
+	parsed, err := url.Parse(raw)
+	return err == nil && parsed.Hostname() == "api.github.com" && parsed.Path == "/search/repositories"
+}
+
+// 搜索主配额独立，物理主机的请求间隔和通用限流仍共享。
+func (u *upstream) searchQuota() *hostState {
+	const key = "api.github.com:search"
+	if u.hosts[key] == nil {
+		u.hosts[key] = &hostState{}
+	}
+	return u.hosts[key]
+}
 
 // cooldown 延长冷却至本地下限、已有截止、Retry-After 和额度重置时间中的最大值，绝不缩短已有冷却。
 // Retry-After 可为秒数或 HTTP 日期，而 X-RateLimit-Reset 是 Unix 秒，需要转换成毫秒。
 func (u *upstream) cooldown(raw string, headers http.Header, duration int64) {
-	s := u.host(raw)
+	u.cooldownState(u.host(raw), headers, duration)
+}
+
+func (u *upstream) cooldownState(s *hostState, headers http.Header, duration int64) {
 	now := u.clock.Now()
 	until := max(s.BlockedUntil, now+duration)
 	if retry := headers.Get("Retry-After"); retry != "" {
@@ -127,8 +150,8 @@ func (u *upstream) text(ctx context.Context, raw, label string, body []byte, tok
 	}
 	s := u.host(raw)
 	now := u.clock.Now()
-	if s.BlockedUntil > now {
-		return "", &deferredRequest{s.BlockedUntil}
+	if until := u.blocked(raw); until > now {
+		return "", &deferredRequest{until}
 	}
 	timeout := 15 * time.Second
 	if label == "GitHub" {
@@ -181,8 +204,13 @@ func (u *upstream) text(ctx context.Context, raw, label string, body []byte, tok
 	defer res.Body.Close()
 	limited := res.StatusCode == 429 || res.Header.Get("Retry-After") != "" || res.Header.Get("X-RateLimit-Remaining") == "0"
 	if limited {
-		u.rateLimited = true
-		u.cooldown(raw, res.Header, retryInterval)
+		searchOnly := isSearchURL(raw) && res.Header.Get("X-RateLimit-Resource") == "search" && res.Header.Get("X-RateLimit-Remaining") == "0" && res.StatusCode != 429 && res.Header.Get("Retry-After") == ""
+		if searchOnly {
+			u.cooldownState(u.searchQuota(), res.Header, retryInterval)
+		} else {
+			u.rateLimited = true
+			u.cooldown(raw, res.Header, retryInterval)
+		}
 	}
 	if res.StatusCode < 200 || res.StatusCode >= 300 || (label == "GitHub" && res.StatusCode != http.StatusOK) {
 		if label == "GitHub" && res.StatusCode == 403 && !limited {
@@ -213,7 +241,7 @@ func readBounded(r io.Reader) (string, error) {
 	return string(b), nil
 }
 
-var safeDiagnostic = regexp.MustCompile(`^(GitHub HTTP [0-9]{3}|RSS HTTP [0-9]{3}|HelloGithub HTTP [0-9]{3}|OpenGithubs HTTP [0-9]{3}|GitHub GraphQL unavailable|RSS invalid XML|RSS missing channel|HelloGithub invalid project|Upstream response too large|Upstream empty response|Upstream cooling down)$`)
+var safeDiagnostic = regexp.MustCompile(`^(GitHub HTTP [0-9]{3}|RSS HTTP [0-9]{3}|HelloGithub HTTP [0-9]{3}|OpenGithubs HTTP [0-9]{3}|GitHub Search invalid response|GitHub Search incomplete results|GitHub GraphQL unavailable|RSS invalid XML|RSS missing channel|HelloGithub invalid project|Upstream response too large|Upstream empty response|Upstream cooling down)$`)
 
 // safeError 只放行预定义诊断文本，其余统一返回安全提示，避免上游正文、URL 或 Token 泄漏。
 func safeError(e error) string {
@@ -363,7 +391,7 @@ func (u *upstream) lookupRepositories(ctx context.Context, token string, targets
 				exact = len(problem.Path) == 1
 			} else if problem.Path[0] == "nodes" {
 				// GraphQL path 里的 JSON 数字解码到 any 后是 float64，所以用 float64(i) 对齐节点索引。
-			relevant = len(problem.Path) == 1 || problem.Path[1] == float64(i)
+				relevant = len(problem.Path) == 1 || problem.Path[1] == float64(i)
 				exact = len(problem.Path) == 2
 			}
 			if relevant {

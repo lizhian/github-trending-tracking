@@ -43,7 +43,14 @@ export interface RunState {
   failed: number;
   error: string | null;
 }
+export interface SourceStatus extends RunState {
+  id: string;
+  name: string;
+  nextAt: number;
+  retryAfter?: number;
+}
 export interface ListResult {
+  sources: SourceStatus[];
   items: Project[];
   total: number;
   languages: string[];

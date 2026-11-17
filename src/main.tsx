@@ -1094,6 +1094,30 @@ function App() {
                 分钟宽限并标记为数据过期。
               </p>
             )}
+          {!!data?.sources?.length && (
+            <section className="collection-sources" aria-labelledby="collection-sources-title">
+              <h3 id="collection-sources-title">趋势源采集情况</h3>
+              <p>解析结果可能包含已收录或重复项目；HelloGitHub 的解析结果为待解析的详情链接。</p>
+              <ul className="collection-source-list">
+                {data.sources.map((source) => (
+                  <li key={source.id}>
+                    <strong>{source.name}</strong>
+                    <span className={source.failed ? "source-failed" : ""}>
+                      {source.failed ? "异常，等待重试" : !source.attemptedAt ? "尚未执行" : "成功"}
+                    </span>
+                    <dl>
+                      <dt>最近尝试</dt><dd>{source.attemptedAt ? time(source.attemptedAt) : "尚未执行"}</dd>
+                      <dt>最近成功</dt><dd>{time(source.succeededAt)}</dd>
+                      <dt>解析结果数</dt><dd>{source.attemptedAt ? number(source.succeeded) : "—"}</dd>
+                      <dt>{source.failed ? "下次重试" : "下次执行"}</dt>
+                      <dd>{!source.nextAt ? "等待调度" : source.nextAt <= data.asOf ? "已到期，等待调度" : time(source.nextAt)}</dd>
+                    </dl>
+                    {source.error && <p role="status">{source.error === "GitHub Search incomplete results" ? "搜索结果不完整，已保留返回的候选，将重试。" : source.error}</p>}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
           {problemProjects.length > 0 && (
             <section className="collection-project-problems" aria-labelledby="project-problems-title">
               <h3 id="project-problems-title">有问题的项目（{problemProjects.length}）</h3>

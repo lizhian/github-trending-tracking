@@ -6,7 +6,7 @@
 
 ## 运行时配置
 
-- `GITHUB_TOKEN`：仅供服务器请求 GitHub GraphQL 和 README REST API，不传给前端或镜像构建；也可使用 `GITHUB_TOKEN_FILE` 指向运行时挂载的秘密文件。读取 README 需要 Contents 读取权限；公开仓库的 404 会匿名复核，不能因 Token 缺少内容权限就判定无 README。
+- `GITHUB_TOKEN`：仅供服务器请求 GitHub GraphQL、Search 和 README REST API，不传给前端或镜像构建；也可使用 `GITHUB_TOKEN_FILE` 指向运行时挂载的秘密文件。读取 README 需要 Contents 读取权限；公开仓库的 404 会匿名复核，不能因 Token 缺少内容权限就判定无 README。
 
 变量值优先于对应 `_FILE`。可用宿主权限为 0600 的私有 env 文件经 `docker run --env-file /private/runtime.env …` 注入，或把秘密文件只读挂载到容器。不要在命令行打印秘密。缺少 Token 不妨碍 HTTP 读取，下一轮上游失败会以安全诊断保存，已有有效观测不会被清零。
 
@@ -27,6 +27,10 @@ Linux.do 按顺序遍历以下七个固定公开 RSS 入口，成功后仍继续
 Linux.do 仅收录默认分支主 README 原始内容包含大小写敏感字面字符串 `https://linux.do` 的仓库；仅在 RSS 中出现不足以收录，代码块与注释中的标识也算。确认无 README 或无标识的结果按稳定仓库 ID 缓存 24 小时，到期且 RSS 再次发现才重查。在库不持续复查，淘汰后重收录须重新校验。失败待确认，Linux.do 候选单独保存 `readmeNextAt`，不阻塞同仓库的 GitHub 候选；主机冷却仍共享。上线前先完成[存量清洗](linuxdo-cleanup.md)。
 
 Star 全天逐小时采样；GitHub 日榜、Linux.do 继续按 18 时段发现（09:00–21:00 每小时，其余时间每两小时）；GitHub 周月榜、HelloGithub all/featured、OpenGithubs 日周月榜仍每日北京时间 09 点到期。每 tick 解析最多 20 条待收录身份，采样最多 100 个不同仓库；同仓库两类型共享一次结果和 24 小时元数据刷新，各自保存独立周期和历史。新类型收录只可复用本轮已成功的单个真实观测，其入库时间和保护期仍从本次收录开始。
+
+新增 Python、TypeScript、JavaScript、Go、Rust、Java、C++ 分语言 Trending 日榜和 Search，每日北京时间 09 点到期；首次启用沿用启动后下一允许轮次发现。Search 每种语言只取单页前 30 个公开仓库：近 90 天创建、Star ≥100、非 Fork、未归档，按总 Star 降序；最多返回 210 条候选，去重后沿用排队准入，总 Star 排序不代表本站热度。不完整响应保留已返回候选，并显示异常、至少五分钟后重试。Search 主配额冷却独立持久化，不阻塞 Star/准入；通用限流仍共享主机冷却和请求间隔。
+
+采集消息展示当前追踪类型的全部来源，包括未执行、成功和失败的最近状态：最近尝试、最近成功、解析结果数、安全错误及下次执行/重试时间（包含冷却约束）。成功且零结果与失败区分，异常标记仍仅表示异常，不增加历史采集日志。实施任务 [#50](https://github.com/lizhian/github-trending-tracking/issues/50)。
 
 失败至少 5 分钟后重试，服从更长主机冷却；持久化 pending、来源与 HelloGithub 详情进度、nextAt、blockedUntil 在重启、换轮和重新发现后继续有效。同主机请求开始间隔至少 2 秒；GitHub 20 秒、其他 15 秒超时覆盖响应正文，正文上限 2,000,000 字节。GitHub GraphQL 整体请求失败的主机冷却、限流最低冷却均为 5 分钟并遵守更长 Retry-After/reset。GraphQL 部分成功仍保存成功仓库。
 

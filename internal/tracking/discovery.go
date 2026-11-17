@@ -10,9 +10,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 )
 
 // runState 保存一次发现、准入或观测的状态；Version=2 的 collection 只统计存量项目采样。
@@ -81,17 +83,94 @@ var linuxRSSURLs = []string{
 	"https://rss.yicai-tech.com/rss/from/https://linux.do/c/domestic/98.rss",
 }
 
-var sources = []source{
-	{"github-daily", "github", "https://rsshub-balancer.virworks.moe/github/trending/daily/any", "github", true},
-	{"github-weekly", "github", "https://rsshub-balancer.virworks.moe/github/trending/weekly/any", "github", false},
-	{"github-monthly", "github", "https://rsshub-balancer.virworks.moe/github/trending/monthly/any", "github", false},
-	{"hellogithub-all", "hellogithub", "https://rsshub-balancer.virworks.moe/hellogithub/home/all", "github", false},
-	{"hellogithub-featured", "hellogithub", "https://rsshub-balancer.virworks.moe/hellogithub/home/featured", "github", false},
-	{"opengithubs-daily", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-daily-rank/refs/heads/main/README.md", "github", false},
-	{"opengithubs-weekly", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-weekly-rank/refs/heads/main/README.md", "github", false},
-	{"opengithubs-monthly", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-monthly-rank/refs/heads/main/README.md", "github", false},
-	{"linuxdo", "linuxdo", linuxRSSURLs[0], "linux.do", true},
+var discoveryLanguages = []struct{ name, slug string }{
+	{"Python", "python"}, {"TypeScript", "typescript"}, {"JavaScript", "javascript"},
+	{"Go", "go"}, {"Rust", "rust"}, {"Java", "java"}, {"C++", "c++"},
 }
+
+// sourceName 提供稳定来源身份对应的可读名称，不将上游地址暴露到诊断中。
+func sourceName(src source) string {
+	names := map[string]string{
+		"github-daily": "GitHub 综合日榜", "github-weekly": "GitHub 综合周榜", "github-monthly": "GitHub 综合月榜",
+		"hellogithub-all": "HelloGitHub 全部", "hellogithub-featured": "HelloGitHub 精选",
+		"opengithubs-daily": "OpenGithubs 日榜", "opengithubs-weekly": "OpenGithubs 周榜", "opengithubs-monthly": "OpenGithubs 月榜", "linuxdo": "Linux.do",
+	}
+	if name := names[src.id]; name != "" {
+		return name
+	}
+	for _, lang := range discoveryLanguages {
+		if src.id == "github-daily-"+lang.slug {
+			return "GitHub " + lang.name + " 日榜"
+		}
+		if src.id == "github-search-"+lang.slug {
+			return "GitHub " + lang.name + " Search"
+		}
+	}
+	return src.id
+}
+
+// searchRepositories 固定单页前30；日期窗口按本次请求时间滚动，部分结果仍交给准入。
+func (u *upstream) searchRepositories(ctx context.Context, sourceURL, token string, deadline int64) ([]string, error) {
+	parsed, _ := url.Parse(sourceURL)
+	q := parsed.Query()
+	since := time.UnixMilli(u.clock.Now()).UTC().AddDate(0, 0, -90).Format(time.RFC3339)
+	q.Set("q", q.Get("q")+" created:>="+since+" stars:>=100 fork:false archived:false is:public")
+	q.Set("sort", "stars")
+	q.Set("order", "desc")
+	q.Set("per_page", "30")
+	parsed.RawQuery = q.Encode()
+	text, err := u.text(ctx, parsed.String(), "GitHub", nil, token, deadline)
+	if err != nil {
+		return nil, err
+	}
+	var result struct {
+		Incomplete *bool `json:"incomplete_results"`
+		Items      []struct {
+			Name string `json:"full_name"`
+		} `json:"items"`
+	}
+	if json.Unmarshal([]byte(text), &result) != nil || result.Items == nil || result.Incomplete == nil {
+		return nil, errors.New("GitHub Search invalid response")
+	}
+	names := []string{}
+	seen := map[string]bool{}
+	for _, item := range result.Items[:min(len(result.Items), 30)] {
+		name := repositoryName("https://github.com/"+item.Name, false)
+		if name == "" {
+			return names, errors.New("GitHub Search invalid response")
+		}
+		if !seen[strings.ToLower(name)] {
+			names = append(names, name)
+			seen[strings.ToLower(name)] = true
+		}
+	}
+	if *result.Incomplete {
+		return names, errors.New("GitHub Search incomplete results")
+	}
+	return names, nil
+}
+
+var sources = func() []source {
+	base := []source{
+		{"github-daily", "github", "https://rsshub-balancer.virworks.moe/github/trending/daily/any", "github", true},
+		{"github-weekly", "github", "https://rsshub-balancer.virworks.moe/github/trending/weekly/any", "github", false},
+		{"github-monthly", "github", "https://rsshub-balancer.virworks.moe/github/trending/monthly/any", "github", false},
+		{"hellogithub-all", "hellogithub", "https://rsshub-balancer.virworks.moe/hellogithub/home/all", "github", false},
+		{"hellogithub-featured", "hellogithub", "https://rsshub-balancer.virworks.moe/hellogithub/home/featured", "github", false},
+		{"opengithubs-daily", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-daily-rank/refs/heads/main/README.md", "github", false},
+		{"opengithubs-weekly", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-weekly-rank/refs/heads/main/README.md", "github", false},
+		{"opengithubs-monthly", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-monthly-rank/refs/heads/main/README.md", "github", false},
+		{"linuxdo", "linuxdo", linuxRSSURLs[0], "linux.do", true},
+	}
+	for _, lang := range discoveryLanguages {
+		base = append(base,
+			source{"github-daily-" + lang.slug, "github", "https://rsshub-balancer.virworks.moe/github/trending/daily/" + lang.slug, "github", false},
+			source{"github-search-" + lang.slug, "search", "https://api.github.com/search/repositories?" + url.Values{"q": {"language:" + lang.name}}.Encode(), "github", false},
+		)
+	}
+	return base
+}()
+
 var projectTypes = []string{"github", "linux.do"}
 
 // strptr 返回字符串地址，用于可空文本；用途与 trends.go 的 ptr 相同。
@@ -457,6 +536,8 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 				changed = true
 				continue
 			}
+		} else if source.kind == "search" {
+			values, err = u.searchRepositories(ctx, source.url, s.options.Token, deadline)
 		} else {
 			label := "RSS"
 			if source.kind == "markdown" {
@@ -469,6 +550,9 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 			}
 		}
 		if err != nil {
+			for _, name := range values {
+				add(name, source.typ)
+			}
 			var deferred *deferredRequest
 			if errors.As(err, &deferred) {
 				if deferred.retryAt == 0 {
@@ -484,7 +568,7 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 			}
 			message := safeError(err)
 			retryAt := max(u.clock.Now()+retryInterval, u.blocked(source.url))
-			state.Sources[source.id] = &sourceState{runState: runState{AttemptedAt: now, SucceededAt: successAt, Failed: 1, Error: strptr(message)}, NextAt: retryAt, RetryAfter: u.clock.Now() + retryInterval}
+			state.Sources[source.id] = &sourceState{runState: runState{AttemptedAt: now, SucceededAt: successAt, Succeeded: len(values), Failed: 1, Error: strptr(message)}, NextAt: retryAt, RetryAfter: u.clock.Now() + retryInterval}
 			continue
 		}
 		attempted = true

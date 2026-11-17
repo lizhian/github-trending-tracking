@@ -2117,3 +2117,12 @@ html {
   padding: 12px 0;
   border-top: 1px solid var(--color-rule);
 }
+
+.collection-sources h3 { font-size: 16px; margin-top: 24px; }
+.collection-source-list { list-style: none; padding: 0; margin: 0; }
+.collection-source-list > li { padding: 16px 0; border-top: 1px solid var(--color-rule); }
+.collection-source-list > li > span { display: block; margin-top: 4px; color: var(--color-muted); font-size: 13px; }
+.collection-source-list > li > .source-failed { color: var(--color-danger, #b42318); }
+.collection-source-list dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 12px; margin: 12px 0 0; font-size: 13px; }
+.collection-source-list dt { color: var(--color-muted); }
+.collection-source-list dd { margin: 0; }

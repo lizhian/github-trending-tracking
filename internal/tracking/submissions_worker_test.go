@@ -70,6 +70,9 @@ func newSubmissionHarness(t *testing.T) *submissionHarness {
 	store, _ := submissionStore(t)
 	h := &submissionHarness{store: store, clock: &submissionTestClock{at: time.Date(2026, 10, 1, 5, 15, 0, 0, time.UTC).UnixMilli()}}
 	client := &http.Client{Transport: submissionTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/search/repositories" {
+			return submissionResponse(200, `{"items":[],"incomplete_results":false}`), nil
+		}
 		h.requests++
 		if strings.HasSuffix(r.URL.Path, "/readme") {
 			h.readmes++
