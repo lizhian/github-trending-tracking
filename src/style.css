@@ -2055,3 +2055,80 @@ html {
     margin-left: 0;
   }
 }
+
+.repo-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.repo-title .repo-button {
+  width: auto;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+.project-problem-indicator {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  flex: 0 0 28px;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  color: #b65a0a;
+  border-radius: 4px;
+}
+.project-problem-indicator:hover,
+.project-problem-indicator[aria-expanded="true"] {
+  background: #b65a0a18;
+}
+.project-problem-popup {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: 14px 16px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-card);
+  background: var(--color-paper-2);
+  color: var(--color-ink);
+  box-shadow: 0 8px 28px #0003;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.project-problem-popup strong,
+.collection-project-list > li > strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+.project-problem-reasons {
+  margin: 8px 0;
+  padding-left: 18px;
+  list-style: disc;
+  color: var(--color-muted);
+}
+.project-problem-popup .project-problem-time,
+.collection-dialog .project-problem-time {
+  margin: 8px 0 0;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+.collection-project-problems h3 {
+  margin: 18px 0 10px;
+  font-size: 15px;
+}
+.collection-project-list {
+  max-height: min(45dvh, 360px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 14px;
+}
+.collection-project-list > li {
+  padding: 12px 0;
+  border-top: 1px solid var(--color-rule);
+}

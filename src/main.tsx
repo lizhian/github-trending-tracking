@@ -20,6 +20,7 @@ import {
 } from "../shared/contracts";
 import { SubmissionDialog } from "./SubmissionDialog";
 import { SearchSelect } from "./SearchSelect";
+import { projectProblems, ProjectProblemDetails, ProjectProblemIndicator } from "./ProjectProblems";
 import "./style.css";
 
 const labels: Record<WindowHours, string> = {
@@ -885,8 +886,9 @@ function App() {
   const failure = failures.find((state) => state?.failed);
   const admission = data?.status.admission as RunState | undefined;
   const discovery = data?.status.discovery as RunState | undefined;
+  const problemProjects = data?.items.filter((project) => projectProblems(project).length > 0) ?? [];
   const hasCollectionNotice =
-    failure || discovery?.failed || admission?.failed ||
+    problemProjects.length > 0 || failure || discovery?.failed || admission?.failed ||
     (data && data.summary.fresh < data.summary.tracked);
   return (
     <div className="app-shell">
@@ -1048,6 +1050,19 @@ function App() {
                 分钟宽限并标记为数据过期。
               </p>
             )}
+          {problemProjects.length > 0 && (
+            <section className="collection-project-problems" aria-labelledby="project-problems-title">
+              <h3 id="project-problems-title">有问题的项目（{problemProjects.length}）</h3>
+              <ul className="collection-project-list" aria-label="有问题的项目">
+                {problemProjects.map((project) => (
+                  <li key={project.id}>
+                    <strong>{project.name}</strong>
+                    <ProjectProblemDetails project={project} />
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
           {!hasCollectionNotice && (
             <p>
               {resource.loading
@@ -1183,31 +1198,31 @@ function App() {
                                 ).padStart(2, "0")}
                               </td>
                               <td className="repo-cell">
-                                <button
-                                  type="button"
-                                  className="repo-button"
-                                  aria-pressed={selected?.id === project.id}
-                                  aria-label={`查看 ${project.name} 趋势${admissionLabel ? `，新入库 ${admissionLabel}` : ""}`}
-                                  title={project.name}
-                                >
-                                  <span className="repo-name">
-                                    <span className="owner">{owner}</span>
-                                    <span className="slash">/</span>
-                                    {name.join("/")}
-                                  </span>
-                                  {admissionLabel && (
-                                    <span className="new-admission" title={`新入库：${time(project.enteredAt)}`}>
-                                      {admissionLabel}
+                                <div className="repo-title">
+                                  <button
+                                    type="button"
+                                    className="repo-button"
+                                    aria-pressed={selected?.id === project.id}
+                                    aria-label={`查看 ${project.name} 趋势${admissionLabel ? `，新入库 ${admissionLabel}` : ""}`}
+                                    title={project.name}
+                                  >
+                                    <span className="repo-name">
+                                      <span className="owner">{owner}</span>
+                                      <span className="slash">/</span>
+                                      {name.join("/")}
                                     </span>
-                                  )}
-                                </button>
+                                    {admissionLabel && (
+                                      <span className="new-admission" title={`新入库：${time(project.enteredAt)}`}>
+                                        {admissionLabel}
+                                      </span>
+                                    )}
+                                  </button>
+                                  <ProjectProblemIndicator project={project} />
+                                </div>
                                 <p
                                   className="repo-description"
                                   title={project.description ?? undefined}
                                 >
-                                  {project.unavailableAt ? "仓库不可访问 / " : ""}
-                                  {project.stale ? "数据过期 / " : ""}
-                                  {project.error ? "更新异常 / " : ""}
                                   {project.description || "仓库尚未提供简介。"}
                                 </p>
                               </td>
