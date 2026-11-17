@@ -86,3 +86,5 @@ go run ./cmd/trending verify --db /private/path/restored-data/tracking.sqlite \
 ## 数据库版本升级
 
 当前 schema 为 6，删除最近上榜列和候选、发现任务中的旧时间字段，保留项目身份、追踪周期、入库时间、Star 历史与重试状态；旧 schema 3、4、5 备份仍可验证和恢复，但运行前必须在停机状态执行 `trending migrate --db /data/tracking.sqlite`。命令不会创建缺失数据库。先制作一致备份，再停止服务、迁移并启动兼容镜像；完整流程及可信代理限流配置见[仓库投稿](submissions.md)。
+
+AI 项目总结与标签的可选环境变量、生成规则及接口验证情况见 [AI 项目总结与标签](ai-project-summary.md)。

@@ -19,6 +19,7 @@ import (
 // StartedAt 为 Unix 毫秒，决定普通采集重启后从哪一轮恢复。
 type SchedulerOptions struct {
 	Token string
+	AI    AIOptions
 	// 可替换的接口依赖，类似 Java 构造器注入；测试传模拟时钟，生产由 NewScheduler 补 realClock。
 	Clock  Clock
 	Client *http.Client

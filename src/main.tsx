@@ -21,6 +21,7 @@ import {
 import { SubmissionDialog } from "./SubmissionDialog";
 import { SearchSelect } from "./SearchSelect";
 import { projectProblems, ProjectProblemDetails, ProjectProblemIndicator } from "./ProjectProblems";
+import { AITags } from "./AITags";
 import "./style.css";
 import "./apple.css";
 
@@ -472,7 +473,7 @@ function Details({
       </h2>
       </div>
       <p className="detail-description">
-        {project.description || "仓库尚未提供简介。"}
+        {project.aiSummary || project.description || "暂无项目介绍"}
       </p>
       {homepage && (
         <a
@@ -1245,13 +1246,14 @@ function App() {
                                       </span>
                                     )}
                                   </button>
+                                  <AITags tags={project.aiTags ?? []} />
                                   <ProjectProblemIndicator project={project} />
                                 </div>
                                 <p
                                   className="repo-description"
-                                  title={project.description ?? undefined}
+                                  title={project.aiSummary ?? project.description ?? undefined}
                                 >
-                                  {project.description || "仓库尚未提供简介。"}
+                                  {project.aiSummary || project.description || "暂无项目介绍"}
                                 </p>
                               </td>
                               <td className="lang-col">

@@ -620,3 +620,11 @@ html tbody tr:not(.selected):hover .repo-cell {
     padding: max(16px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom));
   }
 }
+
+/* Keep classifications on one line; expose only complete labels. */
+.repo-title:has(.ai-tags) .repo-button { white-space: nowrap; overflow: hidden; max-width: 70%; flex-shrink: 1; }
+.ai-tags { display: flex; align-items: center; gap: 4px; flex: 1 1 0; min-width: 30px; position: relative; white-space: nowrap; }
+.ai-tag { display: inline-block; flex: none; padding: 2px 5px; border-radius: 4px; background: var(--color-paper); border: 1px solid var(--color-rule); color: var(--color-muted); font-size: 10px; line-height: 16px; }
+.ai-tag-measure { position: fixed; left: 0; top: 0; visibility: hidden; display: flex; gap: 4px; pointer-events: none; }
+.ai-tag-overflow { position: relative; cursor: help; flex: none; }
+.ai-tag-tooltip { position: fixed; z-index: 100; max-width: 260px; white-space: normal; padding: 8px 10px; background: var(--color-paper); border: 1px solid var(--color-rule); border-radius: 6px; box-shadow: 0 4px 16px #0002; color: var(--color-ink); font-size: 12px; }

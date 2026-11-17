@@ -22,6 +22,8 @@ export interface Project {
   repoId: string;
   name: string;
   description: string | null;
+  aiSummary?: string | null;
+  aiTags?: string[];
   homepage: string | null;
   language: string | null;
   topics: string[];

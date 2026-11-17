@@ -172,6 +172,13 @@ func (s *Store) saveObservationsAnd(ctx context.Context, items []observation, no
 		if e != nil {
 			return e
 		}
+		if o.previous == nil || metadataAt > o.previous.MetadataAt {
+			job := aiJob{RepoID: o.repo.ID, Name: name, Description: description, MetadataAt: metadataAt}
+			_, e = tx.ExecContext(ctx, `INSERT INTO system_state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE json_extract(excluded.value,'$.MetadataAt') > json_extract(system_state.value,'$.MetadataAt')`, "ai_job:"+o.repo.ID, jsonText(job))
+			if e != nil {
+				return e
+			}
+		}
 		hour := strconv.FormatInt(floorDiv(at, Hour), 10)
 		path := `$."` + hour + `"`
 		point := jsonText(Point{at, *o.repo.Stars})

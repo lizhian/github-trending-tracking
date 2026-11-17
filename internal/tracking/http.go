@@ -34,6 +34,8 @@ type Project struct {
 	RepoID      string   `json:"repoId"`
 	Name        string   `json:"name"`
 	Description *string  `json:"description"`
+	AISummary   *string  `json:"aiSummary"`
+	AITags      []string `json:"aiTags"`
 	Homepage    *string  `json:"homepage"`
 	Language    *string  `json:"language"`
 	Topics      []string `json:"topics"`
@@ -166,6 +168,17 @@ func (s *Store) list(p parameters, now int64) (ListResult, error) {
 	languages, topics := map[string]bool{}, map[string]bool{}
 	net := int64(0)
 	for _, project := range projects {
+		var ai aiResult
+		found, e := s.State("ai_result:"+project.RepoID, &ai)
+		if e != nil {
+			return ListResult{}, e
+		}
+		project.AITags = []string{}
+		if found {
+			project.AISummary = strptr(ai.Summary)
+			project.AITags = ai.Tags
+		}
+
 		if project.Language != nil && *project.Language != "" {
 			languages[*project.Language] = true
 		}

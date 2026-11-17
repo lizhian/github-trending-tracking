@@ -129,7 +129,14 @@ func run(args []string) error {
 		if err != nil {
 			return fmt.Errorf("invalid TRUSTED_PROXY_CIDRS: %w", err)
 		}
-		scheduler := tracking.NewScheduler(store, tracking.SchedulerOptions{Token: token, StartedAt: startedAt, LinuxdoCleanup: *linuxdoCleanup, BackupDir: env("BACKUP_DIR", "")})
+		aiKey, err := runtimeSecret("AI_API_KEY")
+		if err != nil {
+			return err
+		}
+		scheduler := tracking.NewScheduler(store, tracking.SchedulerOptions{Token: token, AI: tracking.AIOptions{BaseURL: os.Getenv("AI_BASE_URL"), Model: os.Getenv("AI_MODEL"), APIKey: aiKey}, StartedAt: startedAt, LinuxdoCleanup: *linuxdoCleanup, BackupDir: env("BACKUP_DIR", "")})
+		aiDone := make(chan struct{})
+		go func() { defer close(aiDone); scheduler.RunAI(ctx) }()
+		defer func() { stop(); <-aiDone }()
 		submissions := tracking.NewSubmissionWorker(scheduler)
 		// 无缓冲 channel 在这里充当完成通知，不传业务数据；close 后接收方可以继续执行。
 		// go func() {...}() 启动 goroutine：由 Go 运行时调度的并发任务，并非“一任务固定一个 OS 线程”。
