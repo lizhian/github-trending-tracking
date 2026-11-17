@@ -303,6 +303,10 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 	}
 	fail := func(status int, message string) { writeJSON(w, status, map[string]string{"error": message}) }
+	if r.URL.Path == "/api/visits" {
+		h.visitsAPI(w, r)
+		return
+	}
 	if r.URL.Path == "/api/submissions" || strings.HasPrefix(r.URL.Path, "/api/submissions/") {
 		h.submissionAPI(w, r)
 		return

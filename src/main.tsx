@@ -19,6 +19,7 @@ import {
   type WindowHours,
 } from "../shared/contracts";
 import { SubmissionDialog } from "./SubmissionDialog";
+import { VisitStats } from "./VisitStats";
 import { SearchSelect } from "./SearchSelect";
 import { projectProblems, ProjectProblemDetails, ProjectProblemIndicator } from "./ProjectProblems";
 import { AITags } from "./AITags";
@@ -1325,9 +1326,10 @@ function App() {
                 <div className="list-footer">
                   <span>
                     {data
-                      ? `显示 ${number(items.length)} / ${number(data.total)} 项 · 列表生成于 ${time(data.asOf)}`
+                      ? `列表生成于 ${time(data.asOf)}`
                       : "正在读取列表"}
                   </span>
+                  <VisitStats />
           <section className="footer-stats" aria-label="当前来源观测概览">
             <div>
               <span className="metric-label-full">正在追踪</span>

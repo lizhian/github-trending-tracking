@@ -2039,6 +2039,19 @@ html {
   min-width: 0;
   flex: 0 1 auto;
 }
+.visit-stats {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+}
+.visit-stats > span {
+  white-space: nowrap;
+}
+.visit-stats strong {
+  margin-left: 4px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
 .project-problem-indicator {
   position: relative;
   z-index: 1;
