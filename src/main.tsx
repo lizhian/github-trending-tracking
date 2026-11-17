@@ -447,6 +447,9 @@ function Details({
   const trend = current?.trend;
   const [owner, ...name] = project.name.split("/");
   const homepage = homepageURL(project.homepage);
+  const description = project.description?.trim();
+  const summary = project.aiSummary?.trim();
+  const aiTags = project.aiTags ?? [];
   const protectedNow = asOf - project.enteredAt < 24 * 3_600_000;
   const realPoints = current?.points;
   const days = realPoints?.length
@@ -472,37 +475,45 @@ function Details({
         </a>
       </h2>
       </div>
-      <p className="detail-description">
-        {project.aiSummary || project.description || "暂无项目介绍"}
-      </p>
-      {homepage && (
-        <a
-          className="detail-homepage"
-          href={homepage.href}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label={`项目网站：${homepage.href}`}
-        >
-          <svg
-            viewBox="0 0 24 24"
-            width="18"
-            height="18"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-          >
-            <path d="M10 13a5 5 0 0 0 7 .1l3-3a5 5 0 0 0-7.1-7.1l-1.7 1.7" />
-            <path d="M14 11a5 5 0 0 0-7-.1l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7" />
-          </svg>
-          <span>{homepage.href.replace(/^https?:\/\//, "")}</span>
-        </a>
+      {(description || homepage || summary || aiTags.length > 0) && (
+        <div className="detail-info">
+          {description && <p className="detail-description">{description}</p>}
+          {homepage && (
+            <a
+              className="detail-homepage"
+              href={homepage.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label={`项目网站：${homepage.href}`}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M10 13a5 5 0 0 0 7 .1l3-3a5 5 0 0 0-7.1-7.1l-1.7 1.7" />
+                <path d="M14 11a5 5 0 0 0-7-.1l-3 3a5 5 0 0 0 7.1 7.1l1.7-1.7" />
+              </svg>
+              <span>{homepage.href.replace(/^https?:\/\//, "")}</span>
+            </a>
+          )}
+          {summary && <p className="detail-description" aria-label="AI 项目总结">{summary}</p>}
+          {aiTags.length > 0 && (
+            <div className="detail-ai-tags" aria-label="AI 项目标签">
+              {aiTags.map(tag => <span className="ai-tag" key={tag}>{tag}</span>)}
+            </div>
+          )}
+        </div>
       )}
-      <div className="topics" aria-label="仓库 Topics">
-        {project.topics.length ? (
-          project.topics.map((topic) => (
+      {project.topics.length > 0 && (
+        <div className="topics" aria-label="仓库 Topics">
+          {project.topics.map((topic) => (
             <button
               type="button"
               className="topic-button"
@@ -512,11 +523,9 @@ function Details({
             >
               {topic}
             </button>
-          ))
-        ) : (
-          <span className="detail-muted">仓库尚未提供 Topics</span>
-        )}
-      </div>
+          ))}
+        </div>
+      )}
       {!!(current?.unavailableAt ?? project.unavailableAt) && (
         <p className="notice" role="status">仓库不可访问，按最后已知 Star 总数计算。</p>
       )}
