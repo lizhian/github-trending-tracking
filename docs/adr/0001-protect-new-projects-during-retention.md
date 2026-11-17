@@ -4,6 +4,8 @@ status: accepted
 
 # 保护期优先于项目容量，按近期增长决定保留顺序
 
+2026-11-17 更新：[ADR-0013](0013-current-time-windows-and-unavailable-repositories.md) 替代窗口终点、历史保留及明确不可访问项目暂缓淘汰的相关约定。
+
 同分时的淘汰顺序见 [ADR-0011](0011-remove-listing-time.md)。
 
 容量目标已由 [ADR-0003](0003-scheduled-sampling-and-500-projects.md) 调整为 500；保护期优先和暂缓淘汰的原则继续有效。下文保留原决策背景。

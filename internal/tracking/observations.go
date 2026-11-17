@@ -147,10 +147,25 @@ func (s *Store) saveObservationsAnd(ctx context.Context, items []observation, no
 				metadataAt = o.previous.MetadataAt
 			}
 		}
+		periods := []carryPeriod{}
+		if o.previous != nil {
+			if e = json.Unmarshal([]byte(o.previous.CarryPeriods), &periods); e != nil {
+				return e
+			}
+			if o.previous.UnavailableAt > 0 {
+				periods = append(periods, carryPeriod{Start: o.previous.ObservedAt, End: at, Stars: o.previous.Stars})
+			}
+		}
+		kept := periods[:0]
+		for _, period := range periods {
+			if period.End >= now-Retention {
+				kept = append(kept, period)
+			}
+		}
 		// 更新附带原周期与 observed_at 条件；迟到结果不能回退时间，也不能写进同 ID 的新周期。
 		// 下面快照 INSERT ... SELECT 也验证当前周期/时间，避免项目没更新却留下孤立旧结果。
 		if o.previous != nil {
-			_, e = tx.ExecContext(ctx, `UPDATE projects SET name=?,description=?,homepage=?,language=?,topics=?,observed_at=?,attempted_at=?,stars=?,trends=?,error=NULL,metadata_at=? WHERE id=? AND cycle=? AND observed_at<?`, name, description, homepage, language, topics, at, at, *o.repo.Stars, jsonText(trends), metadataAt, id, cycle, at)
+			_, e = tx.ExecContext(ctx, `UPDATE projects SET name=?,description=?,homepage=?,language=?,topics=?,observed_at=?,attempted_at=?,stars=?,trends=?,error=NULL,unavailable_at=0,carry_periods=?,metadata_at=? WHERE id=? AND cycle=? AND observed_at<?`, name, description, homepage, language, topics, at, at, *o.repo.Stars, jsonText(trends), jsonText(kept), metadataAt, id, cycle, at)
 		} else {
 			_, e = tx.ExecContext(ctx, `INSERT INTO projects(id,type,repo_id,cycle,name,description,homepage,language,topics,observed_at,attempted_at,stars,trends,entered_at,metadata_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, id, typ, o.repo.ID, cycle, name, description, homepage, language, topics, at, at, *o.repo.Stars, jsonText(trends), now, metadataAt)
 		}

@@ -194,9 +194,9 @@ func TestSubmissionHTTPBoundariesAndProxyLimits(t *testing.T) {
 	}
 }
 
-// TestMigrationPreservesExistingDataAndBackup 对 schema 3/4/5 分别准备旧库，升级后验证数据/重试保留、旧字段移除、重复升级安全和投稿队列可备份恢复。
+// TestMigrationPreservesExistingDataAndBackup 对 schema 3/4/5/6 分别准备旧库，升级后验证数据/重试保留、旧字段移除、重复升级安全和投稿队列可备份恢复。
 func TestMigrationPreservesExistingDataAndBackup(t *testing.T) {
-	for _, version := range []int{3, 4, 5} {
+	for _, version := range []int{3, 4, 5, 6} {
 		// 每个版本是独立子测试，有自己的 *testing.T 与临时目录；没有 t.Parallel，因此顺序执行。
 		t.Run(fmt.Sprintf("schema-%d", version), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), DatabaseName)
@@ -213,7 +213,13 @@ func TestMigrationPreservesExistingDataAndBackup(t *testing.T) {
 			if _, err = db.Exec(fmt.Sprintf("PRAGMA user_version=%d", version)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err = db.Exec(`INSERT INTO projects(id,cycle,name,topics,entered_at,listed_at,observed_at,attempted_at,stars,trends,type,repo_id) VALUES('github:R1','old-cycle','a/b','[]',1,2,3,3,10,'{}','github','R1'); INSERT INTO snapshot_days VALUES('old-cycle',0,'{"0":[3,10]}'); INSERT INTO system_state VALUES('pending','[{"name":"a/c","listedAt":2,"nextAt":99,"readmeNextAt":100,"failure":"retry"}]'); INSERT INTO system_state VALUES('discoverySources','{"details":[{"url":"https://hellogithub.com/repository/one","listedAt":2,"nextAt":88,"error":"retry"}],"sources":{"github-daily":{"nextAt":200}}}')`); err != nil {
+			fixture := `INSERT INTO projects(id,cycle,name,topics,entered_at,listed_at,observed_at,attempted_at,stars,trends,type,repo_id) VALUES('github:R1','old-cycle','a/b','[]',1,2,3,3,10,'{}','github','R1'); INSERT INTO snapshot_days VALUES('old-cycle',0,'{"0":[3,10]}'); INSERT INTO system_state VALUES('pending','[{"name":"a/c","listedAt":2,"nextAt":99,"readmeNextAt":100,"failure":"retry"}]'); INSERT INTO system_state VALUES('discoverySources','{"details":[{"url":"https://hellogithub.com/repository/one","listedAt":2,"nextAt":88,"error":"retry"}],"sources":{"github-daily":{"nextAt":200}}}')`
+			if version >= 6 {
+				fixture = strings.ReplaceAll(fixture, ",listed_at", "")
+				fixture = strings.Replace(fixture, "1,2,3,3,10", "1,3,3,10", 1)
+				fixture = strings.ReplaceAll(fixture, `"listedAt":2,`, "")
+			}
+			if _, err = db.Exec(fixture); err != nil {
 				t.Fatal(err)
 			}
 			if version == 5 {
@@ -277,7 +283,7 @@ func TestMigrationPreservesExistingDataAndBackup(t *testing.T) {
 				t.Fatal("migration changed existing project fields", beforeProject, afterProject, err)
 			}
 			rows, err := store.ProjectRows("")
-			if err != nil || len(rows) != 1 || (version < 5 && rows[0].Homepage != nil) || before.Tables["projects"].Rows != after.Tables["projects"].Rows {
+			if err != nil || len(rows) != 1 || (version < 5 && rows[0].Homepage != nil) || before.Tables["projects"].Rows != after.Tables["projects"].Rows || rows[0].UnavailableAt != 0 || rows[0].CarryPeriods != "[]" {
 				t.Fatal("migration lost projects or supplied a homepage", rows, err)
 			}
 			if err = Migrate(path); err == nil {

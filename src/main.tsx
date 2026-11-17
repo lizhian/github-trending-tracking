@@ -51,11 +51,15 @@ const newAdmissionLabel = (enteredAt: number, now: number) => {
   return hours === 0 ? "🌟 just now" : `🌟 ${hours}h ago`;
 };
 const stateLabel = (trend: TrendSummary) =>
-  trend.state === "accumulating"
-    ? "积累中"
-    : trend.state === "partial"
-      ? "部分观测"
-      : "完整观测";
+  trend.basis === "unknown"
+    ? "暂不可知"
+    : trend.basis === "carried"
+      ? "含持平计算"
+      : trend.state === "accumulating"
+        ? "积累中"
+        : trend.state === "partial"
+          ? "部分观测"
+          : "完整观测";
 const apiBase = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 const sorts = ["name", "stars", ...WINDOWS.map(String)];
 interface QueryState {
@@ -328,7 +332,7 @@ function Chart({ trend }: { trend: Trend }) {
       className="chart"
       viewBox={`0 0 ${viewWidth} 145`}
       role="img"
-      aria-label={`Star 总数曲线，${stateLabel(trend)}，净增量 ${signed(trend.delta)}，${trend.gaps.length} 段缺测`}
+      aria-label={`Star 总数曲线，${stateLabel(trend)}，净增量 ${trend.basis === "unknown" ? "暂不可知" : signed(trend.delta)}，${trend.gaps.length} 段缺测`}
     >
       {[29, 67.5, 106].map((y, index) => (
         <g key={y}>
@@ -397,10 +401,10 @@ function TrendValue({ trend }: { trend: TrendSummary }) {
           ? "accumulating"
           : `gain ${trend.delta < 0 ? "negative" : ""}`
       }
-      title={`${signed(trend.delta)}，${hint}`}
-      aria-label={`${signed(trend.delta)}，${hint}`}
+      title={`${trend.basis === "unknown" ? "暂不可知" : signed(trend.delta)}，${hint}`}
+      aria-label={`${trend.basis === "unknown" ? "暂不可知" : signed(trend.delta)}，${hint}`}
     >
-      {compactSigned(trend.delta)}
+      {trend.basis === "unknown" ? "暂不可知" : compactSigned(trend.delta)}
     </span>
   );
 }
@@ -448,8 +452,10 @@ function Details({
   const [owner, ...name] = project.name.split("/");
   const homepage = homepageURL(project.homepage);
   const protectedNow = asOf - project.enteredAt < 24 * 3_600_000;
-  const days =
-    trend?.start && trend.end ? (trend.end - trend.start) / 86_400_000 : null;
+  const realPoints = current?.points;
+  const days = realPoints?.length
+    ? (realPoints[realPoints.length - 1][0] - realPoints[0][0]) / 86_400_000
+    : null;
   return (
     <section className="detail-content" aria-label={`${project.name} 详情`}>
       <h2 className="detail-title">
@@ -508,6 +514,9 @@ function Details({
           <span className="detail-muted">仓库尚未提供 Topics</span>
         )}
       </div>
+      {!!(current?.unavailableAt ?? project.unavailableAt) && (
+        <p className="notice" role="status">仓库不可访问，按最后已知 Star 总数计算。</p>
+      )}
       {((current?.stale ?? project.stale) || project.error) && (
         <p className="notice" role="status">
           {(current?.stale ?? project.stale) ? "数据过期，未在应采时段及 10 分钟宽限内成功更新。" : ""}
@@ -522,7 +531,7 @@ function Details({
             <span
               className={`delta-badge ${trend.delta !== null && trend.delta < 0 ? "negative" : ""}`}
             >
-              {signed(trend.delta)}
+              {trend.basis === "unknown" ? "暂不可知" : signed(trend.delta)}
             </span>
           )}
         </div>
@@ -552,7 +561,7 @@ function Details({
             trend.points.length ? (
               <Chart trend={trend} />
             ) : (
-              <p className="chart-message">积累中</p>
+              <p className="chart-message">{trend.basis === "carried" ? "此窗口无真实观测，增量按持平计算" : trend.basis === "unknown" ? "此窗口暂无有效观测" : "积累中"}</p>
             )
           ) : null}
         </div>
@@ -588,7 +597,9 @@ function Details({
           {history.loading
             ? "读取中"
             : trend
-              ? signed(trend.delta)
+              ? trend.basis === "unknown"
+                ? "暂不可知"
+                : signed(trend.delta)
               : "暂不可用"}
         </dd>
         <dt>保护期</dt>
@@ -888,47 +899,84 @@ function App() {
             <Icon name="mark" size={28} />
             <strong>开源观察</strong>
           </a>
-          <section className="header-stats" aria-label="当前来源观测概览">
-            <div>
-              <span className="metric-label-full">正在追踪</span>
-              <span className="metric-label-short" aria-hidden="true">
-                追踪
-              </span>
-              <strong>
-                {data
-                  ? number(data.summary.tracked)
-                  : resource.loading
-                    ? "…"
-                    : "—"}
-              </strong>
-            </div>
-            <div title="当前来源追踪项目已知的 24 小时窗口净增量合计，含部分观测与负值；各项目实际区间可能不同。">
-              <span className="metric-label-full">24 小时 Star 净增量</span>
-              <span className="metric-label-short" aria-hidden="true">
-                24h 净增量
-              </span>
-              <strong>
-                {data
-                  ? signed(data.summary.net24 ?? null)
-                  : resource.loading
-                    ? "…"
-                    : "—"}
-              </strong>
-            </div>
-            <div>
-              <span className="metric-label-full">覆盖编程语言</span>
-              <span className="metric-label-short" aria-hidden="true">
-                语言
-              </span>
-              <strong>
-                {data
-                  ? number(data.languages.length)
-                  : resource.loading
-                    ? "…"
-                    : "—"}
-              </strong>
-            </div>
-          </section>
+          <div className="list-controls masthead-controls">
+              <div className="view-tabs" ref={viewTabs} aria-label="趋势来源">
+                <span
+                  className="view-indicator"
+                  aria-hidden="true"
+                  style={{
+                    transform: `translateX(${indicator.x}px) scaleX(${indicator.width})`,
+                  }}
+                />
+                {(
+                  [
+                    ["github", "github趋势"],
+                    ["linuxdo", "Linux.do开源趋势"],
+                  ] as const
+                ).map(([tab, label]) => (
+                  <button
+                    type="button"
+                    key={tab}
+                    aria-pressed={query.tab === tab}
+                    onClick={() => {
+                      setDraft("");
+                      commit({ tab, q: "", admitted: "", project: "" });
+                    }}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+                  <div className="filters">
+                    <label className="search-field">
+                      <Icon name="search" />
+                      <span className="visually-hidden">
+                        搜索项目、描述、语言或 Topic
+                      </span>
+                      <input
+                        ref={searchInput}
+                        type="search"
+                        name="q"
+                        autoComplete="off"
+                        value={draft}
+                        onChange={(event) =>
+                          setDraft(event.target.value.slice(0, 200))
+                        }
+                        placeholder="搜索项目、描述、语言、Topic…"
+                      />
+                      <kbd>/</kbd>
+                    </label>
+                    <SearchSelect
+                      label="最近入库"
+                      all="最近入库"
+                      name="admitted"
+                      value={query.admitted}
+                      options={["24", "72", "168"]}
+                      searchable={false}
+                      optionLabel={(value) => ({ "24": "24小时", "72": "3天", "168": "7天" })[value] ?? value}
+                      onChange={(admitted) => commit({ admitted: admitted as QueryState["admitted"] })}
+                    />
+                    <button
+                      type="button"
+                      className="icon-button reset"
+                      title="清除筛选"
+                      aria-label="清除全部筛选"
+                      onClick={clear}
+                    >
+                      <Icon name="reset" />
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button reset"
+                      disabled={resource.loading}
+                      aria-label="刷新数据"
+                      title="只查询已采集结果"
+                      onClick={() => setRefresh((value) => value + 1)}
+                    >
+                      <Icon name="refresh" />
+                    </button>
+                  </div>
+          </div>
           <div className="masthead-end">
             <button type="button" className="submission-open" onClick={() => setSubmissionOpen(true)}>投稿</button>
             <button
@@ -1020,83 +1068,7 @@ function App() {
         >
           <div className="listing">
             <div className="list-controls" ref={controls}>
-              <div className="view-tabs" ref={viewTabs} aria-label="趋势来源">
-                <span
-                  className="view-indicator"
-                  aria-hidden="true"
-                  style={{
-                    transform: `translateX(${indicator.x}px) scaleX(${indicator.width})`,
-                  }}
-                />
-                {(
-                  [
-                    ["github", "github趋势"],
-                    ["linuxdo", "Linux.do开源趋势"],
-                  ] as const
-                ).map(([tab, label]) => (
-                  <button
-                    type="button"
-                    key={tab}
-                    aria-pressed={query.tab === tab}
-                    onClick={() => {
-                      setDraft("");
-                      commit({ tab, q: "", admitted: "", project: "" });
-                    }}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
               <>
-                  <div className="filters">
-                    <label className="search-field">
-                      <Icon name="search" />
-                      <span className="visually-hidden">
-                        搜索项目、描述、语言或 Topic
-                      </span>
-                      <input
-                        ref={searchInput}
-                        type="search"
-                        name="q"
-                        autoComplete="off"
-                        value={draft}
-                        onChange={(event) =>
-                          setDraft(event.target.value.slice(0, 200))
-                        }
-                        placeholder="搜索项目、描述、语言、Topic…"
-                      />
-                      <kbd>/</kbd>
-                    </label>
-                    <SearchSelect
-                      label="最近入库"
-                      all="最近入库"
-                      name="admitted"
-                      value={query.admitted}
-                      options={["24", "72", "168"]}
-                      searchable={false}
-                      optionLabel={(value) => ({ "24": "24小时", "72": "3天", "168": "7天" })[value] ?? value}
-                      onChange={(admitted) => commit({ admitted: admitted as QueryState["admitted"] })}
-                    />
-                    <button
-                      type="button"
-                      className="icon-button reset"
-                      title="清除筛选"
-                      aria-label="清除全部筛选"
-                      onClick={clear}
-                    >
-                      <Icon name="reset" />
-                    </button>
-                    <button
-                      type="button"
-                      className="icon-button reset"
-                      disabled={resource.loading}
-                      aria-label="刷新数据"
-                      title="只查询已采集结果"
-                      onClick={() => setRefresh((value) => value + 1)}
-                    >
-                      <Icon name="refresh" />
-                    </button>
-                  </div>
                   <div
                     className="heading-scroll"
                     ref={headerScroll}
@@ -1233,6 +1205,7 @@ function App() {
                                   className="repo-description"
                                   title={project.description ?? undefined}
                                 >
+                                  {project.unavailableAt ? "仓库不可访问 / " : ""}
                                   {project.stale ? "数据过期 / " : ""}
                                   {project.error ? "更新异常 / " : ""}
                                   {project.description || "仓库尚未提供简介。"}
@@ -1299,7 +1272,47 @@ function App() {
                       ? `显示 ${number(items.length)} / ${number(data.total)} 项 · 列表生成于 ${time(data.asOf)}`
                       : "正在读取列表"}
                   </span>
-
+          <section className="footer-stats" aria-label="当前来源观测概览">
+            <div>
+              <span className="metric-label-full">正在追踪</span>
+              <span className="metric-label-short" aria-hidden="true">
+                追踪
+              </span>
+              <strong>
+                {data
+                  ? number(data.summary.tracked)
+                  : resource.loading
+                    ? "…"
+                    : "—"}
+              </strong>
+            </div>
+            <div title="当前来源追踪项目已知的 24 小时窗口净增量合计，含部分观测与负值；各项目实际区间可能不同。">
+              <span className="metric-label-full">24 小时 Star 净增量</span>
+              <span className="metric-label-short" aria-hidden="true">
+                24h 净增量
+              </span>
+              <strong>
+                {data
+                  ? signed(data.summary.net24 ?? null)
+                  : resource.loading
+                    ? "…"
+                    : "—"}
+              </strong>
+            </div>
+            <div>
+              <span className="metric-label-full">覆盖编程语言</span>
+              <span className="metric-label-short" aria-hidden="true">
+                语言
+              </span>
+              <strong>
+                {data
+                  ? number(data.languages.length)
+                  : resource.loading
+                    ? "…"
+                    : "—"}
+              </strong>
+            </div>
+          </section>
                 </div>
             </>
           </div>

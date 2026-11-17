@@ -4,6 +4,8 @@ status: accepted
 
 # 全天逐小时采集与分层保留 Star 历史
 
+2026-11-17 更新：[ADR-0013](0013-current-time-windows-and-unavailable-repositories.md) 替代窗口终点、历史保留及明确不可访问项目暂缓淘汰的相关约定。
+
 2026-11-06 设计访谈中，用户已逐项确认以下规则，并最终确认整体方案、要求生成并发布规格。实现已按下述规则完成，验证与提交结果记录在实施规格中。
 
 实施规格：[#42](https://github.com/lizhian/github-trending-tracking/issues/42)。

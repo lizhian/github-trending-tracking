@@ -26,14 +26,14 @@ import (
 )
 
 // SchemaVersion 是当前运行所要求的 schema；Initialize/Migrate 写入，Open 严格核对。
-const SchemaVersion = 6
+const SchemaVersion = 7
 
 // DatabaseName 是命令行默认文件名；路径仍可由配置覆盖。
 const DatabaseName = "tracking.sqlite"
 
 // 迁移必须按版本顺序执行，文件内容由 migrations.Files 从二进制内读取。
 // []string 是 slice，长度可变；这里 var 而非 const，因为 Go 的常量不能是 slice。
-var MigrationNames = []string{"0001_tracking.sql", "0002_free_tier.sql", "0003_tracking_types.sql", "0004_submissions.sql", "0005_homepage.sql", "0006_remove_listing_time.sql"}
+var MigrationNames = []string{"0001_tracking.sql", "0002_free_tier.sql", "0003_tracking_types.sql", "0004_submissions.sql", "0005_homepage.sql", "0006_remove_listing_time.sql", "0007_unavailable.sql"}
 
 // Store 持有数据库连接池与目录写锁。
 // struct 可类比“带字段的数据类型”，方法在类型外声明；它没有 Java 的继承体系。
@@ -220,7 +220,7 @@ func Initialize(path string) error {
 // map[string][]string 对应“表名 → 有序列名集合”；嵌套字面量可省略重复的 []string 类型。
 // 这些键来自代码内白名单，后续拼表名不接收用户输入；普通值仍用 SQL 参数绑定。
 var tableColumns = map[string][]string{
-	"projects":      {"id", "cycle", "name", "description", "language", "topics", "entered_at", "observed_at", "attempted_at", "error", "stars", "trends", "metadata_at", "type", "repo_id", "homepage"},
+	"projects":      {"id", "cycle", "name", "description", "language", "topics", "entered_at", "observed_at", "attempted_at", "error", "stars", "trends", "metadata_at", "type", "repo_id", "homepage", "unavailable_at", "carry_periods"},
 	"snapshot_days": {"cycle", "day", "hours"},
 	"system_state":  {"key", "value"},
 	"submissions":   {"id", "name", "repo_id", "phase", "github", "linuxdo", "repository_attempts", "readme_attempts", "next_at", "created_at", "finished_at", "message", "merged_into"},
@@ -230,6 +230,9 @@ var tableColumns = map[string][]string{
 // slices.Clone 先复制底层元素，避免 Insert 等操作影响全局清单；旧 listed_at 只属于兼容路径。
 func columnsForVersion(table string, version int) []string {
 	columns := slices.Clone(tableColumns[table])
+	if table == "projects" && version < 7 {
+		columns = columns[:len(columns)-2]
+	}
 	if table == "projects" && version < 6 {
 		columns = slices.Insert(columns, 7, "listed_at")
 	}
@@ -347,16 +350,18 @@ type ProjectRow struct {
 	Trends                             string
 	MetadataAt                         int64
 	Type, RepoID                       string
+	UnavailableAt                      int64
+	CarryPeriods                       string
 }
 
-const projectColumns = "id,cycle,name,description,language,topics,entered_at,observed_at,attempted_at,error,stars,trends,metadata_at,type,repo_id,homepage"
+const projectColumns = "id,cycle,name,description,language,topics,entered_at,observed_at,attempted_at,error,stars,trends,metadata_at,type,repo_id,homepage,unavailable_at,carry_periods"
 
 // scanProject 通过最小 Scan 接口复用 *sql.Row 和 *sql.Rows，无需它们声明 implements。
 // & 把字段地址交给 Scan 写入；末尾裸 return 返回命名返回值 p、err 的当前值。
 func scanProject(row interface{ Scan(...any) error }) (p ProjectRow, err error) {
 	// 这些指针必须与 projectColumns 列顺序一致；可空 *string 字段传 &p.Description 是 **string，
 	// database/sql 能据 NULL 或文本设置字段，而不是把 NULL 错当空字符串。
-	err = row.Scan(&p.ID, &p.Cycle, &p.Name, &p.Description, &p.Language, &p.Topics, &p.EnteredAt, &p.ObservedAt, &p.AttemptedAt, &p.Error, &p.Stars, &p.Trends, &p.MetadataAt, &p.Type, &p.RepoID, &p.Homepage)
+	err = row.Scan(&p.ID, &p.Cycle, &p.Name, &p.Description, &p.Language, &p.Topics, &p.EnteredAt, &p.ObservedAt, &p.AttemptedAt, &p.Error, &p.Stars, &p.Trends, &p.MetadataAt, &p.Type, &p.RepoID, &p.Homepage, &p.UnavailableAt, &p.CarryPeriods)
 	return
 }
 
@@ -379,7 +384,7 @@ func (s *Store) ProjectRows(where string, args ...any) ([]ProjectRow, error) {
 	return result, rows.Err()
 }
 
-// Histories 每批最多查询 90 个追踪周期，返回最近 30 天和最新快照，按时间升序排列。
+// Histories 每批最多查询 90 个周期，读取 30 天窗口、最多一天边界基准及最新快照，按时间升序排列。
 // 数据库按 UTC 日/小时存 JSON 桶；map 遍历没有顺序保证，所以读出后必须显式排序。
 func (s *Store) Histories(cycles []string, now int64) (map[string][]Point, error) {
 	output := map[string][]Point{}
@@ -391,7 +396,7 @@ func (s *Store) Histories(cycles []string, now int64) (map[string][]Point, error
 		for _, cycle := range group {
 			args = append(args, cycle)
 		}
-		args = append(args, (now-Retention)/Day)
+		args = append(args, floorDiv(now-Retention-Day, Day))
 		rows, err := s.DB.Query("SELECT d.cycle,d.hours,p.observed_at FROM snapshot_days d JOIN projects p ON p.cycle=d.cycle WHERE d.cycle IN ("+strings.TrimSuffix(strings.Repeat("?,", len(group)), ",")+") AND (day>=? OR day=CAST(p.observed_at/86400000 AS INTEGER)) ORDER BY day", args...)
 		if err != nil {
 			return nil, err
@@ -409,7 +414,7 @@ func (s *Store) Histories(cycles []string, now int64) (map[string][]Point, error
 				return nil, err
 			}
 			for _, p := range hours {
-				if (p[0] >= now-Retention || p[0] == latest) && p[0] <= now {
+				if (p[0] >= now-Retention-Day || p[0] == latest) && p[0] <= now {
 					output[cycle] = append(output[cycle], p)
 				}
 			}

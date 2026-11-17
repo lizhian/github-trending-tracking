@@ -40,9 +40,10 @@ type Project struct {
 	Stars       int64    `json:"stars"`
 	// EnteredAt 决定本周期保护期；ObservedAt 是最后成功观测，AttemptedAt 包含失败尝试。
 	// 三者不能互相替代；共享旧观测收录新类型时，入库时间可能晚于观测时间。
-	EnteredAt   int64 `json:"enteredAt"`
-	ObservedAt  int64 `json:"observedAt"`
-	AttemptedAt int64 `json:"attemptedAt"`
+	EnteredAt     int64 `json:"enteredAt"`
+	ObservedAt    int64 `json:"observedAt"`
+	AttemptedAt   int64 `json:"attemptedAt"`
+	UnavailableAt int64 `json:"unavailableAt"`
 	// Error 记录采样失败；Stale 独立按时间判断。Trends 的整数键是窗口小时数，JSON 编码为字符串键。
 	Error  *string              `json:"error"`
 	Stale  bool                 `json:"stale"`
@@ -71,11 +72,12 @@ type ListResult struct {
 
 // HistoryResult 历史 API 的 JSON 响应；缺测、覆盖状态和观测过期分别表达不同信息。
 type HistoryResult struct {
-	Points     []Point `json:"points"`
-	Trend      Trend   `json:"trend"`
-	Gaps       []Gap   `json:"gaps"`
-	ObservedAt int64   `json:"observedAt"`
-	Stale      bool    `json:"stale"`
+	UnavailableAt int64   `json:"unavailableAt"`
+	Points        []Point `json:"points"`
+	Trend         Trend   `json:"trend"`
+	Gaps          []Gap   `json:"gaps"`
+	ObservedAt    int64   `json:"observedAt"`
+	Stale         bool    `json:"stale"`
 }
 
 // HTTPOptions HTTP 层依赖与配置；Now 函数字段可注入测试时钟，Submissions 只暴露所需控制能力。
@@ -379,8 +381,8 @@ func (h *handler) api(w http.ResponseWriter, r *http.Request) {
 				if err == nil {
 					var policy *SamplingPolicy
 					policy, err = h.store.Policy()
-					trend := WindowTrend(projectHistory(row, histories[row.Cycle]), hours, now, policy)
-					result = HistoryResult{Points: trend.Points, Trend: trend, Gaps: trend.Gaps, ObservedAt: row.ObservedAt, Stale: IsStale(row.ObservedAt, now, policy)}
+					trend := ProjectTrend(row, projectHistory(row, histories[row.Cycle]), hours, now, policy)
+					result = HistoryResult{UnavailableAt: row.UnavailableAt, Points: trend.Points, Trend: trend, Gaps: trend.Gaps, ObservedAt: row.ObservedAt, Stale: IsStale(row.ObservedAt, now, policy)}
 				}
 			}
 		}

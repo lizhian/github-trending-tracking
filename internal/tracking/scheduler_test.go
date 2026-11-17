@@ -793,7 +793,7 @@ func TestHundredRepositoryBatchesUpdateBothTypesAndCompletedRoundStaysIdle(t *te
 	}
 	observed := beijing("2026-10-02T09:00:00")
 	seedMatureProjects(t, h, 500, observed)
-	if _, e := h.store.DB.Exec(`INSERT INTO projects SELECT 'linux.do:'||repo_id,cycle||'-linux',name,description,language,topics,entered_at,observed_at,attempted_at,error,stars,trends,metadata_at,'linux.do',repo_id,homepage FROM projects WHERE type='github'`); e != nil {
+	if _, e := h.store.DB.Exec(`INSERT INTO projects(id,cycle,name,description,language,topics,entered_at,observed_at,attempted_at,error,stars,trends,metadata_at,type,repo_id,homepage) SELECT 'linux.do:'||repo_id,cycle||'-linux',name,description,language,topics,entered_at,observed_at,attempted_at,error,stars,trends,metadata_at,'linux.do',repo_id,homepage FROM projects WHERE type='github'`); e != nil {
 		t.Fatal(e)
 	}
 	if _, e := h.store.DB.Exec(`INSERT INTO snapshot_days SELECT cycle||'-linux',day,hours FROM snapshot_days WHERE cycle NOT LIKE '%-linux'`); e != nil {

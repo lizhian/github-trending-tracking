@@ -1345,27 +1345,27 @@ html {
   min-height: 76px;
   gap: var(--space-xl);
 }
-.header-stats {
+.footer-stats {
   display: flex;
   align-items: center;
   gap: 32px;
   margin-left: auto;
 }
-.header-stats > div {
+.footer-stats > div {
   display: flex;
   flex-direction: column;
   gap: var(--space-3xs);
 }
-.header-stats > div + div {
+.footer-stats > div + div {
   padding-left: 32px;
   border-left: 1px solid var(--color-rule);
 }
-.header-stats span {
+.footer-stats span {
   font-size: 11px;
   color: var(--color-muted);
   white-space: nowrap;
 }
-.header-stats strong {
+.footer-stats strong {
   font: 500 23px/1.2 var(--font-outlier);
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.04em;
@@ -1602,10 +1602,10 @@ html {
   .masthead-inner {
     gap: 20px;
   }
-  .header-stats {
+  .footer-stats {
     gap: 20px;
   }
-  .header-stats > div + div {
+  .footer-stats > div + div {
     padding-left: 20px;
   }
 }
@@ -1628,7 +1628,7 @@ html {
     grid-column: 2;
     grid-row: 1;
   }
-  .header-stats {
+  .footer-stats {
     grid-column: 1 / -1;
     grid-row: 2;
     width: 100%;
@@ -1638,13 +1638,13 @@ html {
     padding-top: var(--space-xs);
     margin-left: 0;
   }
-  .header-stats > div + div {
+  .footer-stats > div + div {
     padding-left: var(--space-sm);
   }
-  .header-stats strong {
+  .footer-stats strong {
     font-size: 21px;
   }
-  .header-stats span {
+  .footer-stats span {
     font-size: 10px;
   }
   .workspace {
@@ -1735,19 +1735,19 @@ html {
   min-height: 52px;
   gap: var(--space-lg);
 }
-.header-stats {
+.footer-stats {
   gap: 20px;
 }
-.header-stats > div {
+.footer-stats > div {
   flex-direction: row;
   align-items: baseline;
   gap: var(--space-xs);
   white-space: nowrap;
 }
-.header-stats > div + div {
+.footer-stats > div + div {
   padding-left: 20px;
 }
-.header-stats strong {
+.footer-stats strong {
   font-size: 18px;
 }
 .metric-label-short {
@@ -1783,26 +1783,26 @@ html {
     padding-top: 0;
     padding-bottom: var(--space-xs);
   }
-  .header-stats {
+  .footer-stats {
     display: flex;
     justify-content: space-between;
     gap: var(--space-xs);
     padding-top: 0;
     min-height: 28px;
   }
-  .header-stats > div {
+  .footer-stats > div {
     gap: var(--space-2xs);
   }
-  .header-stats > div + div {
+  .footer-stats > div + div {
     padding-left: var(--space-xs);
   }
-  .header-stats strong {
+  .footer-stats strong {
     font-size: 16px;
   }
-  .header-stats span {
+  .footer-stats span {
     font-size: 11px;
   }
-  .header-stats .metric-label-full {
+  .footer-stats .metric-label-full {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -1810,7 +1810,7 @@ html {
     clip-path: inset(50%);
     white-space: nowrap;
   }
-  .header-stats .metric-label-short {
+  .footer-stats .metric-label-short {
     display: inline;
   }
   .heading-scroll table,
@@ -1985,5 +1985,73 @@ html {
 @media (max-width: 760px) {
   .list-controls .filter-select:has([name="admitted"]) {
     grid-column: 1 / -1;
+  }
+}
+
+/* Keep discovery controls in the masthead and the overview beside list status. */
+.masthead-inner {
+  flex-wrap: wrap;
+  column-gap: var(--space-md);
+}
+.masthead-controls {
+  position: static;
+  flex: 1 1 700px;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--space-md);
+}
+.masthead-controls .filters {
+  flex: 1 1 360px;
+  min-width: 0;
+  padding-block: var(--space-xs);
+}
+.masthead-end {
+  margin-left: auto;
+}
+.list-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs) var(--space-md);
+}
+.footer-stats {
+  display: flex;
+  flex-wrap: wrap;
+  width: auto;
+  margin-left: auto;
+  padding-top: 0;
+  gap: var(--space-xs) var(--space-md);
+}
+.footer-stats > div + div {
+  padding-left: 0;
+  border-left: 0;
+}
+.footer-stats strong {
+  font-size: 14px;
+}
+@media (max-width: 1250px) {
+  .masthead-controls {
+    order: 3;
+    flex-basis: 100%;
+  }
+}
+@media (max-width: 760px) {
+  .masthead-controls {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: 100%;
+  }
+  .masthead-controls .view-tabs {
+    width: 100%;
+  }
+  .masthead-controls .filters {
+    flex-basis: 100%;
+  }
+  .footer-stats {
+    min-height: 0;
+    justify-content: flex-start;
+    margin-left: 0;
   }
 }

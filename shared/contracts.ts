@@ -6,6 +6,8 @@ export type ProjectType = (typeof PROJECT_TYPES)[number];
 export const projectId = (type: ProjectType, repoId: string) => `${type}:${repoId}`;
 export interface TrendSummary {
   delta: number | null;
+  asOf: number;
+  basis: "observed" | "carried" | "unknown";
   state: "accumulating" | "partial" | "complete";
   start: number | null;
   end: number | null;
@@ -26,6 +28,7 @@ export interface Project {
   stars: number;
   enteredAt: number;
   observedAt: number;
+  unavailableAt: number;
   attemptedAt: number;
   error: string | null;
   stale: boolean;
@@ -58,6 +61,7 @@ export interface HistoryResult {
   trend: Trend;
   gaps: [number, number][];
   observedAt: number;
+  unavailableAt: number;
   stale: boolean;
 }
 export interface CleanupResult {

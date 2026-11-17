@@ -17,7 +17,7 @@ type cleanupResult struct {
 }
 
 // cleanup 按追踪类型独立执行每日淘汰，500 项是软目标，保护期或观测不足时允许超出。
-// 仅考虑入库满 24 小时、观测新鲜且历史可比较的项目；综合窗口增长速度得到保留评分。
+// 入库满 24 小时且原有历史可比较的项目进入评分；明确不可访问可按持平计算，其他过期项目暂缓。
 // 按评分、24 小时净增量、Star 总数、入库时间、ID 升序淘汰，删除和执行记录同事务提交。
 func (s *Scheduler) cleanup(ctx context.Context, now int64, policy *SamplingPolicy) (bool, error) {
 	// 每日淘汰边界是北京时间 04:00（UTC 前一天 20:00），不是程序每启动就重复淘汰。
@@ -44,7 +44,7 @@ func (s *Scheduler) cleanup(ctx context.Context, now int64, policy *SamplingPoli
 		}
 		potential := []ProjectRow{}
 		for _, row := range rows {
-			if now-row.EnteredAt >= Day && !IsStale(row.ObservedAt, now, policy) {
+			if now-row.EnteredAt >= Day && (row.UnavailableAt > 0 || !IsStale(row.ObservedAt, now, policy)) {
 				potential = append(potential, row)
 			}
 		}
@@ -61,6 +61,18 @@ func (s *Scheduler) cleanup(ctx context.Context, now int64, policy *SamplingPoli
 			}
 			for i, view := range views {
 				longest := view.Trends[720]
+				row := potential[i]
+				if row.UnavailableAt > 0 && row.ObservedAt-row.EnteredAt < Day {
+					// Carrying a value cannot create the original day's real observation history.
+					histories, err := s.store.Histories([]string{row.Cycle}, now)
+					if err != nil {
+						return false, err
+					}
+					real := projectHistory(row, histories[row.Cycle])
+					if len(real) < 2 || real[len(real)-1][0]-real[0][0] < Day {
+						continue
+					}
+				}
 				if longest.Start == nil || longest.End == nil || *longest.End-*longest.Start < Day {
 					continue
 				}

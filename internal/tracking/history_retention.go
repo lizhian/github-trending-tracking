@@ -9,6 +9,28 @@ import (
 // pruneHistory checks each retained bucket against the union before deleting anything.
 // Reads finish before the transaction because SQLite uses a single connection.
 func (s *Store) pruneHistory(ctx context.Context, now int64, policy *SamplingPolicy) (bool, error) {
+	projects, err := s.ProjectRows("")
+	if err != nil {
+		return false, err
+	}
+	cycles := []string{}
+	for _, project := range projects {
+		cycles = append(cycles, project.Cycle)
+	}
+	histories, err := s.Histories(cycles, now)
+	if err != nil {
+		return false, err
+	}
+	anchors := map[string]map[int64]bool{}
+	for _, project := range projects {
+		anchors[project.Cycle] = map[int64]bool{}
+		for _, width := range Windows {
+			trend := WindowTrend(projectHistory(project, histories[project.Cycle]), width, now, policy)
+			for _, point := range trend.Points {
+				anchors[project.Cycle][point[0]] = true
+			}
+		}
+	}
 	rows, err := s.DB.QueryContext(ctx, `SELECT d.cycle,d.day,d.hours,p.observed_at FROM snapshot_days d JOIN projects p ON p.cycle=d.cycle`)
 	if err != nil {
 		return false, err
@@ -32,15 +54,7 @@ func (s *Store) pruneHistory(ctx context.Context, now int64, policy *SamplingPol
 		}
 		count := len(b.hours)
 		for key, point := range b.hours {
-			keep := point[0] == end
-			if point[0] >= now-Retention && point[0] <= end {
-				for _, width := range Windows {
-					if point[0] >= end-int64(width)*Hour && windowSlot(SamplingSlot(point[0], policy), width) {
-						keep = true
-						break
-					}
-				}
-			}
+			keep := point[0] == end || anchors[b.cycle][point[0]]
 			if !keep {
 				delete(b.hours, key)
 			}

@@ -575,6 +575,15 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 				}
 			}
 			repo := repos[id]
+			confirmedMissing := false
+			index := slices.Index(group, id)
+			if repo == nil && len(existing) > 0 && err == nil && index < len(missing) && missing[index] {
+				recovered, confirmErr := s.upstream.publicRepository(ctx, existing[0].Name, id, mode)
+				confirmedMissing = errors.Is(confirmErr, errPublicRepositoryMissing)
+				if confirmErr == nil {
+					repo = recovered
+				}
+			}
 			if repo != nil {
 				latestMetadata := int64(0)
 				for _, row := range existing {
@@ -631,7 +640,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 					}
 				}
 				for _, row := range existing {
-					if _, e = s.store.DB.ExecContext(ctx, "UPDATE projects SET attempted_at=?,error=? WHERE id=? AND cycle=? AND attempted_at<=?", now, message, row.ID, row.Cycle, now); e != nil {
+					if _, e = s.store.DB.ExecContext(ctx, "UPDATE projects SET attempted_at=?,error=?,unavailable_at=CASE WHEN ? AND unavailable_at=0 THEN ? ELSE unavailable_at END WHERE id=? AND cycle=? AND attempted_at<=?", now, message, confirmedMissing, now, row.ID, row.Cycle, now); e != nil {
 						return false, e
 					}
 					record("collection", row.Type, false, message)

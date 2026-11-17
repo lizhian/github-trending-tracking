@@ -46,6 +46,8 @@ type TrendSummary struct {
 	Start *int64 `json:"start"`
 	End   *int64 `json:"end"`
 	Gaps  []Gap  `json:"gaps"`
+	AsOf  int64  `json:"asOf"`
+	Basis string `json:"basis"`
 }
 
 // Trend 在趋势摘要上附加窗口快照。匿名嵌入使摘要字段可被提升访问，JSON 也会展开。
@@ -189,26 +191,33 @@ func CompleteWindow(start, end int64, hours int, p *SamplingPolicy) bool {
 	return start <= latestStart
 }
 
-// WindowTrend 从升序快照中过滤最近 30 天有效点，以最新成功观测为窗口终点计算趋势。
+// WindowTrend 从升序快照中过滤最近 30 天有效点，以当前时间为窗口终点计算趋势。
 // 不足两个不同时间点时为积累中；否则计算可为负的 Star 净增量，并记录跳过的应采时段。
 func WindowTrend(points []Point, hours int, now int64, p *SamplingPolicy) Trend {
 	valid := []Point{}
 	for _, point := range points {
-		if point[0] <= now && (point[0] >= now-Retention || point == points[len(points)-1]) {
+		if point[0] <= now && (point[0] >= now-Retention-Day || point == points[len(points)-1]) {
 			valid = append(valid, point)
 		}
 	}
 	selected := []Point{}
 	if len(valid) > 0 {
-		end := valid[len(valid)-1][0]
+		end := now
+		boundary := end - int64(hours)*Hour
+		anchor := int64(-1)
 		for _, point := range valid {
-			if point[0] >= end-int64(hours)*Hour && (point[0] == end || windowSlot(SamplingSlot(point[0], p), hours)) {
+			if point[0] <= boundary && point[0] >= boundary-windowStep(hours)*Hour && windowSlot(SamplingSlot(point[0], p), hours) {
+				anchor = point[0]
+			}
+		}
+		for _, point := range valid {
+			if (point[0] >= boundary || point[0] == anchor) && (point == valid[len(valid)-1] || windowSlot(SamplingSlot(point[0], p), hours)) {
 				selected = append(selected, point)
 			}
 		}
 	}
 	// 显式空 slice 让 JSON 输出 [] 而非 null。只有至少两个不同观测时间才设置 Delta。
-	summary := TrendSummary{State: "accumulating", Gaps: []Gap{}}
+	summary := TrendSummary{State: "accumulating", Gaps: []Gap{}, AsOf: now, Basis: "observed"}
 	if len(selected) > 0 {
 		first, last := selected[0], selected[len(selected)-1]
 		summary.Start = ptr(first[0])
@@ -216,7 +225,7 @@ func WindowTrend(points []Point, hours int, now int64, p *SamplingPolicy) Trend 
 		if last[0] > first[0] {
 			summary.Delta = ptr(last[1] - first[1])
 			summary.State = "partial"
-			if CompleteWindow(first[0], last[0], hours, p) {
+			if CompleteWindow(first[0], now, hours, p) {
 				summary.State = "complete"
 			}
 		}
@@ -227,6 +236,63 @@ func WindowTrend(points []Point, hours int, now int64, p *SamplingPolicy) Trend 
 		}
 	}
 	return Trend{TrendSummary: summary, Points: selected}
+}
+
+type carryPeriod struct{ Start, End, Stars int64 }
+
+// ProjectTrend distinguishes real observations, explicit carry-forward and unknown collection failures.
+func ProjectTrend(row ProjectRow, points []Point, hours int, now int64, policy *SamplingPolicy) Trend {
+	trend := WindowTrend(points, hours, now, policy)
+	if row.UnavailableAt == 0 {
+		var periods []carryPeriod
+		_ = json.Unmarshal([]byte(row.CarryPeriods), &periods)
+		boundary := now - int64(hours)*Hour
+		for _, period := range periods {
+			if period.Start <= boundary && boundary < period.End && row.ObservedAt >= period.End {
+				trend.Start, trend.End = ptr(boundary), ptr(row.ObservedAt)
+				trend.Delta = ptr(row.Stars - period.Stars)
+				trend.State, trend.Basis = "complete", "carried"
+			}
+		}
+		if IsStale(row.ObservedAt, now, policy) {
+			trend.Delta = nil
+			trend.Basis = "unknown"
+		}
+		return trend
+	}
+	trend.Basis = "carried"
+	boundary := now - int64(hours)*Hour
+	start := boundary
+	value := row.Stars
+	found := false
+	for _, point := range points {
+		if point[0] <= boundary {
+			value = point[1]
+			found = true
+		}
+	}
+	var periods []carryPeriod
+	_ = json.Unmarshal([]byte(row.CarryPeriods), &periods)
+	for _, period := range periods {
+		if period.Start <= boundary && boundary < period.End {
+			value, found = period.Stars, true
+		}
+	}
+	if !found {
+		if len(trend.Points) == 0 {
+			return trend
+		}
+		start, value = trend.Points[0][0], trend.Points[0][1]
+	}
+	if now > start {
+		trend.Start, trend.End = ptr(start), ptr(now)
+		trend.Delta = ptr(row.Stars - value)
+		trend.State = "partial"
+		if found || CompleteWindow(start, now, hours, policy) {
+			trend.State = "complete"
+		}
+	}
+	return trend
 }
 
 // windowSlot selects Beijing sampling rounds for a trend window.
@@ -292,7 +358,7 @@ func (s *Store) ProjectViews(rows []ProjectRow, now int64, policy *SamplingPolic
 		trends := map[int]TrendSummary{}
 		points := projectHistory(row, histories[row.Cycle])
 		for _, width := range Windows {
-			trends[width] = WindowTrend(points, width, now, policy).TrendSummary
+			trends[width] = ProjectTrend(row, points, width, now, policy).TrendSummary
 		}
 		var topics []string
 		if err := json.Unmarshal([]byte(row.Topics), &topics); err != nil {
@@ -301,7 +367,7 @@ func (s *Store) ProjectViews(rows []ProjectRow, now int64, policy *SamplingPolic
 		if topics == nil {
 			topics = []string{}
 		}
-		items = append(items, Project{ID: row.ID, Type: row.Type, RepoID: row.RepoID, Name: row.Name, Description: row.Description, Homepage: row.Homepage, Language: row.Language, Topics: topics, Stars: row.Stars, EnteredAt: row.EnteredAt, ObservedAt: row.ObservedAt, AttemptedAt: row.AttemptedAt, Error: row.Error, Stale: IsStale(row.ObservedAt, now, policy), Trends: trends})
+		items = append(items, Project{ID: row.ID, Type: row.Type, RepoID: row.RepoID, Name: row.Name, Description: row.Description, Homepage: row.Homepage, Language: row.Language, Topics: topics, Stars: row.Stars, EnteredAt: row.EnteredAt, ObservedAt: row.ObservedAt, AttemptedAt: row.AttemptedAt, UnavailableAt: row.UnavailableAt, Error: row.Error, Stale: IsStale(row.ObservedAt, now, policy), Trends: trends})
 	}
 	return items, nil
 }

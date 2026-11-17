@@ -25,7 +25,7 @@ func TestTieredHistoryReturnsWindowPointsAndPermanentlyPrunesUnion(t *testing.T)
 	}
 	// Maintenance must apply the same point selection used by details.
 	h.tick(end + 1)
-	for _, tc := range []struct{ width, count int }{{24, 25}, {72, 25}, {168, 29}, {720, 31}} {
+	for _, tc := range []struct{ width, count int }{{24, 25}, {72, 26}, {168, 30}, {720, 31}} {
 		got := requestJSON(t, h.store, h.clock, fmt.Sprintf("/api/projects/github:R_0/history?window=%d", tc.width))
 		points := got["points"].([]any)
 		trend := got["trend"].(map[string]any)
@@ -40,26 +40,26 @@ func TestTieredHistoryReturnsWindowPointsAndPermanentlyPrunesUnion(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 25 hourly + 16 additional three-hour + 16 additional six-hour + 23 daily points.
-	if len(all["cycle-R_0"]) != 80 {
-		t.Fatalf("retained %d points, want 80", len(all["cycle-R_0"]))
+	// Current-time windows retain one preceding boundary point where available; their union has 81 real points.
+	if len(all["cycle-R_0"]) != 81 {
+		t.Fatalf("retained %d points, want 81", len(all["cycle-R_0"]))
 	}
 	h.tick(end + 2)
 	again, _ := h.store.Histories([]string{"cycle-R_0"}, end+2)
-	if len(again["cycle-R_0"]) != 80 {
+	if len(again["cycle-R_0"]) != 81 {
 		t.Fatal("pruning not stable")
 	}
-	// Restart while collection remains blocked; wall clock must not thin the last valid 24 hours.
+	// Restart while collection remains blocked; windows move with wall clock and stale growth is unknown.
 	h.scheduler = tracking.NewScheduler(h.store, tracking.SchedulerOptions{Clock: h.clock, Client: h.client, StartedAt: end + 2*tracking.Day})
 	h.tick(end + 2*tracking.Day)
 	got := requestJSON(t, h.store, h.clock, "/api/projects/github:R_0/history?window=24")
-	if len(got["points"].([]any)) != 25 {
-		t.Fatal("stalled window was thinned", got)
+	if len(got["points"].([]any)) != 0 || got["trend"].(map[string]any)["basis"] != "unknown" {
+		t.Fatal("stalled window did not move", got)
 	}
 	h.scheduler = tracking.NewScheduler(h.store, tracking.SchedulerOptions{Clock: h.clock, Client: h.client, StartedAt: end + 31*tracking.Day})
 	h.tick(end + 31*tracking.Day)
 	got = requestJSON(t, h.store, h.clock, "/api/projects/github:R_0/history?window=720")
-	if len(got["points"].([]any)) != 1 || got["trend"].(map[string]any)["delta"] != nil {
+	if len(got["points"].([]any)) != 0 || got["trend"].(map[string]any)["delta"] != nil {
 		t.Fatal("expired latest point lost or comparable", got)
 	}
 }
@@ -108,5 +108,27 @@ func TestResponsesBoundHistoryToReadProjectObservation(t *testing.T) {
 	item := h.list("github")["items"].([]any)[0].(map[string]any)
 	if item["trends"].(map[string]any)["24"].(map[string]any)["end"] != item["observedAt"] {
 		t.Fatal("list mixed observation versions", item)
+	}
+}
+
+func TestUnavailableProjectsParticipateInNormalRetention(t *testing.T) {
+	end := beijing("2026-11-05T14:05:00")
+	h := newCollectionHarness(t, end+1)
+	seedMatureProjects(t, h, 501, end)
+	// All ordinary projects are stale and protected. The confirmed inaccessible
+	// mature project must still be eligible, while an unconfirmed error is not.
+	if _, err := h.store.DB.Exec("UPDATE projects SET unavailable_at=? WHERE id='github:R_0'", end+tracking.Hour); err != nil {
+		t.Fatal(err)
+	}
+	now := end + 40*tracking.Day
+	h.scheduler = tracking.NewScheduler(h.store, tracking.SchedulerOptions{Clock: h.clock, Client: h.client, StartedAt: now})
+	h.tick(now)
+	rows, err := h.store.ProjectRows("WHERE id='github:R_0'")
+	if err != nil || len(rows) != 0 {
+		t.Fatal("inaccessible project was permanently protected", rows, err)
+	}
+	rows, err = h.store.ProjectRows("WHERE id='github:R_1'")
+	if err != nil || len(rows) != 1 {
+		t.Fatal("temporary failure lost protection", rows, err)
 	}
 }

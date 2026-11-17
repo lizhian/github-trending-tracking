@@ -1,0 +1,2 @@
+ALTER TABLE projects ADD COLUMN unavailable_at INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE projects ADD COLUMN carry_periods TEXT NOT NULL DEFAULT '[]';
