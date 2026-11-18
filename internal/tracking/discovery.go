@@ -50,10 +50,11 @@ type resolvedDetail struct {
 
 // discoveryState 保存来源进度、待解析详情和当日缓存；写入 system_state 以支持重启恢复。
 type discoveryState struct {
-	ScheduleVersion int                       `json:"scheduleVersion,omitempty"`
-	Sources         map[string]*sourceState   `json:"sources"`
-	Details         []*detailTask             `json:"details"`
-	Resolved        map[string]resolvedDetail `json:"resolved"`
+	LanguageTrending *languageTrendingRound    `json:"languageTrending,omitempty"`
+	ScheduleVersion  int                       `json:"scheduleVersion,omitempty"`
+	Sources          map[string]*sourceState   `json:"sources"`
+	Details          []*detailTask             `json:"details"`
+	Resolved         map[string]resolvedDetail `json:"resolved"`
 }
 
 // discoveryEntry 待收录仓库及其追踪类型；仓库资料与 README 重试分别计时，不让一类失败阻塞另一类。
@@ -83,41 +84,29 @@ var linuxRSSURLs = []string{
 	"https://rss.yicai-tech.com/rss/from/https://linux.do/c/domestic/98.rss",
 }
 
-var discoveryLanguages = []struct{ name, slug string }{
-	{"Python", "python"}, {"TypeScript", "typescript"}, {"JavaScript", "javascript"},
-	{"Go", "go"}, {"Rust", "rust"}, {"Java", "java"}, {"C++", "c++"},
-}
-
 // sourceName 提供稳定来源身份对应的可读名称，不将上游地址暴露到诊断中。
 func sourceName(src source) string {
 	names := map[string]string{
 		"github-daily": "GitHub 综合日榜", "github-weekly": "GitHub 综合周榜", "github-monthly": "GitHub 综合月榜",
 		"hellogithub-all": "HelloGitHub 全部", "hellogithub-featured": "HelloGitHub 精选",
 		"opengithubs-daily": "OpenGithubs 日榜", "opengithubs-weekly": "OpenGithubs 周榜", "opengithubs-monthly": "OpenGithubs 月榜", "linuxdo": "Linux.do",
+		languageTrendingID: "GitHub 分语言日榜", "github-search": "GitHub Search 总榜",
 	}
 	if name := names[src.id]; name != "" {
 		return name
 	}
-	for _, lang := range discoveryLanguages {
-		if src.id == "github-daily-"+lang.slug {
-			return "GitHub " + lang.name + " 日榜"
-		}
-		if src.id == "github-search-"+lang.slug {
-			return "GitHub " + lang.name + " Search"
-		}
-	}
 	return src.id
 }
 
-// searchRepositories 固定单页前30；日期窗口按本次请求时间滚动，部分结果仍交给准入。
+// searchRepositories 取不限语言的单页前 100；部分结果仍交给准入。
 func (u *upstream) searchRepositories(ctx context.Context, sourceURL, token string, deadline int64) ([]string, error) {
 	parsed, _ := url.Parse(sourceURL)
 	q := parsed.Query()
 	since := time.UnixMilli(u.clock.Now()).UTC().AddDate(0, 0, -90).Format(time.RFC3339)
-	q.Set("q", q.Get("q")+" created:>="+since+" stars:>=100 fork:false archived:false is:public")
+	q.Set("q", "created:>="+since+" stars:>=100 fork:false archived:false is:public")
 	q.Set("sort", "stars")
 	q.Set("order", "desc")
-	q.Set("per_page", "30")
+	q.Set("per_page", "100")
 	parsed.RawQuery = q.Encode()
 	text, err := u.text(ctx, parsed.String(), "GitHub", nil, token, deadline)
 	if err != nil {
@@ -134,7 +123,7 @@ func (u *upstream) searchRepositories(ctx context.Context, sourceURL, token stri
 	}
 	names := []string{}
 	seen := map[string]bool{}
-	for _, item := range result.Items[:min(len(result.Items), 30)] {
+	for _, item := range result.Items[:min(len(result.Items), 100)] {
 		name := repositoryName("https://github.com/"+item.Name, false)
 		if name == "" {
 			return names, errors.New("GitHub Search invalid response")
@@ -150,26 +139,19 @@ func (u *upstream) searchRepositories(ctx context.Context, sourceURL, token stri
 	return names, nil
 }
 
-var sources = func() []source {
-	base := []source{
-		{"github-daily", "github", "https://rsshub-balancer.virworks.moe/github/trending/daily/any", "github", true},
-		{"github-weekly", "github", "https://rsshub-balancer.virworks.moe/github/trending/weekly/any", "github", false},
-		{"github-monthly", "github", "https://rsshub-balancer.virworks.moe/github/trending/monthly/any", "github", false},
-		{"hellogithub-all", "hellogithub", "https://rsshub-balancer.virworks.moe/hellogithub/home/all", "github", false},
-		{"hellogithub-featured", "hellogithub", "https://rsshub-balancer.virworks.moe/hellogithub/home/featured", "github", false},
-		{"opengithubs-daily", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-daily-rank/refs/heads/main/README.md", "github", false},
-		{"opengithubs-weekly", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-weekly-rank/refs/heads/main/README.md", "github", false},
-		{"opengithubs-monthly", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-monthly-rank/refs/heads/main/README.md", "github", false},
-		{"linuxdo", "linuxdo", linuxRSSURLs[0], "linux.do", true},
-	}
-	for _, lang := range discoveryLanguages {
-		base = append(base,
-			source{"github-daily-" + lang.slug, "github", "https://rsshub-balancer.virworks.moe/github/trending/daily/" + lang.slug, "github", false},
-			source{"github-search-" + lang.slug, "search", "https://api.github.com/search/repositories?" + url.Values{"q": {"language:" + lang.name}}.Encode(), "github", false},
-		)
-	}
-	return base
-}()
+var sources = []source{
+	{"github-daily", "github", "https://rsshub-balancer.virworks.moe/github/trending/daily/any", "github", true},
+	{"github-weekly", "github", "https://rsshub-balancer.virworks.moe/github/trending/weekly/any", "github", false},
+	{"github-monthly", "github", "https://rsshub-balancer.virworks.moe/github/trending/monthly/any", "github", false},
+	{"hellogithub-all", "hellogithub", "https://rsshub-balancer.virworks.moe/hellogithub/home/all", "github", false},
+	{"hellogithub-featured", "hellogithub", "https://rsshub-balancer.virworks.moe/hellogithub/home/featured", "github", false},
+	{"opengithubs-daily", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-daily-rank/refs/heads/main/README.md", "github", false},
+	{"opengithubs-weekly", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-weekly-rank/refs/heads/main/README.md", "github", false},
+	{"opengithubs-monthly", "markdown", "https://raw.githubusercontent.com/OpenGithubs/github-monthly-rank/refs/heads/main/README.md", "github", false},
+	{"linuxdo", "linuxdo", linuxRSSURLs[0], "linux.do", true},
+	{"github-search", "search", "https://api.github.com/search/repositories", "github", false},
+	{languageTrendingID, "language-trending", languageTrendingURL, "github", false},
+}
 
 var projectTypes = []string{"github", "linux.do"}
 
@@ -496,6 +478,15 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 	attemptedTypes, succeededTypes := map[string]bool{}, map[string]bool{}
 	for _, source := range sources {
 		previous := state.Sources[source.id]
+		if previous == nil && (source.kind == "search" || source.kind == "language-trending") {
+			interval := Day
+			if source.kind == "language-trending" {
+				interval = languageTrendingInterval
+			}
+			if githubDiscoverySlot(now, interval) <= s.options.StartedAt {
+				continue
+			}
+		}
 		if source.scheduled && previous == nil && now < nextSlot(s.options.StartedAt, SamplingHours) {
 			continue
 		}
@@ -508,6 +499,21 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 			}
 		}
 		if next > now {
+			continue
+		}
+		if source.kind == "language-trending" {
+			status, names, tried := s.discoverLanguageTrending(ctx, &state, now, deadline, previous)
+			state.Sources[source.id] = &status
+			for _, name := range names {
+				add(name, source.typ)
+			}
+			if tried {
+				attempted, attemptedTypes[source.typ] = true, true
+				if status.SucceededAt != nil && *status.SucceededAt == now {
+					succeeded, succeededTypes[source.typ] = true, true
+				}
+			}
+			changed = true
 			continue
 		}
 		var values []string
@@ -586,7 +592,7 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 				add(name, source.typ)
 			}
 		}
-		next = (floorDiv(u.clock.Now()-Hour, Day)+1)*Day + Hour
+		next = githubDiscoverySlot(u.clock.Now(), Day) + Day
 		if source.scheduled {
 			if policy != nil && u.clock.Now() >= policy.EffectiveAt {
 				next = nextExpected(u.clock.Now(), sourcePolicy)

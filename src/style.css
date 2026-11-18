@@ -915,8 +915,8 @@ td.numeric {
   td.week-col {
     display: none;
   }
-  th.numeric:nth-child(4),
-  td.numeric:nth-child(4) {
+  th.stars-col,
+  td.stars-col {
     width: 65px;
   }
   .repo-button {

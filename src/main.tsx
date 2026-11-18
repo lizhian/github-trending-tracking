@@ -68,6 +68,7 @@ const stateLabel = (trend: TrendSummary) =>
           : "完整观测";
 const apiBase = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 const sorts = ["name", "heat", "stars", ...WINDOWS.map(String)];
+const defaultSort = "24";
 interface QueryState {
   q: string;
   admitted: "" | "24" | "72" | "168";
@@ -86,7 +87,7 @@ function readLocation(): QueryState {
     admitted: ["24", "72", "168"].includes(text("admitted"))
       ? text("admitted") as QueryState["admitted"] : "",
     tab: text("tab") === "linuxdo" ? "linuxdo" : "github",
-    sort: sorts.includes(text("sort")) ? text("sort") : "heat",
+    sort: sorts.includes(text("sort")) ? text("sort") : defaultSort,
     direction: text("direction") === "asc" ? "asc" : "desc",
     project: text("project"),
     window: WINDOWS.includes(hours) ? hours : 720,
@@ -105,7 +106,7 @@ function locationFor(query: QueryState) {
   for (const [key, value] of [...params]) {
     if (
       !value ||
-      (key === "sort" && value === "heat") ||
+      (key === "sort" && value === defaultSort) ||
       (key === "direction" && value === "desc")
     )
       params.delete(key);
@@ -975,7 +976,7 @@ function App() {
                 />
                 {(
                   [
-                    ["github", "github趋势"],
+                    ["github", "Github趋势"],
                     ["linuxdo", "Linux.do开源趋势"],
                   ] as const
                 ).map(([tab, label]) => (
@@ -1103,13 +1104,14 @@ function App() {
                   <li key={source.id}>
                     <strong>{source.name}</strong>
                     <span className={source.failed ? "source-failed" : ""}>
-                      {source.failed ? "异常，等待重试" : !source.attemptedAt ? "尚未执行" : "成功"}
+                      {source.failed ? "异常，等待重试" : !source.attemptedAt ? "尚未执行" : source.languagesTotal && source.languagesCompleted !== source.languagesTotal ? "部分完成" : "成功"}
                     </span>
                     <dl>
                       <dt>最近尝试</dt><dd>{source.attemptedAt ? time(source.attemptedAt) : "尚未执行"}</dd>
                       <dt>最近成功</dt><dd>{time(source.succeededAt)}</dd>
                       <dt>解析结果数</dt><dd>{source.attemptedAt ? number(source.succeeded) : "—"}</dd>
-                      <dt>{source.failed ? "下次重试" : "下次执行"}</dt>
+                      {source.languagesTotal && <><dt>已完成语言</dt><dd>{source.languagesCompleted} / {source.languagesTotal}</dd></>}
+                      <dt>{source.retryAfter ? "下次重试" : "下次执行"}</dt>
                       <dd>{!source.nextAt ? "等待调度" : source.nextAt <= data.asOf ? "已到期，等待调度" : time(source.nextAt)}</dd>
                     </dl>
                     {source.error && <p role="status">{source.error === "GitHub Search incomplete results" ? "搜索结果不完整，已保留返回的候选，将重试。" : source.error}</p>}
@@ -1167,13 +1169,13 @@ function App() {
                             排名
                           </th>
                           {sortHeading("name", "项目名称", "name-col")}
-                          {sortHeading("heat", "热度")}
-                          {sortHeading("stars", "Star 总数")}
                           {WINDOWS.map((hours) => (
                             <React.Fragment key={hours}>
                               {sortHeading(String(hours), labels[hours])}
                             </React.Fragment>
                           ))}
+                          {sortHeading("stars", "总数", "numeric stars-col")}
+                          {sortHeading("heat", "热度")}
                         </tr>
                       </thead>
                     </table>
@@ -1228,12 +1230,6 @@ function App() {
                         <th className="visually-hidden" scope="col">
                           项目名称
                         </th>
-                        <th className="visually-hidden" scope="col">
-                          热度
-                        </th>
-                        <th className="visually-hidden" scope="col">
-                          Star 总数
-                        </th>
                         {WINDOWS.map((hours) => (
                           <th
                             className="visually-hidden"
@@ -1243,6 +1239,8 @@ function App() {
                             {labels[hours]}
                           </th>
                         ))}
+                        <th className="visually-hidden" scope="col">总数</th>
+                        <th className="visually-hidden" scope="col">热度</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1294,10 +1292,12 @@ function App() {
                                   {project.aiSummary || project.description || "暂无项目介绍"}
                                 </p>
                               </td>
-                              <td className="numeric">
-                                <HeatValue project={project} />
-                              </td>
-                              <td className="numeric">
+                              {WINDOWS.map((hours) => (
+                                <td className="numeric" key={hours}>
+                                  <TrendValue trend={project.trends[hours]} />
+                                </td>
+                              ))}
+                              <td className="numeric stars-col">
                                 <span
                                   title={number(project.stars)}
                                   aria-label={`${number(project.stars)} Star`}
@@ -1305,11 +1305,9 @@ function App() {
                                   {compact(project.stars)}
                                 </span>
                               </td>
-                              {WINDOWS.map((hours) => (
-                                <td className="numeric" key={hours}>
-                                  <TrendValue trend={project.trends[hours]} />
-                                </td>
-                              ))}
+                              <td className="numeric">
+                                <HeatValue project={project} />
+                              </td>
                             </tr>
                           );
                         })

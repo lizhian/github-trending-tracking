@@ -184,6 +184,9 @@ func newCollectionHarness(t *testing.T, start int64) *collectionHarness {
 		if f := h.sources[r.URL.String()]; f != nil {
 			return f(), nil
 		}
+		if r.URL.Host == "github.com" && strings.HasPrefix(r.URL.Path, "/trending/") {
+			return response(`<h2 class="blankslate-heading">It looks like we don’t have any trending repositories for this language.</h2>`), nil
+		}
 		if r.URL.Host == "api.github.com" && strings.HasSuffix(r.URL.Path, "/readme") {
 			return response("Community: https://linux.do"), nil
 		}

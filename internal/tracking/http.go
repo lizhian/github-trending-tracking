@@ -64,8 +64,10 @@ type Summary struct {
 // SourceStatus 展示某个趋势源最近状态及受冷却约束的下次执行时间。
 type SourceStatus struct {
 	sourceState
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	LanguagesCompleted *int64 `json:"languagesCompleted,omitempty"`
+	LanguagesTotal     int    `json:"languagesTotal,omitempty"`
 }
 
 // ListResult 全量列表响应，包含筛选选项、汇总、来源状态与生成时间。
@@ -193,6 +195,13 @@ func (s *Store) list(p parameters, now int64) (ListResult, error) {
 		status := SourceStatus{ID: source.id, Name: sourceName(source)}
 		if previous := discovery.Sources[source.id]; previous != nil {
 			status.sourceState = *previous
+		}
+		if source.id == languageTrendingID {
+			status.LanguagesTotal = len(trendingLanguages)
+			status.LanguagesCompleted = ptr(0)
+			if discovery.LanguageTrending != nil {
+				status.LanguagesCompleted = ptr(int64(len(discovery.LanguageTrending.Pages)))
+			}
 		}
 		blocked := upstream.blocked(source.url)
 		if source.kind == "linuxdo" {

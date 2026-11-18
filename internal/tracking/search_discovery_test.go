@@ -7,19 +7,14 @@ import (
 	"time"
 )
 
-// 验证真实调度、候选准入与公开API；部分搜索结果可收录，每日来源不跟随小时采样重复抓取。
-func TestLanguageDiscoveryAndSourceDiagnostics(t *testing.T) {
+// 综合搜索无语言过滤；不完整结果可收录，成功后只在下一个白天时段执行。
+func TestGlobalSearchDiscovery(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
 	initial := h.list("github")["sources"].([]any)
-	if len(initial) != 22 || initial[8].(map[string]any)["attemptedAt"] != float64(0) {
+	if len(initial) != 10 {
 		t.Fatal(initial)
 	}
 	h.sources["https://rsshub-balancer.virworks.moe/github/trending/daily/any"] = func() *http.Response { return response(`<rss><channel/></rss>`) }
-	dailyCalls := 0
-	h.sources["https://rsshub-balancer.virworks.moe/github/trending/daily/go"] = func() *http.Response {
-		dailyCalls++
-		return response(`<rss><channel><item><link>https://github.com/acme/two</link></item></channel></rss>`)
-	}
 	searchCalls := 0
 	partial := true
 	base := h.client.Transport
@@ -46,25 +41,19 @@ func TestLanguageDiscoveryAndSourceDiagnostics(t *testing.T) {
 				}
 			}
 		}
-		if q.Get("per_page") != "30" || q.Get("sort") != "stars" || q.Get("order") != "desc" {
+		if q.Get("per_page") != "100" || q.Get("sort") != "stars" || q.Get("order") != "desc" || strings.Contains(q.Get("q"), "language:") {
 			t.Fatal(q)
 		}
-		if strings.Contains(q.Get("q"), "language:C") && !strings.Contains(q.Get("q"), "language:C++ ") {
-			t.Fatal("C++ was not encoded correctly", q)
-		}
-		if strings.HasPrefix(q.Get("q"), "language:Python ") {
-			if partial {
-				return response(`{"items":[{"full_name":"acme/one"}],"incomplete_results":true}`), nil
-			}
-			return response(`{"items":[{"full_name":"acme/one"}],"incomplete_results":false}`), nil
+		if partial {
+			return response(`{"items":[{"full_name":"acme/one"}],"incomplete_results":true}`), nil
 		}
 		return response(`{"items":[],"incomplete_results":false}`), nil
 	})
 	first := beijing("2026-10-01T09:00:00")
 	h.tick(first)
 	got := h.list("github")
-	if got["total"] != float64(2) || searchCalls != 7 || dailyCalls != 1 {
-		t.Fatal("discovery missing", got["total"], searchCalls, dailyCalls)
+	if got["total"] != float64(1) || searchCalls != 1 {
+		t.Fatal("discovery missing", got["total"], searchCalls)
 	}
 	find := func(id string) map[string]any {
 		t.Helper()
@@ -77,27 +66,23 @@ func TestLanguageDiscoveryAndSourceDiagnostics(t *testing.T) {
 		t.Fatal("missing source", id)
 		return nil
 	}
-	python := find("github-search-python")
-	if python["failed"] != float64(1) || python["succeeded"] != float64(1) || python["succeededAt"] != nil || python["error"] != "GitHub Search incomplete results" {
-		t.Fatal(python)
-	}
-	zero := find("github-search-go")
-	if zero["failed"] != float64(0) || zero["succeeded"] != float64(0) || zero["succeededAt"] == nil {
-		t.Fatal("zero results reported as failure", zero)
+	search := find("github-search")
+	if search["failed"] != float64(1) || search["succeeded"] != float64(1) || search["succeededAt"] != nil || search["error"] != "GitHub Search incomplete results" {
+		t.Fatal(search)
 	}
 	partial = false
 	h.tick(first + 6*60_000)
-	python = find("github-search-python")
-	if searchCalls != 8 || python["failed"] != float64(0) || python["succeededAt"] == nil {
-		t.Fatal("partial result did not recover", searchCalls, python)
+	search = find("github-search")
+	if searchCalls != 2 || search["failed"] != float64(0) || search["succeededAt"] == nil || search["succeeded"] != float64(0) {
+		t.Fatal("partial result did not recover", searchCalls, search)
 	}
-	h.tick(beijing("2026-10-01T11:00:00"))
-	if searchCalls != 8 || dailyCalls != 1 {
-		t.Fatal("daily sources fetched again", searchCalls, dailyCalls)
+	h.tick(beijing("2026-10-01T21:00:00"))
+	if searchCalls != 2 {
+		t.Fatal("daily source fetched again", searchCalls)
 	}
 	h.tick(beijing("2026-10-02T09:00:00"))
-	if searchCalls != 15 || dailyCalls != 2 {
-		t.Fatal("next day not fetched", searchCalls, dailyCalls)
+	if searchCalls != 3 {
+		t.Fatal("next day not fetched", searchCalls)
 	}
 	linux := h.list("linux.do")["sources"].([]any)
 	if len(linux) != 1 || linux[0].(map[string]any)["id"] != "linuxdo" {

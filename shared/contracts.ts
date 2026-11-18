@@ -47,6 +47,8 @@ export interface SourceStatus extends RunState {
   id: string;
   name: string;
   nextAt: number;
+  languagesCompleted?: number;
+  languagesTotal?: number;
   retryAfter?: number;
 }
 export interface ListResult {

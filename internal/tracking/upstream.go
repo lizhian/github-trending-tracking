@@ -241,7 +241,7 @@ func readBounded(r io.Reader) (string, error) {
 	return string(b), nil
 }
 
-var safeDiagnostic = regexp.MustCompile(`^(GitHub HTTP [0-9]{3}|RSS HTTP [0-9]{3}|HelloGithub HTTP [0-9]{3}|OpenGithubs HTTP [0-9]{3}|GitHub Search invalid response|GitHub Search incomplete results|GitHub GraphQL unavailable|RSS invalid XML|RSS missing channel|HelloGithub invalid project|Upstream response too large|Upstream empty response|Upstream cooling down)$`)
+var safeDiagnostic = regexp.MustCompile(`^(GitHub(?: Trending)? HTTP [0-9]{3}|GitHub Trending invalid page|RSS HTTP [0-9]{3}|HelloGithub HTTP [0-9]{3}|OpenGithubs HTTP [0-9]{3}|GitHub Search invalid response|GitHub Search incomplete results|GitHub GraphQL unavailable|RSS invalid XML|RSS missing channel|HelloGithub invalid project|Upstream response too large|Upstream empty response|Upstream cooling down)$`)
 
 // safeError 只放行预定义诊断文本，其余统一返回安全提示，避免上游正文、URL 或 Token 泄漏。
 func safeError(e error) string {
