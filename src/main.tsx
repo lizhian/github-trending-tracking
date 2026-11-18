@@ -1033,7 +1033,7 @@ function App() {
                     </label>
                     <SearchSelect
                       label="最近入库"
-                      all="最近入库"
+                      all="全部"
                       name="admitted"
                       value={query.admitted}
                       options={["24", "72", "168"]}
