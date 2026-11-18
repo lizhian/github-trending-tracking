@@ -312,12 +312,23 @@ const iconColors = new Map<IconType, string>([
   [SiZsh, "#7653A3"],
 ]);
 
-export function LanguageIcon({ language }: { language: string | null }) {
-  const label = language?.trim() || "未提供";
-  const Icon = languageIcons.get(label.toLowerCase()) ?? GoCode;
+export function LanguageIcon({ language, onSearch }: { language: string | null; onSearch: (language: string) => void }) {
+  const label = language?.trim();
+  const Icon = (label && languageIcons.get(label.toLowerCase())) || GoCode;
+  const icon = <Icon color={iconColors.get(Icon)} aria-hidden="true" focusable="false" />;
+  if (!label) return <span className="lang" title="未提供" role="img" aria-label="未提供">{icon}</span>;
   return (
-    <span className="lang" title={label} role="img" aria-label={label}>
-      <Icon color={iconColors.get(Icon)} aria-hidden="true" focusable="false" />
-    </span>
+    <button
+      type="button"
+      className="lang"
+      title={`搜索语言：${label}`}
+      aria-label={`搜索语言：${label}`}
+      onClick={(event) => {
+        event.stopPropagation();
+        onSearch(label);
+      }}
+    >
+      {icon}
+    </button>
   );
 }

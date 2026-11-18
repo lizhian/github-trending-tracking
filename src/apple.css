@@ -606,9 +606,6 @@ html tbody tr:not(.selected):hover .repo-cell {
   overscroll-behavior: contain;
 }
 @media (max-width: 760px) {
-  .masthead-controls .filters {
-    display: none;
-  }
   html .mobile-details-dialog .inspector {
     margin: 0;
     height: 100%;

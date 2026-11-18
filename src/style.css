@@ -413,6 +413,10 @@ tbody tr:not(.selected):hover td {
   font-size: 16px;
   color: var(--color-muted);
 }
+button.lang:hover {
+  background: var(--color-paper-3);
+  border-radius: var(--radius-control);
+}
 .numeric {
   text-align: right;
   padding-right: var(--space-xs);
@@ -1922,15 +1926,6 @@ html {
 .collection-dialog p { color: var(--color-muted); font-size: 14px; line-height: 1.7; }
 .collection-dialog { overflow-wrap: anywhere; }
 .collection-heading .icon-button { flex-shrink: 0; }
-.message-dot {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-negative);
-}
 .submission-dialog form { display: grid; gap: 12px; margin-top: 24px; }
 .submission-dialog label { font-size: 14px; }
 .submission-dialog input {

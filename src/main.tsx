@@ -69,6 +69,14 @@ const stateLabel = (trend: TrendSummary) =>
 const apiBase = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 const sorts = ["name", "heat", "stars", ...WINDOWS.map(String)];
 const defaultSort = "24";
+const languageQueryPrefix = "language:";
+
+function isDialogBackdrop(event: React.MouseEvent<HTMLDialogElement>) {
+  if (event.target !== event.currentTarget) return false;
+  const { left, top, right, bottom } = event.currentTarget.getBoundingClientRect();
+  return event.clientX < left || event.clientX > right || event.clientY < top || event.clientY > bottom;
+}
+
 interface QueryState {
   q: string;
   admitted: "" | "24" | "72" | "168";
@@ -690,6 +698,7 @@ function App() {
   const [refresh, setRefresh] = useState(0);
   const [submissionOpen, setSubmissionOpen] = useState(false);
   const messagesDialog = useRef<HTMLDialogElement>(null);
+  const messageBackdropPress = useRef(false);
   const mobileDetails = useRef<HTMLDialogElement>(null);
   const [isMobile, setIsMobile] = useState(() => matchMedia("(max-width:760px)").matches);
   const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
@@ -731,18 +740,29 @@ function App() {
     setDraft(tag);
     commit({ q: tag });
   };
+  const searchLanguage = (language: string) => {
+    const q = languageQueryPrefix + language;
+    setDraft(q);
+    commit({ q });
+  };
   const listPath = `/api/projects?type=${query.tab === "linuxdo" ? "linux.do" : "github"}`;
   const previousListPath = useRef(listPath);
   const resource = useApi<ListResult>(listPath, refresh);
   const data = resource.value;
   const items = useMemo(() => {
-    const keywords = query.q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const search = query.q.trim().toLowerCase();
+    const language = search.startsWith(languageQueryPrefix)
+      ? search.slice(languageQueryPrefix.length).trim()
+      : null;
+    const keywords = search.split(/\s+/).filter(Boolean);
     const cutoff = query.admitted ? now - Number(query.admitted) * 3_600_000 : null;
     const compare = new Intl.Collator("en").compare;
     return (data?.items ?? []).filter((project) =>
-      keywords.every((keyword) =>
-        `${project.name} ${project.description ?? ""} ${project.language ?? ""} ${project.topics.join(" ")} ${project.aiSummary ?? ""} ${(project.aiTags ?? []).join(" ")}`.toLowerCase().includes(keyword),
-      ) && (cutoff === null || (project.enteredAt >= cutoff && project.enteredAt <= now)),
+      (language !== null
+        ? !!language && project.language?.trim().toLowerCase() === language
+        : keywords.every((keyword) =>
+          `${project.name} ${project.description ?? ""} ${project.language ?? ""} ${project.topics.join(" ")} ${project.aiSummary ?? ""} ${(project.aiTags ?? []).join(" ")}`.toLowerCase().includes(keyword),
+        )) && (cutoff === null || (project.enteredAt >= cutoff && project.enteredAt <= now)),
     ).sort((a, b) => {
       let order: number;
       if (query.sort === "name") order = compare(a.name.toLowerCase(), b.name.toLowerCase());
@@ -1044,7 +1064,6 @@ function App() {
               onClick={() => messagesDialog.current?.showModal()}
             >
               <Icon name="bell" size={20} />
-              {!!hasCollectionNotice && <span className="message-dot" aria-hidden="true" />}
             </button>
             <a
               className="icon-button source-link"
@@ -1064,6 +1083,12 @@ function App() {
         className="collection-dialog"
         ref={messagesDialog}
         aria-labelledby="collection-messages-title"
+        onPointerDown={(event) => { messageBackdropPress.current = isDialogBackdrop(event); }}
+        onClick={(event) => {
+          const close = messageBackdropPress.current && isDialogBackdrop(event);
+          messageBackdropPress.current = false;
+          if (close) event.currentTarget.close();
+        }}
       >
         <div className="collection-heading">
           <h2 id="collection-messages-title">
@@ -1281,7 +1306,7 @@ function App() {
                                       </span>
                                     )}
                                   </button>
-                                  <LanguageIcon language={project.language} />
+                                  <LanguageIcon language={project.language} onSearch={searchLanguage} />
                                   <AITags tags={project.aiTags ?? []} onTag={searchTag} />
                                   <ProjectProblemIndicator project={project} />
                                 </div>
