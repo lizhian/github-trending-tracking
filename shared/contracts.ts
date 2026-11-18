@@ -87,8 +87,8 @@ export interface Submission {
   name: string;
   url: string;
   status: "queued" | "processing" | "retrying" | "completed" | "partial" | "failed";
-  github: "pending" | "tracked" | "failed";
-  linuxdo: "pending" | "tracked" | "ineligible" | "unconfirmed" | "skipped";
+  github: "pending" | "tracked" | "failed" | "cooldown";
+  linuxdo: "pending" | "tracked" | "ineligible" | "unconfirmed" | "skipped" | "cooldown";
   nextAttemptAt: number | null;
   expiresAt: number | null;
   message: string;

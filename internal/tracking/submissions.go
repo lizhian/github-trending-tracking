@@ -83,7 +83,7 @@ func (s Submission) view(now int64) Submission {
 		s.Status = "completed"
 		if s.GitHub == "failed" {
 			s.Status = "failed"
-		} else if s.Linuxdo == "unconfirmed" {
+		} else if s.Linuxdo == "unconfirmed" || (s.GitHub == "tracked" && s.Linuxdo == "cooldown") || (s.GitHub == "cooldown" && s.Linuxdo == "tracked") {
 			s.Status = "partial"
 		}
 	}

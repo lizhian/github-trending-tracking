@@ -618,6 +618,20 @@ func TestCleanupRunsDuringStartupWaitProtectsYoungProjectsAndReentryStartsNewHis
 		t.Fatal("young project removed")
 	}
 	h.tick(beijing("2026-10-02T05:00:00"))
+	rows, err := h.store.ProjectRows("WHERE id='github:R_0'")
+	if err != nil || len(rows) != 0 {
+		t.Fatal("project was readmitted during cooldown", rows, err)
+	}
+	var expiresAt int64
+	wantExpiry := beijing("2026-10-05T04:00:00")
+	if found, err := h.store.State("readmission:github:R_0", &expiresAt); !found || err != nil || expiresAt != wantExpiry {
+		t.Fatal("cooldown was lost or extended", expiresAt, err)
+	}
+	h.tick(wantExpiry)
+	if found, err := h.store.State("readmission:github:R_0", &expiresAt); found || err != nil {
+		t.Fatal("expired cooldown was not removed", err)
+	}
+	h.tick(beijing("2026-10-05T05:00:00"))
 	history := h.history("github:R_0")
 	if len(history["points"].([]any)) != 1 || history["trend"].(map[string]any)["delta"] != nil {
 		t.Fatal("reentry inherited old cycle", history)

@@ -128,6 +128,32 @@ func (h *submissionHarness) result(t *testing.T, id string) Submission {
 	return sub
 }
 
+func TestSubmissionRespectsReadmissionCooldownPerType(t *testing.T) {
+	for _, blocked := range []string{"github", "linux.do"} {
+		t.Run(blocked, func(t *testing.T) {
+			h := newSubmissionHarness(t)
+			if err := h.store.SetState(readmissionKey(blocked, "R1"), h.clock.Now()+3*Day); err != nil {
+				t.Fatal(err)
+			}
+			sub := h.enqueue(t, "acme/tool")
+			h.step(t)
+			h.step(t)
+			result := h.result(t, sub.ID)
+			wantGitHub, wantLinuxdo := "tracked", "cooldown"
+			if blocked == "github" {
+				wantGitHub, wantLinuxdo = "cooldown", "tracked"
+			}
+			if result.GitHub != wantGitHub || result.Linuxdo != wantLinuxdo || result.Status != "partial" {
+				t.Fatal(result)
+			}
+			rows, err := h.store.ProjectRows("WHERE repo_id='R1'")
+			if err != nil || len(rows) != 1 || rows[0].Type == blocked {
+				t.Fatal(rows, err)
+			}
+		})
+	}
+}
+
 // TestSubmissionAdmissionIndependentStages 验证启动等待不阻塞投稿、GitHub 先提交、Linux.do 复用观测但独立周期，重复不重置保护期而淘汰再入库会重建周期。
 func TestSubmissionAdmissionIndependentStages(t *testing.T) {
 	// 准备：持久化投稿，时钟仍处于普通采样启动等待内；后续 step 每次只处理一个阶段。

@@ -4,6 +4,8 @@ status: accepted
 
 # 保护期优先于项目容量，按近期增长决定保留顺序
 
+后续补充：按保留评分淘汰的项目须经过 [72 小时重收录冷却期](../go-collection.md#保持的业务规则)，防止容量边缘的项目靠反复重入库不断重开保护期。
+
 2026-11-17 更新：[ADR-0013](0013-current-time-windows-and-unavailable-repositories.md) 替代窗口终点、历史保留及明确不可访问项目暂缓淘汰的相关约定。
 
 同分时的淘汰顺序见 [ADR-0011](0011-remove-listing-time.md)。

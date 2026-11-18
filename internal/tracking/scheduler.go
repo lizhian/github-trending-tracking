@@ -99,6 +99,9 @@ func (s *Scheduler) Tick(ctx context.Context) (err error) {
 	if err = s.expireReadmeCache(ctx, now); err != nil {
 		return err
 	}
+	if _, err = s.store.DB.ExecContext(ctx, "DELETE FROM system_state WHERE key GLOB ? AND CAST(value AS INTEGER)<=?", readmissionPrefix+"*", now); err != nil {
+		return err
+	}
 	policy, err := s.store.Policy()
 	if err != nil {
 		return err
@@ -360,7 +363,8 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			}
 		}
 	}
-	// 解析身份后再次按“追踪类型+稳定 ID”合并，消除仓库改名/大小写造成的同类型重复。
+	// 解析身份后检查冷却并按“追踪类型+稳定 ID”合并。
+	admissionNow := s.upstream.clock.Now()
 	canonical := []*discoveryEntry{}
 	byID := map[string]*discoveryEntry{}
 	selectedTarget := map[*discoveryEntry]bool{}
@@ -373,6 +377,13 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		}
 		key := entry.Type + ":" + strings.ToLower(entry.Name)
 		if entry.RepoID != "" {
+			blocked, err := s.store.readmissionBlocked(entry.Type, entry.RepoID, admissionNow)
+			if err != nil {
+				return false, err
+			}
+			if blocked {
+				continue
+			}
 			key = entry.Type + ":" + entry.RepoID
 		}
 		if previous := byID[key]; previous != nil {

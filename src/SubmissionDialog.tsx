@@ -11,6 +11,7 @@ const resultLabels: Record<string, string> = {
   unconfirmed: "资格待确认，可重新投稿重试",
   failed: "收录失败",
   skipped: "未处理",
+  cooldown: "重收录冷却中",
 };
 const statusLabels: Record<Submission["status"], string> = {
   queued: "已接收，等待处理",

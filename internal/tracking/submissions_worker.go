@@ -138,15 +138,16 @@ func (w *SubmissionWorker) retry(ctx context.Context, sub *Submission, err error
 		attempts = sub.ReadmeAttempts
 	}
 	if attempts >= 3 {
+		repositoryStage := sub.Phase == "repository"
 		sub.Phase = "done"
 		sub.FinishedAt = ptr(now)
-		if sub.GitHub != "tracked" {
+		if repositoryStage {
 			sub.GitHub = "failed"
 			sub.Linuxdo = "skipped"
 			sub.Message = "仓库资料暂时无法获取，请稍后重新投稿"
 		} else {
 			sub.Linuxdo = "unconfirmed"
-			sub.Message = "GitHub 已收录，Linux.do 资格待确认，可重新投稿重试"
+			sub.Message = sub.githubOutcome() + "，Linux.do 资格待确认，可重新投稿重试"
 		}
 	} else {
 		sub.NextAt = s.readmeRetryAt()
@@ -206,7 +207,23 @@ func (w *SubmissionWorker) repositoryStage(ctx context.Context, sub *Submission)
 	sub.GitHub = "tracked"
 	sub.NextAt = now
 	sub.Message = "GitHub 已收录，正在确认 Linux.do 资格"
+	blocked, err := s.store.readmissionBlocked("github", repo.ID, now)
+	if err != nil {
+		return err
+	}
+	if blocked {
+		sub.GitHub = "cooldown"
+		sub.Message = sub.githubOutcome() + "，正在确认 Linux.do 资格"
+		return w.save(ctx, sub)
+	}
 	return w.admit(ctx, sub, repo, "github")
+}
+
+func (s *Submission) githubOutcome() string {
+	if s.GitHub == "cooldown" {
+		return "GitHub 重收录冷却中"
+	}
+	return "GitHub 已收录"
 }
 
 // linuxdoStage 已有 Linux.do 项目直接完成；否则校验 README，不符合只结束 Linux.do 阶段。
@@ -224,7 +241,19 @@ func (w *SubmissionWorker) linuxdoStage(ctx context.Context, sub *Submission) er
 		sub.Linuxdo = "tracked"
 		sub.Phase = "done"
 		sub.FinishedAt = ptr(s.upstream.clock.Now())
-		sub.Message = "两类项目均已收录"
+		sub.Message = sub.githubOutcome() + "，Linux.do 已收录"
+		return w.save(ctx, sub)
+	}
+	checkedAt := s.upstream.clock.Now()
+	blocked, err := s.store.readmissionBlocked("linux.do", *sub.RepoID, checkedAt)
+	if err != nil {
+		return err
+	}
+	if blocked {
+		sub.Linuxdo = "cooldown"
+		sub.Phase = "done"
+		sub.FinishedAt = ptr(checkedAt)
+		sub.Message = sub.githubOutcome() + "，Linux.do 重收录冷却中"
 		return w.save(ctx, sub)
 	}
 	result, err := s.linuxdoReadme(ctx, *sub.RepoID)
@@ -239,7 +268,7 @@ func (w *SubmissionWorker) linuxdoStage(ctx context.Context, sub *Submission) er
 		sub.Linuxdo = "ineligible"
 		sub.Phase = "done"
 		sub.FinishedAt = ptr(now)
-		sub.Message = "GitHub 已收录，README 不符合 Linux.do 收录资格"
+		sub.Message = sub.githubOutcome() + "，README 不符合 Linux.do 收录资格"
 		return s.store.saveObservationsAnd(ctx, nil, now, nil, func(tx *sql.Tx) error {
 			if err := setTxState(ctx, tx, readmeCacheKey(*sub.RepoID), result); err != nil {
 				return err
@@ -273,7 +302,7 @@ func (w *SubmissionWorker) linuxdoStage(ctx context.Context, sub *Submission) er
 	sub.Linuxdo = "tracked"
 	sub.Phase = "done"
 	sub.FinishedAt = ptr(s.upstream.clock.Now())
-	sub.Message = "两类项目均已收录"
+	sub.Message = sub.githubOutcome() + "，Linux.do 已收录"
 	return w.admit(ctx, sub, repo, "linux.do")
 }
 

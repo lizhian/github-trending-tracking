@@ -8,6 +8,18 @@ import (
 	"slices"
 )
 
+const readmissionPrefix = "readmission:"
+
+func readmissionKey(typ, repoID string) string {
+	return readmissionPrefix + typ + ":" + repoID
+}
+
+func (s *Store) readmissionBlocked(typ, repoID string, now int64) (bool, error) {
+	var expiresAt int64
+	_, err := s.State(readmissionKey(typ, repoID), &expiresAt)
+	return expiresAt > now, err
+}
+
 // cleanupResult 记录某个追踪类型本日淘汰的执行时段、删除数量、剩余数量与符合淘汰条件的数量。
 type cleanupResult struct {
 	At        int64 `json:"at"`
@@ -127,10 +139,19 @@ func (s *Scheduler) cleanup(ctx context.Context, now int64, policy *SamplingPoli
 		if e != nil {
 			return false, e
 		}
+		expiresAt := max(now, s.upstream.clock.Now()) + 3*Day
 		for _, victim := range victims {
-			if _, e = tx.ExecContext(ctx, "DELETE FROM projects WHERE id=? AND cycle=? AND entered_at<=?", victim.row.ID, victim.row.Cycle, now-Day); e != nil {
+			result, err := tx.ExecContext(ctx, "DELETE FROM projects WHERE id=? AND cycle=? AND entered_at<=?", victim.row.ID, victim.row.Cycle, now-Day)
+			if err == nil {
+				var removed int64
+				removed, err = result.RowsAffected()
+				if err == nil && removed > 0 {
+					err = setTxState(ctx, tx, readmissionKey(typ, victim.row.RepoID), expiresAt)
+				}
+			}
+			if err != nil {
 				tx.Rollback()
-				return false, e
+				return false, err
 			}
 		}
 		if e = setTxState(ctx, tx, "cleanup:"+typ, cleanupResult{At: at, Removed: len(victims), Remaining: len(rows) - len(victims), Eligible: len(candidates)}); e != nil {
