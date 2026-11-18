@@ -408,20 +408,68 @@ function HeatValue({ project }: { project: Project }) {
     </span>
   );
 }
-function TrendValue({ trend }: { trend: TrendSummary }) {
+function TrendValue({ trend, showState = false }: { trend: TrendSummary; showState?: boolean }) {
   const hint = `${stateLabel(trend)}${trend.start && trend.end ? `，${time(trend.start)} 至 ${time(trend.end)}` : ""}${trend.gaps.length ? `，${trend.gaps.length} 段缺测` : ""}`;
   return (
-    <span
-      className={
-        trend.delta === null
-          ? "accumulating"
-          : `gain ${trend.delta < 0 ? "negative" : ""}`
-      }
-      title={`${trend.basis === "unknown" ? "暂不可知" : signed(trend.delta)}，${hint}`}
-      aria-label={`${trend.basis === "unknown" ? "暂不可知" : signed(trend.delta)}，${hint}`}
-    >
-      {trend.basis === "unknown" ? "暂不可知" : compactSigned(trend.delta)}
+    <>
+      <span
+        className={
+          trend.delta === null
+            ? "accumulating"
+            : `gain ${trend.delta < 0 ? "negative" : ""}`
+        }
+        title={`${trend.basis === "unknown" ? "暂不可知" : signed(trend.delta)}，${hint}`}
+        aria-label={`${trend.basis === "unknown" ? "暂不可知" : signed(trend.delta)}，${hint}`}
+      >
+        {trend.basis === "unknown" ? "暂不可知" : compactSigned(trend.delta)}
+      </span>
+      {showState && trend.delta !== null && trend.basis !== "unknown" &&
+        (trend.basis === "carried" || trend.state === "partial") && (
+          <span className="partial" aria-hidden="true">{stateLabel(trend)}</span>
+        )}
+    </>
+  );
+}
+
+function StarValue({ stars }: { stars: number }) {
+  return (
+    <span title={number(stars)} aria-label={`${number(stars)} Star`}>
+      {compact(stars)}
     </span>
+  );
+}
+
+function ProjectButton({
+  project, now, selected, onClick,
+}: {
+  project: Project;
+  now: number;
+  selected: boolean;
+  onClick?: () => void;
+}) {
+  const [owner, ...name] = project.name.split("/");
+  const admissionLabel = newAdmissionLabel(project.enteredAt, now);
+  return (
+    <button
+      type="button"
+      className="repo-button"
+      aria-pressed={onClick ? undefined : selected}
+      aria-haspopup={onClick ? "dialog" : undefined}
+      aria-label={`查看 ${project.name} 趋势${admissionLabel ? `，新入库 ${admissionLabel}` : ""}`}
+      title={project.name}
+      onClick={onClick}
+    >
+      <span className="repo-name">
+        <span className="owner">{owner}</span>
+        <span className="slash">/</span>
+        {name.join("/")}
+      </span>
+      {admissionLabel && (
+        <span className="new-admission" title={`新入库：${time(project.enteredAt)}`}>
+          {admissionLabel}
+        </span>
+      )}
+    </button>
   );
 }
 function homepageURL(value: string | null): URL | null {
@@ -723,7 +771,7 @@ function App() {
     };
   }, [isMobile, mobileDetailsOpen]);
   const pushNext = useRef(false);
-  const controls = useRef<HTMLDivElement>(null);
+  const listing = useRef<HTMLDivElement>(null);
   const tableScroll = useRef<HTMLDivElement>(null);
   const headerScroll = useRef<HTMLDivElement>(null);
   const inspector = useRef<HTMLElement>(null);
@@ -827,7 +875,7 @@ function App() {
     previousListPath.current = listPath;
     if (tableScroll.current) tableScroll.current.scrollTop = 0;
     if (matchMedia("(max-width:760px)").matches)
-      controls.current?.scrollIntoView({ block: "start", behavior: "instant" });
+      listing.current?.scrollIntoView({ block: "start", behavior: "instant" });
   }, [listPath]);
   useLayoutEffect(() => {
     const alignHeader = () => {
@@ -845,7 +893,7 @@ function App() {
     if (tableScroll.current) observer.observe(tableScroll.current);
     alignHeader();
     return () => observer.disconnect();
-  }, [query.tab]);
+  }, [query.tab, isMobile]);
   useLayoutEffect(() => {
     const header = masthead.current;
     if (!header) return;
@@ -936,6 +984,31 @@ function App() {
       </button>
     </th>
   );
+  const emptyList = (
+    <>
+      <strong>
+        {resource.loading
+          ? "正在连接观测数据"
+          : resource.error
+            ? "暂时无法读取数据"
+            : data?.summary.tracked
+              ? "没有匹配的项目"
+              : "暂无追踪项目"}
+      </strong>
+      <p>
+        {resource.loading
+          ? "请稍候…"
+          : resource.error
+            ? "请重试列表查询。"
+            : data?.summary.tracked
+              ? "试试其他关键词、语言、Topic 或 AI 标签。"
+              : "后台采集后，项目会自动出现在这里。"}
+      </p>
+      {!resource.loading && !resource.error && !!data?.summary.tracked && (
+        <button type="button" onClick={clear}>清除全部筛选</button>
+      )}
+    </>
+  );
   const failures = [
     data?.status.scheduler,
     data?.status.collection,
@@ -1013,6 +1086,7 @@ function App() {
                   </button>
                 ))}
               </div>
+              {!isMobile && (
                   <div className="filters">
                     <label className="search-field">
                       <Icon name="search" />
@@ -1051,6 +1125,7 @@ function App() {
                       <Icon name="reset" />
                     </button>
                   </div>
+              )}
           </div>
           <div className="masthead-end">
             <button type="button" className="submission-open" onClick={() => setSubmissionOpen(true)}>投稿</button>
@@ -1176,9 +1251,9 @@ function App() {
           id="rankings"
           aria-label="趋势探索工作台"
         >
-          <div className="listing">
-            <div className="list-controls" ref={controls}>
-              <>
+          <div className="listing" ref={listing}>
+            {!isMobile && (
+              <div className="list-controls">
                   <div
                     className="heading-scroll"
                     ref={headerScroll}
@@ -1205,8 +1280,8 @@ function App() {
                       </thead>
                     </table>
                   </div>
-              </>
-            </div>
+              </div>
+            )}
             <>
                 {resource.error && (
                   <p className="notice error" role="alert">
@@ -1226,6 +1301,43 @@ function App() {
                       ? `共 ${items.length} 个项目`
                       : ""}
                 </div>
+                {isMobile ? (
+                  items.length ? (
+                    <ol aria-label="追踪项目" role="list" aria-busy={resource.loading} className="mobile-projects">
+                      {items.map((project, index) => (
+                        <li key={project.id}>
+                          <div className="mobile-project-title">
+                            <span className="rank">{String(index + 1).padStart(2, "0")}</span>
+                            <ProjectButton
+                              project={project}
+                              now={now}
+                              selected={selected?.id === project.id}
+                              onClick={() => selectProject(project)}
+                            />
+                            <LanguageIcon language={project.language} onSearch={searchLanguage} />
+                            <ProjectProblemIndicator project={project} />
+                          </div>
+                          {query.sort !== "name" && (
+                            <div className="mobile-project-metric">
+                              <span className="visually-hidden">
+                                {query.sort === "stars" ? "Star 总数" : query.sort === "heat" ? "热度"
+                                  : `${labels[Number(query.sort) as WindowHours]} Star 净增量`}
+                              </span>
+                              {query.sort === "stars" ? <StarValue stars={project.stars} />
+                                : query.sort === "heat" ? <HeatValue project={project} />
+                                : <TrendValue trend={project.trends[Number(query.sort) as WindowHours]} showState />}
+                            </div>
+                          )}
+                          <p className="mobile-project-summary">
+                            {project.aiSummary || project.description || "暂无项目介绍"}
+                          </p>
+                        </li>
+                      ))}
+                    </ol>
+                  ) : (
+                    <div className="empty-cell mobile-projects-empty">{emptyList}</div>
+                  )
+                ) : (
                 <div
                   className="table-wrap"
                   ref={tableScroll}
@@ -1271,8 +1383,6 @@ function App() {
                     <tbody>
                       {items.length ? (
                         items.map((project, index) => {
-                          const [owner, ...name] = project.name.split("/");
-                          const admissionLabel = newAdmissionLabel(project.enteredAt, now);
                           return (
                             <tr
                               key={project.id}
@@ -1288,24 +1398,7 @@ function App() {
                               </td>
                               <td className="repo-cell">
                                 <div className="repo-title">
-                                  <button
-                                    type="button"
-                                    className="repo-button"
-                                    aria-pressed={selected?.id === project.id}
-                                    aria-label={`查看 ${project.name} 趋势${admissionLabel ? `，新入库 ${admissionLabel}` : ""}`}
-                                    title={project.name}
-                                  >
-                                    <span className="repo-name">
-                                      <span className="owner">{owner}</span>
-                                      <span className="slash">/</span>
-                                      {name.join("/")}
-                                    </span>
-                                    {admissionLabel && (
-                                      <span className="new-admission" title={`新入库：${time(project.enteredAt)}`}>
-                                        {admissionLabel}
-                                      </span>
-                                    )}
-                                  </button>
+                                  <ProjectButton project={project} now={now} selected={selected?.id === project.id} />
                                   <LanguageIcon language={project.language} onSearch={searchLanguage} />
                                   <AITags tags={project.aiTags ?? []} onTag={searchTag} />
                                   <ProjectProblemIndicator project={project} />
@@ -1323,12 +1416,7 @@ function App() {
                                 </td>
                               ))}
                               <td className="numeric stars-col">
-                                <span
-                                  title={number(project.stars)}
-                                  aria-label={`${number(project.stars)} Star`}
-                                >
-                                  {compact(project.stars)}
-                                </span>
+                                <StarValue stars={project.stars} />
                               </td>
                               <td className="numeric heat-col">
                                 <HeatValue project={project} />
@@ -1339,37 +1427,14 @@ function App() {
                       ) : (
                         <tr>
                           <td colSpan={8} className="empty-cell">
-                            <strong>
-                              {resource.loading
-                                ? "正在连接观测数据"
-                                : resource.error
-                                  ? "暂时无法读取数据"
-                                  : data?.summary.tracked
-                                    ? "没有匹配的项目"
-                                    : "暂无追踪项目"}
-                            </strong>
-                            <p>
-                              {resource.loading
-                                ? "请稍候…"
-                                : resource.error
-                                  ? "请重试列表查询。"
-                                  : data?.summary.tracked
-                                    ? "试试其他关键词、语言、Topic 或 AI 标签。"
-                                    : "后台采集后，项目会自动出现在这里。"}
-                            </p>
-                            {!resource.loading &&
-                              !resource.error &&
-                              !!data?.summary.tracked && (
-                                <button type="button" onClick={clear}>
-                                  清除全部筛选
-                                </button>
-                              )}
+                            {emptyList}
                           </td>
                         </tr>
                       )}
                     </tbody>
                   </table>
                 </div>
+                )}
                 <div className="list-footer">
                   <span>
                     {data
