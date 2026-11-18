@@ -1200,7 +1200,7 @@ function App() {
                             </React.Fragment>
                           ))}
                           {sortHeading("stars", "总数", "numeric stars-col")}
-                          {sortHeading("heat", "热度")}
+                          {sortHeading("heat", "热度", "numeric heat-col")}
                         </tr>
                       </thead>
                     </table>
@@ -1330,7 +1330,7 @@ function App() {
                                   {compact(project.stars)}
                                 </span>
                               </td>
-                              <td className="numeric">
+                              <td className="numeric heat-col">
                                 <HeatValue project={project} />
                               </td>
                             </tr>

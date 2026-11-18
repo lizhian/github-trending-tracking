@@ -1826,6 +1826,9 @@ html {
 .heading-scroll th.numeric button {
   padding-inline: 0;
 }
+.numeric.heat-col {
+  padding-inline-end: 12px;
+}
 @media (max-width: 760px) {
   .name-column {
     width: auto;
