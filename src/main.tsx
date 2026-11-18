@@ -1328,9 +1328,14 @@ function App() {
                                 : <TrendValue trend={project.trends[Number(query.sort) as WindowHours]} showState />}
                             </div>
                           )}
-                          <p className="mobile-project-summary">
+                          <button
+                            type="button"
+                            className="mobile-project-summary"
+                            aria-haspopup="dialog"
+                            onClick={() => selectProject(project)}
+                          >
                             {project.aiSummary || project.description || "暂无项目介绍"}
-                          </p>
+                          </button>
                         </li>
                       ))}
                     </ol>
