@@ -580,15 +580,18 @@ td.numeric {
   stroke: var(--color-rule);
   stroke-width: 1;
 }
-.chart-line {
-  stroke: var(--color-green);
-  stroke-width: 2;
-  fill: none;
+.chart-zero {
+  stroke: var(--color-muted);
+  stroke-width: 1;
 }
-.chart-point {
-  fill: var(--color-paper);
-  stroke: var(--color-green);
-  stroke-width: 1.5;
+.chart-bar {
+  fill: var(--color-green);
+}
+.chart-bar.negative {
+  fill: var(--color-negative, var(--color-error));
+}
+.chart-bar.missing {
+  opacity: 0.5;
 }
 .periods {
   display: grid;

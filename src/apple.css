@@ -185,12 +185,6 @@ tr.selected td:first-child {
   font-size: 11px;
   color: var(--color-muted);
 }
-.chart-line {
-  stroke: var(--color-accent);
-}
-.chart-point {
-  fill: var(--color-accent);
-}
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,

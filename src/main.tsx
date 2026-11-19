@@ -11,7 +11,6 @@ import {
   WINDOWS,
   type HistoryResult,
   type ListResult,
-  type Point,
   type Project,
   type RunState,
   type Trend,
@@ -291,80 +290,67 @@ function ChartPlaceholder() {
 }
 function Chart({ trend }: { trend: Trend }) {
   const points = trend.points;
-  const min = Math.min(...points.map((point) => point[1]));
-  const max = Math.max(...points.map((point) => point[1]));
-  const ticks = [max, (max + min) / 2, min].map(Math.round);
-  const distinct = [...new Set(ticks)];
-  const format = (value: number, precision: number) =>
-    value > 1000 ? `${(value / 1000).toFixed(precision)}k` : number(value);
-  let precision = 1;
-  while (
-    precision < 3 &&
-    new Set(distinct.map((value) => format(value, precision))).size <
-      distinct.length
-  )
-    precision++;
-  const tickLabels = ticks.map((value) => format(value, precision));
+  const intervals = points.slice(1).map(([to, stars], index) => {
+    const [from, previousStars] = points[index];
+    return {
+      from,
+      to,
+      delta: stars - previousStars,
+      missing: trend.gaps.some(([start, end]) => from === start && to === end),
+    };
+  });
+  const values = intervals.map(({ delta }) => delta);
+  const smallest = Math.min(0, ...values);
+  const largest = Math.max(0, ...values);
+  const mixed = smallest < 0 && largest > 0;
+  const magnitude = Math.max(-smallest, largest);
+  const min = mixed ? -magnitude : smallest;
+  const max = mixed ? magnitude : largest;
+  const ticks = [...new Set([max, Math.round((max + min) / 2), min])];
+  const tickLabels = ticks.map((value) => (value === 0 ? "0" : signed(value)));
   const viewWidth = Math.max(
     288,
     248 + Math.max(...tickLabels.map((label) => label.length)) * 7,
   );
-  const first = points[0]?.[0] ?? 0;
-  const last = points.at(-1)?.[0] ?? first;
-  const range = max - min || 1;
-  const xy = ([at, stars]: Point) => [
-    first === last ? 232 : 4 + ((at - first) / (last - first)) * 228,
-    min === max ? 67.5 : 106 - ((stars - min) / range) * 77,
-  ];
-  const segments: Point[][] = [];
-  for (const point of points) {
-    const previous = segments.at(-1)?.at(-1);
-    if (
-      !previous ||
-      trend.gaps.some(([from, to]) => previous[0] <= from && point[0] >= to)
-    )
-      segments.push([point]);
-    else segments.at(-1)!.push(point);
-  }
+  const first = points[0][0];
+  const last = points[points.length - 1][0];
+  const span = last - first || 1;
+  const x = (at: number) => 4 + ((at - first) / span) * 228;
+  const y = (value: number) =>
+    min === max ? 67.5 : 106 - ((value - min) / (max - min)) * 77;
+  const zero = y(0);
   return (
     <svg
       className="chart"
       viewBox={`0 0 ${viewWidth} 145`}
       role="img"
-      aria-label={`Star 总数曲线，${stateLabel(trend)}，净增量 ${trend.basis === "unknown" ? "暂不可知" : signed(trend.delta)}，${trend.gaps.length} 段缺测`}
+      aria-label={`相邻快照 Star 净增量柱状图，${stateLabel(trend)}，窗口净增量 ${trend.basis === "unknown" ? "暂不可知" : signed(trend.delta)}，${trend.gaps.length} 段缺测`}
     >
-      {[29, 67.5, 106].map((y, index) => (
-        <g key={y}>
-          <line className="chart-grid" x1="4" x2="232" y1={y} y2={y} />
-          {(min === max ? index === 1 : ticks.indexOf(ticks[index]) === index) && (
-            <text className="chart-tick" x="240" y={y + 3}>
-              <title>{number(ticks[index])} Star</title>
-              {tickLabels[index]}
-            </text>
-          )}
+      {ticks.map((value, index) => (
+        <g key={value}>
+          <line
+            className={value === 0 ? "chart-zero" : "chart-grid"}
+            x1="4" x2="232" y1={y(value)} y2={y(value)}
+          />
+          <text x="240" y={y(value) + 3}>{tickLabels[index]}</text>
         </g>
       ))}
-      {segments.map((segment, index) => (
-        <polyline
-          key={index}
-          className="chart-line"
-          points={segment.map((point) => xy(point).join(",")).join(" ")}
-        />
-      ))}
-      {points.map((point, index) => {
-        const [cx, cy] = xy(point);
+      {intervals.map(({ from, to, delta, missing }, index) => {
+        if (from === to) return null;
+        const width = Math.min(28, (x(to) - x(from)) * 0.76);
         return (
-          <circle
+          <rect
             key={index}
-            className="chart-point"
-            cx={cx}
-            cy={cy}
-            r={points.length > 48 ? 1.5 : 2.5}
+            className={`chart-bar${delta < 0 ? " negative" : ""}${missing ? " missing" : ""}`}
+            x={(x(from) + x(to) - width) / 2}
+            y={delta === 0 ? zero - 0.5 : Math.min(zero, y(delta))}
+            width={width}
+            height={delta === 0 ? 1 : Math.abs(y(delta) - zero)}
           >
             <title>
-              {time(point[0])}：{number(point[1])} Star
+              {time(from)} 至 {time(to)} · {delta === 0 ? "0" : signed(delta)} Star{missing ? "（缺测区间）" : ""}
             </title>
-          </circle>
+          </rect>
         );
       })}
       <text x="4" y="132">
@@ -623,8 +609,7 @@ function Details({
       </div>
       <div className="history-region" aria-busy={history.loading}>
         <div className="chart-heading">
-          <span>Star 总数</span>
-          <span>局部纵轴</span>
+          <span>Star 净增量</span>
         </div>
         <div className="chart-stage">
           {history.loading ? (
@@ -643,10 +628,16 @@ function Details({
               </button>
             </div>
           ) : trend && current ? (
-            trend.points.length ? (
+            trend.points.length >= 2 ? (
               <Chart trend={trend} />
             ) : (
-              <p className="chart-message">{trend.basis === "carried" ? "此窗口无真实观测，增量按持平计算" : trend.basis === "unknown" ? "此窗口暂无有效观测" : "积累中"}</p>
+              <p className="chart-message">
+                {trend.points.length === 1
+                  ? "至少需要两次快照才能显示区间差值"
+                  : trend.basis === "carried"
+                    ? "此窗口无真实观测，增量按持平计算"
+                    : trend.basis === "unknown" ? "此窗口暂无有效观测" : "积累中"}
+              </p>
             )
           ) : null}
         </div>
@@ -656,7 +647,7 @@ function Details({
             current &&
             (current.gaps.length > 0 || current.stale) && (
               <p className="chart-note" role="status">
-                {current.gaps.length ? `缺测 ${current.gaps.length} 段` : ""}
+                {current.gaps.length ? `浅色柱表示缺测区间（${current.gaps.length} 段）` : ""}
                 {current.stale ? " 历史数据过期" : ""}
               </p>
             )}
