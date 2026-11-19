@@ -74,7 +74,7 @@ const admissionFilters = [
   { value: "gte24", label: ">1天", days: 1, atLeast: true },
   { value: "72", label: "<3天", days: 3, atLeast: false },
   { value: "gte72", label: ">3天", days: 3, atLeast: true },
-  { value: "168", label: "<7天内", days: 7, atLeast: false },
+  { value: "168", label: "<7天", days: 7, atLeast: false },
   { value: "gte168", label: ">7天", days: 7, atLeast: true },
 ] as const;
 type AdmissionFilter = (typeof admissionFilters)[number];
