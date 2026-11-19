@@ -29,7 +29,7 @@ import "./style.css";
 import "./apple.css";
 
 const labels: Record<WindowHours, string> = {
-  24: "24 小时",
+  24: "1天",
   72: "3 天",
   168: "7 天",
   720: "30 天",
@@ -401,7 +401,7 @@ function HeatValue({ project }: { project: Project }) {
     <span
       className={heat === null ? "accumulating" : undefined}
       title={heat === null
-        ? unknown ? "观测数据过期，暂无法计算热度" : "至少实际观测 24 小时且四窗口均可计算后展示热度"
+        ? unknown ? "观测数据过期，暂无法计算热度" : "至少实际观测 1天且四窗口均可计算后展示热度"
         : "四窗口正向日均 Star 增长，按 60%、25%、10%、5% 加权"}
     >
       {heat === null ? unknown ? "—" : "积累中" : heat > 1000 ? `${(heat / 1000).toFixed(1)}k` : heatNumber.format(heat)}
@@ -1112,7 +1112,7 @@ function App() {
                       value={query.admitted}
                       options={["24", "72", "168"]}
                       searchable={false}
-                      optionLabel={(value) => ({ "24": "24小时", "72": "3天", "168": "7天" })[value] ?? value}
+                      optionLabel={(value) => ({ "24": "1天", "72": "3天", "168": "7天" })[value] ?? value}
                       onChange={(admitted) => commit({ admitted: admitted as QueryState["admitted"] })}
                     />
                     <button
@@ -1461,10 +1461,10 @@ function App() {
                     : "—"}
               </strong>
             </div>
-            <div title="当前来源追踪项目已知的 24 小时窗口净增量合计，含部分观测与负值；各项目实际区间可能不同。">
-              <span className="metric-label-full">24 小时 Star 净增量</span>
+            <div title="当前来源追踪项目已知的 1天窗口净增量合计，含部分观测与负值；各项目实际区间可能不同。">
+              <span className="metric-label-full">1天 Star 净增量</span>
               <span className="metric-label-short" aria-hidden="true">
-                24h 净增量
+                1天 净增量
               </span>
               <strong>
                 {data
