@@ -69,6 +69,25 @@ const apiBase = (import.meta.env.VITE_API_URL ?? "").replace(/\/$/, "");
 const sorts = ["name", "heat", "stars", ...WINDOWS.map(String)];
 const defaultSort = "24";
 const languageQueryPrefix = "language:";
+const admissionFilters = [
+  { value: "24", label: "<1天", days: 1, atLeast: false },
+  { value: "gte24", label: ">1天", days: 1, atLeast: true },
+  { value: "72", label: "<3天", days: 3, atLeast: false },
+  { value: "gte72", label: ">3天", days: 3, atLeast: true },
+  { value: "168", label: "<7天内", days: 7, atLeast: false },
+  { value: "gte168", label: ">7天", days: 7, atLeast: true },
+] as const;
+type AdmissionFilter = (typeof admissionFilters)[number];
+const admissionOptions = admissionFilters.map(({ value }) => value);
+const admissionFilterFor = (value: string) =>
+  admissionFilters.find((filter) => filter.value === value);
+
+function matchesAdmissionFilter(enteredAt: number, now: number, filter?: AdmissionFilter) {
+  if (!filter) return true;
+  const elapsed = now - enteredAt;
+  const threshold = filter.days * 86_400_000;
+  return elapsed >= 0 && (filter.atLeast ? elapsed >= threshold : elapsed < threshold);
+}
 
 function isDialogBackdrop(event: React.MouseEvent<HTMLDialogElement>) {
   if (event.target !== event.currentTarget) return false;
@@ -78,7 +97,7 @@ function isDialogBackdrop(event: React.MouseEvent<HTMLDialogElement>) {
 
 interface QueryState {
   q: string;
-  admitted: "" | "24" | "72" | "168";
+  admitted: "" | AdmissionFilter["value"];
   tab: "github" | "linuxdo";
   sort: string;
   direction: "asc" | "desc";
@@ -91,8 +110,7 @@ function readLocation(): QueryState {
   const hours = Number(text("window")) as WindowHours;
   return {
     q: [text("q"), text("language"), text("topic")].filter(Boolean).join(" "),
-    admitted: ["24", "72", "168"].includes(text("admitted"))
-      ? text("admitted") as QueryState["admitted"] : "",
+    admitted: admissionFilterFor(text("admitted"))?.value ?? "",
     tab: text("tab") === "linuxdo" ? "linuxdo" : "github",
     sort: sorts.includes(text("sort")) ? text("sort") : defaultSort,
     direction: text("direction") === "asc" ? "asc" : "desc",
@@ -794,14 +812,14 @@ function App() {
       ? search.slice(languageQueryPrefix.length).trim()
       : null;
     const keywords = search.split(/\s+/).filter(Boolean);
-    const cutoff = query.admitted ? now - Number(query.admitted) * 3_600_000 : null;
+    const admissionFilter = admissionFilterFor(query.admitted);
     const compare = new Intl.Collator("en").compare;
     return (data?.items ?? []).filter((project) =>
       (language !== null
         ? !!language && project.language?.trim().toLowerCase() === language
         : keywords.every((keyword) =>
           `${project.name} ${project.description ?? ""} ${project.language ?? ""} ${project.topics.join(" ")} ${project.aiSummary ?? ""} ${(project.aiTags ?? []).join(" ")}`.toLowerCase().includes(keyword),
-        )) && (cutoff === null || (project.enteredAt >= cutoff && project.enteredAt <= now)),
+        )) && matchesAdmissionFilter(project.enteredAt, now, admissionFilter),
     ).sort((a, b) => {
       let order: number;
       if (query.sort === "name") order = compare(a.name.toLowerCase(), b.name.toLowerCase());
@@ -1097,14 +1115,14 @@ function App() {
                       />
                     </label>
                     <SearchSelect
-                      label="最近入库"
+                      label="入库时长"
                       all="全部"
                       name="admitted"
                       value={query.admitted}
-                      options={["24", "72", "168"]}
+                      options={admissionOptions}
                       searchable={false}
-                      optionLabel={(value) => ({ "24": "1天", "72": "3天", "168": "7天" })[value] ?? value}
-                      onChange={(admitted) => commit({ admitted: admitted as QueryState["admitted"] })}
+                      optionLabel={(value) => admissionFilterFor(value)?.label ?? value}
+                      onChange={(value) => commit({ admitted: admissionFilterFor(value)?.value ?? "" })}
                     />
                     <button
                       type="button"
