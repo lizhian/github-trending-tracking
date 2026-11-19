@@ -306,7 +306,32 @@ function ChartPlaceholder() {
     </div>
   );
 }
+const chartDate = new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  hourCycle: "h23",
+});
+
+function chartIntervalTime(from: number, to: number) {
+  const parts = Object.fromEntries(
+    chartDate.formatToParts(to).map(({ type, value }) => [type, value]),
+  );
+  const date = `${parts.year}-${parts.month}-${parts.day}`;
+  const hour = 3_600_000;
+  const hours = Math.floor(to / hour) - Math.floor(from / hour);
+  if (hours > 0 && hours % 24 === 0 && parts.hour === "00") {
+    return { date, duration: `${hours / 24}d` };
+  }
+  const minutes = Math.floor((to - from) / 60_000);
+  const duration = hours > 0 ? `${hours}h` : minutes === 0 ? "<1m" : `${minutes}m`;
+  return { date: `${date}日 ${parts.hour}时`, duration };
+}
+
 function Chart({ trend }: { trend: Trend }) {
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const points = trend.points;
   const intervals = points.slice(1).map(([to, stars], index) => {
     const [from, previousStars] = points[index];
@@ -315,6 +340,7 @@ function Chart({ trend }: { trend: Trend }) {
       to,
       delta: stars - previousStars,
       missing: trend.gaps.some(([start, end]) => from === start && to === end),
+      ...chartIntervalTime(from, to),
     };
   });
   const values = intervals.map(({ delta }) => delta);
@@ -337,50 +363,63 @@ function Chart({ trend }: { trend: Trend }) {
   const y = (value: number) =>
     min === max ? 67.5 : 106 - ((value - min) / (max - min)) * 77;
   const zero = y(0);
+  const active = activeIndex === null ? undefined : intervals[activeIndex];
   return (
-    <svg
-      className="chart"
-      viewBox={`0 0 ${viewWidth} 145`}
-      role="img"
-      aria-label={`相邻快照 Star 净增量柱状图，${stateLabel(trend)}，窗口净增量 ${trend.basis === "unknown" ? "暂不可知" : signed(trend.delta)}，${trend.gaps.length} 段缺测`}
-    >
-      {ticks.map((value, index) => (
-        <g key={value}>
-          <line
-            className={value === 0 ? "chart-zero" : "chart-grid"}
-            x1="4" x2="232" y1={y(value)} y2={y(value)}
-          />
-          <text x="240" y={y(value) + 3}>{tickLabels[index]}</text>
-        </g>
-      ))}
-      {intervals.map(({ from, to, delta, missing }, index) => {
-        if (from === to) return null;
-        const width = Math.min(28, (x(to) - x(from)) * 0.76);
-        return (
-          <rect
-            key={index}
-            className={`chart-bar${delta < 0 ? " negative" : ""}${missing ? " missing" : ""}`}
-            x={(x(from) + x(to) - width) / 2}
-            y={delta === 0 ? zero - 0.5 : Math.min(zero, y(delta))}
-            width={width}
-            height={delta === 0 ? 1 : Math.abs(y(delta) - zero)}
-          >
-            <title>
-              {time(from)} 至 {time(to)} · {delta === 0 ? "0" : signed(delta)} Star{missing ? "（缺测区间）" : ""}
-            </title>
-          </rect>
-        );
-      })}
-      <text x="4" y="132">
-        {new Date(first).toLocaleDateString("zh-CN", {
-          month: "numeric",
-          day: "numeric",
+    <div className="chart-content">
+      {active && (
+        <div className="chart-detail">
+          <span>{active.date}</span>
+          <strong>{active.duration} {active.delta === 0 ? "0" : signed(active.delta)}</strong>
+          {active.missing && <span className="chart-detail-note">缺测</span>}
+        </div>
+      )}
+      <svg
+        className="chart"
+        viewBox={`0 0 ${viewWidth} 145`}
+        role="group"
+        aria-label={`相邻快照 Star 净增量柱状图，${stateLabel(trend)}，窗口净增量 ${trend.basis === "unknown" ? "暂不可知" : signed(trend.delta)}，${trend.gaps.length} 段缺测`}
+      >
+        {ticks.map((value, index) => (
+          <g key={value}>
+            <line
+              className={value === 0 ? "chart-zero" : "chart-grid"}
+              x1="4" x2="232" y1={y(value)} y2={y(value)}
+            />
+            <text x="240" y={y(value) + 3}>{tickLabels[index]}</text>
+          </g>
+        ))}
+        {intervals.map(({ from, to, delta, missing, date, duration }, index) => {
+          if (from === to) return null;
+          const width = Math.min(28, (x(to) - x(from)) * 0.76);
+          return (
+            <rect
+              key={index}
+              className={`chart-bar${delta < 0 ? " negative" : ""}${missing ? " missing" : ""}`}
+              x={(x(from) + x(to) - width) / 2}
+              y={delta === 0 ? zero - 0.5 : Math.min(zero, y(delta))}
+              width={width}
+              height={delta === 0 ? 1 : Math.abs(y(delta) - zero)}
+              role="img"
+              tabIndex={0}
+              aria-label={`${date}，${duration}，${delta === 0 ? "0" : signed(delta)} Star${missing ? "，缺测区间" : ""}`}
+              onPointerEnter={() => setActiveIndex(index)}
+              onPointerLeave={() => setActiveIndex(null)}
+              onFocus={() => setActiveIndex(index)}
+              onBlur={() => setActiveIndex(null)}
+            />
+          );
         })}
-      </text>
-      <text x="232" y="132" textAnchor="end">
-        最新快照
-      </text>
-    </svg>
+        <text x="4" y="132">
+          {new Date(first).toLocaleDateString("zh-CN", {
+            month: "numeric",
+            day: "numeric",
+          })}
+        </text>
+        <text x="232" y="132" textAnchor="end">
+          最新快照
+        </text>
+      </svg>
+    </div>
   );
 }
 function ProjectColumns() {

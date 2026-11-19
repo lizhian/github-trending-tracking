@@ -1925,6 +1925,24 @@ html {
   margin-top: 0;
   overflow: clip;
 }
+.chart-content {
+  position: relative;
+  height: 100%;
+}
+.chart-detail {
+  position: absolute;
+  inset: 0 0 auto;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  color: var(--color-ink);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+.chart-detail-note {
+  color: var(--color-muted);
+}
 .chart-stage .chart-message {
   min-height: 0;
   height: 100%;
