@@ -845,21 +845,9 @@ function App() {
   const previousListPath = useRef(listPath);
   const resource = useApi<ListResult>(listPath, refresh);
   const data = resource.value;
-  const items = useMemo(() => {
-    const search = query.q.trim().toLowerCase();
-    const language = search.startsWith(languageQueryPrefix)
-      ? search.slice(languageQueryPrefix.length).trim()
-      : null;
-    const keywords = search.split(/\s+/).filter(Boolean);
-    const admissionFilter = admissionFilterFor(query.admitted);
+  const rankedItems = useMemo(() => {
     const compare = new Intl.Collator("en").compare;
-    return (data?.items ?? []).filter((project) =>
-      (language !== null
-        ? !!language && project.language?.trim().toLowerCase() === language
-        : keywords.every((keyword) =>
-          `${project.name} ${project.description ?? ""} ${project.language ?? ""} ${project.topics.join(" ")} ${project.aiSummary ?? ""} ${(project.aiTags ?? []).join(" ")}`.toLowerCase().includes(keyword),
-        )) && matchesAdmissionFilter(project.enteredAt, now, admissionFilter),
-    ).sort((a, b) => {
+    const projects = [...(data?.items ?? [])].sort((a, b) => {
       let order: number;
       if (query.sort === "name") order = compare(a.name.toLowerCase(), b.name.toLowerCase());
       else {
@@ -873,9 +861,25 @@ function App() {
       }
       return (query.direction === "desc" ? -order : order) || compare(a.name, b.name);
     });
-  }, [data, query.q, query.admitted, query.sort, query.direction, now]);
+    return projects.map((project, index) => ({ project, rank: index + 1 }));
+  }, [data, query.sort, query.direction]);
+  const items = useMemo(() => {
+    const search = query.q.trim().toLowerCase();
+    const language = search.startsWith(languageQueryPrefix)
+      ? search.slice(languageQueryPrefix.length).trim()
+      : null;
+    const keywords = search.split(/\s+/).filter(Boolean);
+    const admissionFilter = admissionFilterFor(query.admitted);
+    return rankedItems.filter(({ project }) =>
+      (language !== null
+        ? !!language && project.language?.trim().toLowerCase() === language
+        : keywords.every((keyword) =>
+          `${project.name} ${project.description ?? ""} ${project.language ?? ""} ${project.topics.join(" ")} ${project.aiSummary ?? ""} ${(project.aiTags ?? []).join(" ")}`.toLowerCase().includes(keyword),
+        )) && matchesAdmissionFilter(project.enteredAt, now, admissionFilter),
+    );
+  }, [rankedItems, query.q, query.admitted, now]);
   // Filtering changes the list, not the open detail or its request lifecycle.
-  const selected = data?.items.find((project) => project.id === query.project) ?? items[0] ?? data?.items[0];
+  const selected = data?.items.find((project) => project.id === query.project) ?? items[0]?.project ?? data?.items[0];
   useEffect(() => {
     const next = locationFor(query);
     if (next !== `${location.pathname}${location.search}${location.hash}`) {
@@ -1352,10 +1356,10 @@ function App() {
                 {isMobile ? (
                   items.length ? (
                     <ol aria-label="追踪项目" role="list" aria-busy={resource.loading} className="mobile-projects">
-                      {items.map((project, index) => (
+                      {items.map(({ project, rank }) => (
                         <li key={project.id}>
                           <div className="mobile-project-title">
-                            <span className="rank">{String(index + 1).padStart(2, "0")}</span>
+                            <span className="rank">{String(rank).padStart(2, "0")}</span>
                             <ProjectButton
                               project={project}
                               now={now}
@@ -1435,7 +1439,7 @@ function App() {
                     </thead>
                     <tbody>
                       {items.length ? (
-                        items.map((project, index) => {
+                        items.map(({ project, rank }) => {
                           return (
                             <tr
                               key={project.id}
@@ -1445,9 +1449,7 @@ function App() {
                               }
                             >
                               <td className="rank">
-                                {String(
-                                  index + 1,
-                                ).padStart(2, "0")}
+                                {String(rank).padStart(2, "0")}
                               </td>
                               <td className="repo-cell">
                                 <div className="repo-title">
