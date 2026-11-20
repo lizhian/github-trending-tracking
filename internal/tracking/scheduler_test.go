@@ -283,6 +283,18 @@ func (h *collectionHarness) list(typ string) map[string]any {
 	return requestJSON(h.t, h.store, h.clock, "/api/projects?type="+typ)
 }
 
+func (h *collectionHarness) source(typ, id string) map[string]any {
+	h.t.Helper()
+	for _, item := range h.list(typ)["sources"].([]any) {
+		source := item.(map[string]any)
+		if source["id"] == id {
+			return source
+		}
+	}
+	h.t.Fatal("missing source", id)
+	return nil
+}
+
 // history 通过公开历史 API 读取 24 小时窗口，避免只检查内部实现而漏掉响应错误。
 func (h *collectionHarness) history(id string) map[string]any {
 	return requestJSON(h.t, h.store, h.clock, "/api/projects/"+id+"/history?window=24")
@@ -473,6 +485,50 @@ func TestFailedAdmissionSharesRetryAcrossNewTypesAndRediscovery(t *testing.T) {
 	}
 }
 
+func TestSourceAdmissionsFollowFirstDiscoveryBatch(t *testing.T) {
+	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
+	h.names = append(h.names, "acme/three")
+	h.stars = append(h.stars, 300)
+	h.sources["https://rsshub-balancer.virworks.moe/github/trending/daily/any"] = func() *http.Response {
+		return response(`<rss><channel/></rss>`)
+	}
+	for _, period := range []string{"weekly", "monthly"} {
+		h.sources["https://rsshub-balancer.virworks.moe/github/trending/"+period+"/any"] = func() *http.Response {
+			return response(`<rss><channel><item><link>https://github.com/acme/one</link></item>
+				<item><link>https://github.com/acme/two</link></item>
+				<item><link>https://github.com/acme/three</link></item></channel></rss>`)
+		}
+	}
+	assertCount := func(id string, want any) {
+		t.Helper()
+		if got := h.source("github", id); got["admitted"] != want {
+			t.Fatalf("%s admitted = %v, want %v", id, got["admitted"], want)
+		}
+	}
+	assertCount("github-weekly", nil)
+	h.failed["R_1"], h.failed["R_2"] = true, true
+	first := beijing("2026-10-01T09:00:00")
+	h.tick(first)
+	assertCount("github-weekly", float64(1))
+	assertCount("github-monthly", float64(0))
+
+	h.scheduler = tracking.NewScheduler(h.store, tracking.SchedulerOptions{
+		Clock: h.clock, Client: h.client, Token: "test-token", StartedAt: first + 5*60_000,
+	})
+	delete(h.failed, "R_1")
+	h.tick(first + tracking.Hour)
+	assertCount("github-weekly", float64(2))
+	assertCount("github-monthly", float64(0))
+
+	delete(h.failed, "R_2")
+	h.tick(first + tracking.Day)
+	if total := h.list("github")["total"]; total != float64(3) {
+		t.Fatal("old candidate did not enter tracking", total)
+	}
+	assertCount("github-weekly", float64(0))
+	assertCount("github-monthly", float64(0))
+}
+
 // TestRestartAcrossMidnightRetainsLongHostCooldownAndNeverRevivesOldData 模拟跨日重启，
 // 验证上游长冷却保留、旧观测仍过期、净增量允许为负，整点重启也不回放当前轮。
 func TestRestartAcrossMidnightRetainsLongHostCooldownAndNeverRevivesOldData(t *testing.T) {
@@ -606,6 +662,12 @@ func TestCleanupRunsDuringStartupWaitProtectsYoungProjectsAndReentryStartsNewHis
 	got := h.list("github")
 	if got["total"] != float64(500) {
 		t.Fatal(got["total"], got["status"])
+	}
+	for typ, want := range map[string]float64{"github": 4, "linux.do": 0} {
+		cleanup := h.list(typ)["status"].(map[string]any)["cleanup"].(map[string]any)
+		if cleanup["removed"] != want {
+			t.Fatal(typ, cleanup)
+		}
 	}
 	for i := 0; i < 4; i++ {
 		w := httptest.NewRecorder()
@@ -773,15 +835,20 @@ func TestLinuxMultipleFeedsAndAuthoritativeSourceParsing(t *testing.T) {
 // TestDiscoveryBudgetDefersHelloDetailsWithoutFailures 让详情请求消耗模拟时间，确认三分钟预算用尽仅延后，不报真实失败，后续轮次可继续完成。
 func TestDiscoveryBudgetDefersHelloDetailsWithoutFailures(t *testing.T) {
 	h := newCollectionHarness(t, beijing("2026-10-01T08:50:00"))
-	h.names = []string{"acme/one"}
-	h.stars = []int64{100}
+	h.sources["https://rsshub-balancer.virworks.moe/github/trending/daily/any"] = func() *http.Response {
+		return response(`<rss><channel/></rss>`)
+	}
 	links := ""
 	for i := 0; i < 21; i++ {
 		page := fmt.Sprintf("https://hellogithub.com/repository/%x", i)
 		links += "<item><link>" + page + "</link></item>"
+		repo := "acme/one"
+		if i == 20 {
+			repo = "acme/two"
+		}
 		h.sources[page] = func() *http.Response {
 			h.clock.at += 15_000
-			return response(`<script id="__NEXT_DATA__">{"props":{"pageProps":{"repo":{"url":"https://github.com/acme/one"}}}}</script>`)
+			return response(`<script id="__NEXT_DATA__">{"props":{"pageProps":{"repo":{"url":"https://github.com/` + repo + `"}}}}</script>`)
 		}
 	}
 	h.sources["https://rsshub-balancer.virworks.moe/hellogithub/home/all"] = func() *http.Response { return response("<rss><channel>" + links + "</channel></rss>") }
@@ -794,11 +861,17 @@ func TestDiscoveryBudgetDefersHelloDetailsWithoutFailures(t *testing.T) {
 	if status["failed"] != float64(0) {
 		t.Fatal("budget became failure", status)
 	}
+	if got := h.source("github", "hellogithub-all"); got["admitted"] != float64(1) {
+		t.Fatal(got)
+	}
 	// 后续轮次继续完成因预算延后的详情任务。
 	h.tick(first + 10*60_000)
 	h.tick(first + 20*60_000)
 	got := h.list("github")
-	if got["total"] != float64(1) {
+	if got["total"] != float64(2) {
+		t.Fatal(got)
+	}
+	if got := h.source("github", "hellogithub-all"); got["admitted"] != float64(2) || got["succeeded"] != float64(21) {
 		t.Fatal(got)
 	}
 }

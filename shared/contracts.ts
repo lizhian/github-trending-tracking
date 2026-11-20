@@ -46,6 +46,7 @@ export interface RunState {
 export interface SourceStatus extends RunState {
   id: string;
   name: string;
+  admitted?: number;
   nextAt: number;
   languagesCompleted?: number;
   languagesTotal?: number;

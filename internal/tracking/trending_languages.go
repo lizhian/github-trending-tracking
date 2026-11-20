@@ -35,10 +35,11 @@ type trendingRepository struct {
 }
 
 type languageTrendingRound struct {
-	Slot      int64                           `json:"slot"`
-	Pages     map[string][]trendingRepository `json:"pages"`
-	Failures  map[string]string               `json:"failures"`
-	Submitted map[string]bool                 `json:"submitted"`
+	Slot            int64                           `json:"slot"`
+	Pages           map[string][]trendingRepository `json:"pages"`
+	Failures        map[string]string               `json:"failures"`
+	Submitted       map[string]bool                 `json:"submitted"`
+	TrackAdmissions bool                            `json:"trackAdmissions,omitempty"`
 }
 
 func githubDiscoverySlot(now, interval int64) int64 {
@@ -156,9 +157,10 @@ func (s *Scheduler) discoverLanguageTrending(ctx context.Context, state *discove
 	if round == nil || round.Slot != slot {
 		round = &languageTrendingRound{
 			Slot: slot, Pages: map[string][]trendingRepository{},
-			Failures: map[string]string{}, Submitted: map[string]bool{},
+			Failures: map[string]string{}, Submitted: map[string]bool{}, TrackAdmissions: true,
 		}
 		state.LanguageTrending = round
+		status.Admitted = nil
 	}
 	attempted := false
 	for _, lang := range trendingLanguages {
@@ -194,6 +196,9 @@ func (s *Scheduler) discoverLanguageTrending(ctx context.Context, state *discove
 	}
 	if attempted {
 		status.AttemptedAt = now
+		if round.TrackAdmissions && status.Admitted == nil {
+			status.Admitted = ptr(0)
+		}
 	}
 	status.Succeeded = len(ranked)
 	status.Failed, status.Error = len(round.Failures), nil

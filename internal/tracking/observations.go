@@ -19,6 +19,7 @@ type observation struct {
 	previous               *ProjectRow
 	typ                    string
 	observedAt, metadataAt int64
+	origin                 *sourceBatch
 }
 
 // rowRepository 把数据库行还原成上游仓库结构，以复用同轮已成功观测，避免重复请求。
@@ -84,6 +85,7 @@ func (s *Store) saveObservationsAnd(ctx context.Context, items []observation, no
 		return e
 	}
 	defer tx.Rollback()
+	var admissions map[sourceBatch]int64
 	for _, o := range items {
 		at := o.observedAt
 		if at == 0 {
@@ -167,7 +169,18 @@ func (s *Store) saveObservationsAnd(ctx context.Context, items []observation, no
 		if o.previous != nil {
 			_, e = tx.ExecContext(ctx, `UPDATE projects SET name=?,description=?,homepage=?,language=?,topics=?,observed_at=?,attempted_at=?,stars=?,trends=?,error=NULL,unavailable_at=0,carry_periods=?,metadata_at=? WHERE id=? AND cycle=? AND observed_at<?`, name, description, homepage, language, topics, at, at, *o.repo.Stars, jsonText(trends), jsonText(kept), metadataAt, id, cycle, at)
 		} else {
-			_, e = tx.ExecContext(ctx, `INSERT INTO projects(id,type,repo_id,cycle,name,description,homepage,language,topics,observed_at,attempted_at,stars,trends,entered_at,metadata_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, id, typ, o.repo.ID, cycle, name, description, homepage, language, topics, at, at, *o.repo.Stars, jsonText(trends), now, metadataAt)
+			var inserted sql.Result
+			inserted, e = tx.ExecContext(ctx, `INSERT INTO projects(id,type,repo_id,cycle,name,description,homepage,language,topics,observed_at,attempted_at,stars,trends,entered_at,metadata_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING`, id, typ, o.repo.ID, cycle, name, description, homepage, language, topics, at, at, *o.repo.Stars, jsonText(trends), now, metadataAt)
+			if e == nil && o.origin != nil {
+				var count int64
+				count, e = inserted.RowsAffected()
+				if e == nil && count > 0 {
+					if admissions == nil {
+						admissions = map[sourceBatch]int64{}
+					}
+					admissions[*o.origin] += count
+				}
+			}
 		}
 		if e != nil {
 			return e
@@ -187,6 +200,11 @@ func (s *Store) saveObservationsAnd(ctx context.Context, items []observation, no
 			return e
 		}
 	}
+	if len(admissions) > 0 {
+		if e = recordSourceAdmissions(ctx, tx, admissions); e != nil {
+			return e
+		}
+	}
 	// 仍在同一个 Tx 上调用检查点；例如投稿阶段推进失败，前面的项目/快照写入也全部回滚。
 	if checkpoint != nil {
 		if e = checkpoint(tx); e != nil {
@@ -194,6 +212,41 @@ func (s *Store) saveObservationsAnd(ctx context.Context, items []observation, no
 		}
 	}
 	return tx.Commit()
+}
+
+// recordSourceAdmissions 只更新仍在展示的来源批次，与新追踪周期一起提交。
+func recordSourceAdmissions(ctx context.Context, tx *sql.Tx, counts map[sourceBatch]int64) error {
+	var raw []byte
+	err := tx.QueryRowContext(ctx, "SELECT value FROM system_state WHERE key='discoverySources'").Scan(&raw)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var state discoveryState
+	if err = json.Unmarshal(raw, &state); err != nil {
+		return err
+	}
+	changed := false
+	for batch, count := range counts {
+		status := state.Sources[batch.ID]
+		if status == nil || status.Admitted == nil {
+			continue
+		}
+		at := status.AttemptedAt
+		if batch.ID == languageTrendingID && state.LanguageTrending != nil {
+			at = state.LanguageTrending.Slot
+		}
+		if at == batch.At {
+			*status.Admitted += count
+			changed = true
+		}
+	}
+	if changed {
+		return setTxState(ctx, tx, "discoverySources", state)
+	}
+	return nil
 }
 
 // setTxState 在调用方已开启的事务中保存 JSON 状态，避免另开连接破坏原子性或阻塞单连接池。

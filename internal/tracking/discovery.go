@@ -31,15 +31,23 @@ type runState struct {
 // sourceState 在通用运行状态上嵌入来源下次执行与重试时间；嵌入字段可直接用 st.Failed 访问。
 type sourceState struct {
 	runState
-	NextAt     int64 `json:"nextAt"`
-	RetryAfter int64 `json:"retryAfter,omitempty"`
+	NextAt     int64  `json:"nextAt"`
+	RetryAfter int64  `json:"retryAfter,omitempty"`
+	Admitted   *int64 `json:"admitted,omitempty"`
+}
+
+// sourceBatch 标记首次入队的趋势源和批次。分语言日榜用时段，其余来源用尝试时间。
+type sourceBatch struct {
+	ID string `json:"id"`
+	At int64  `json:"at"`
 }
 
 // detailTask HelloGithub 详情页的待解析任务；只有取得真实 GitHub 仓库地址后才成为收录候选。
 type detailTask struct {
-	URL    string  `json:"url"`
-	NextAt int64   `json:"nextAt"`
-	Error  *string `json:"error"`
+	URL    string       `json:"url"`
+	NextAt int64        `json:"nextAt"`
+	Error  *string      `json:"error"`
+	Origin *sourceBatch `json:"origin,omitempty"`
 }
 
 // resolvedDetail 缓存当日已解析的详情页地址，避免同一天重复抓取。
@@ -59,12 +67,13 @@ type discoveryState struct {
 
 // discoveryEntry 待收录仓库及其追踪类型；仓库资料与 README 重试分别计时，不让一类失败阻塞另一类。
 type discoveryEntry struct {
-	Failure      string `json:"failure,omitempty"`
-	Type         string `json:"type"`
-	Name         string `json:"name"`
-	RepoID       string `json:"repoId,omitempty"`
-	NextAt       int64  `json:"nextAt,omitempty"`
-	ReadmeNextAt int64  `json:"readmeNextAt,omitempty"`
+	Failure      string       `json:"failure,omitempty"`
+	Type         string       `json:"type"`
+	Name         string       `json:"name"`
+	RepoID       string       `json:"repoId,omitempty"`
+	NextAt       int64        `json:"nextAt,omitempty"`
+	ReadmeNextAt int64        `json:"readmeNextAt,omitempty"`
+	Origin       *sourceBatch `json:"origin,omitempty"`
 }
 
 // source 定义趋势源身份、解析方式、地址和追踪类型；scheduled 表示跟随采样计划，否则每日发现。
@@ -467,11 +476,11 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 	}
 	entries := []*discoveryEntry{}
 	seen := map[string]bool{}
-	add := func(name, typ string) {
+	add := func(name, typ string, origin *sourceBatch) {
 		key := typ + ":" + strings.ToLower(name)
 		if !seen[key] {
 			seen[key] = true
-			entries = append(entries, &discoveryEntry{Type: typ, Name: name})
+			entries = append(entries, &discoveryEntry{Type: typ, Name: name, Origin: origin})
 		}
 	}
 	attempted, succeeded := false, false
@@ -504,8 +513,12 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 		if source.kind == "language-trending" {
 			status, names, tried := s.discoverLanguageTrending(ctx, &state, now, deadline, previous)
 			state.Sources[source.id] = &status
+			var origin *sourceBatch
+			if status.Admitted != nil {
+				origin = &sourceBatch{ID: source.id, At: state.LanguageTrending.Slot}
+			}
 			for _, name := range names {
-				add(name, source.typ)
+				add(name, source.typ, origin)
 			}
 			if tried {
 				attempted, attemptedTypes[source.typ] = true, true
@@ -516,15 +529,13 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 			changed = true
 			continue
 		}
+		origin := &sourceBatch{ID: source.id, At: now}
 		var values []string
 		var err error
 		if source.kind == "linuxdo" {
 			result := u.linuxRepositories(ctx, deadline)
 			values = result.names
 			if !result.complete {
-				for _, name := range values {
-					add(name, source.typ)
-				}
 				st := sourceState{}
 				if previous != nil {
 					st = *previous
@@ -534,6 +545,10 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 					attempted = true
 					attemptedTypes[source.typ] = true
 					st.AttemptedAt, st.Succeeded = now, len(values)
+					st.Admitted = ptr(0)
+					for _, name := range values {
+						add(name, source.typ, origin)
+					}
 				}
 				if result.failure != "" {
 					st.Failed, st.Error = 1, strptr(result.failure)
@@ -556,15 +571,15 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 			}
 		}
 		if err != nil {
-			for _, name := range values {
-				add(name, source.typ)
-			}
 			var deferred *deferredRequest
 			if errors.As(err, &deferred) {
 				if deferred.retryAt == 0 {
 					break
 				}
 				continue
+			}
+			for _, name := range values {
+				add(name, source.typ, origin)
 			}
 			attempted = true
 			attemptedTypes[source.typ] = true
@@ -574,7 +589,7 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 			}
 			message := safeError(err)
 			retryAt := max(u.clock.Now()+retryInterval, u.blocked(source.url))
-			state.Sources[source.id] = &sourceState{runState: runState{AttemptedAt: now, SucceededAt: successAt, Succeeded: len(values), Failed: 1, Error: strptr(message)}, NextAt: retryAt, RetryAfter: u.clock.Now() + retryInterval}
+			state.Sources[source.id] = &sourceState{runState: runState{AttemptedAt: now, SucceededAt: successAt, Succeeded: len(values), Failed: 1, Error: strptr(message)}, NextAt: retryAt, RetryAfter: u.clock.Now() + retryInterval, Admitted: ptr(0)}
 			continue
 		}
 		attempted = true
@@ -582,14 +597,14 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 		if source.kind == "hellogithub" {
 			for _, raw := range values {
 				if cached, ok := state.Resolved[raw]; ok {
-					add(cached.Name, "github")
+					add(cached.Name, "github", origin)
 				} else if !slices.ContainsFunc(state.Details, func(task *detailTask) bool { return task.URL == raw }) {
-					state.Details = append(state.Details, &detailTask{URL: raw, NextAt: now})
+					state.Details = append(state.Details, &detailTask{URL: raw, NextAt: now, Origin: origin})
 				}
 			}
 		} else {
 			for _, name := range values {
-				add(name, source.typ)
+				add(name, source.typ, origin)
 			}
 		}
 		next = githubDiscoverySlot(u.clock.Now(), Day) + Day
@@ -600,7 +615,7 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 				next = (floorDiv(u.clock.Now(), Hour) + 1) * Hour
 			}
 		}
-		state.Sources[source.id] = &sourceState{runState: runState{AttemptedAt: now, SucceededAt: ptr(now), Succeeded: len(values)}, NextAt: next}
+		state.Sources[source.id] = &sourceState{runState: runState{AttemptedAt: now, SucceededAt: ptr(now), Succeeded: len(values)}, NextAt: next, Admitted: ptr(0)}
 		succeeded = true
 		succeededTypes[source.typ] = true
 	}
@@ -637,7 +652,7 @@ func (s *Scheduler) discover(ctx context.Context, now int64, policy *SamplingPol
 		}
 		attempted = true
 		attemptedTypes["github"] = true
-		add(name, "github")
+		add(name, "github", task.Origin)
 		state.Resolved[task.URL] = resolvedDetail{beijingDay(u.clock.Now()), name}
 		state.Details = slices.DeleteFunc(state.Details, func(v *detailTask) bool { return v == task })
 		succeeded = true

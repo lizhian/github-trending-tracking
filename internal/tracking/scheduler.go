@@ -474,7 +474,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			if e != nil {
 				return false, e
 			}
-			reuse = append(reuse, observation{repo: repo, typ: entry.Type, observedAt: latest.ObservedAt, metadataAt: latest.MetadataAt})
+			reuse = append(reuse, observation{repo: repo, typ: entry.Type, observedAt: latest.ObservedAt, metadataAt: latest.MetadataAt, origin: entry.Origin})
 			completed[entry] = true
 			record("admission", entry.Type, true, "")
 		} else if retryAt > 0 {
@@ -622,7 +622,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 					record("collection", row.Type, true, "")
 				}
 				for _, entry := range additions {
-					observations = append(observations, observation{repo: repo, typ: entry.Type, metadataAt: latestMetadata})
+					observations = append(observations, observation{repo: repo, typ: entry.Type, metadataAt: latestMetadata, origin: entry.Origin})
 					completed[entry] = true
 					record("admission", entry.Type, true, "")
 				}
@@ -643,7 +643,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 							continue
 						}
 						if confirmErr == nil {
-							observations = append(observations, observation{repo: recovered, typ: entry.Type, metadataAt: now})
+							observations = append(observations, observation{repo: recovered, typ: entry.Type, metadataAt: now, origin: entry.Origin})
 							completed[entry] = true
 							record("admission", entry.Type, true, "")
 							continue

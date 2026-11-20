@@ -53,17 +53,7 @@ func TestLanguageTrendingSubmitsPartialRankingAndResumesAfterRestart(t *testing.
 		}
 		return base.RoundTrip(r)
 	})
-	find := func() map[string]any {
-		t.Helper()
-		for _, item := range h.list("github")["sources"].([]any) {
-			source := item.(map[string]any)
-			if source["id"] == "github-language-daily" {
-				return source
-			}
-		}
-		t.Fatal("missing language trending source")
-		return nil
-	}
+	find := func() map[string]any { return h.source("github", "github-language-daily") }
 	readNames := func() map[string]bool {
 		t.Helper()
 		names := map[string]bool{}
@@ -86,6 +76,10 @@ func TestLanguageTrendingSubmitsPartialRankingAndResumesAfterRestart(t *testing.
 	first := beijing("2026-10-01T09:00:00")
 	h.tick(first)
 	status := find()
+	firstAdmitted := status["admitted"]
+	if firstAdmitted != float64(20) {
+		t.Fatal("expected first batch of projects from successful languages", status)
+	}
 	if len(calls) != 24 || status["languagesCompleted"] != float64(23) || status["succeeded"] != float64(101) || status["succeededAt"] != nil || !strings.Contains(fmt.Sprint(status["error"]), "C#") {
 		t.Fatal(calls, status)
 	}
@@ -99,6 +93,9 @@ func TestLanguageTrendingSubmitsPartialRankingAndResumesAfterRestart(t *testing.
 	})
 	h.tick(beijing("2026-10-01T10:00:00"))
 	status, names = find(), readNames()
+	if status["admitted"] == firstAdmitted || status["admitted"] != h.list("github")["total"] {
+		t.Fatal("same-slot retry did not accumulate admissions", status)
+	}
 	if calls["/trending/c++"] != 1 || calls["/trending/c#"] != 2 || status["languagesCompleted"] != float64(24) || status["failed"] != float64(0) || status["succeededAt"] == nil {
 		t.Fatal(calls, status)
 	}
@@ -112,5 +109,8 @@ func TestLanguageTrendingSubmitsPartialRankingAndResumesAfterRestart(t *testing.
 	h.tick(beijing("2026-10-01T21:00:00"))
 	if calls["/trending/c++"] != 2 || calls["/trending/c#"] != 3 {
 		t.Fatal("evening slot did not start a new round", calls)
+	}
+	if status := find(); status["admitted"] != float64(0) {
+		t.Fatal("previous slot's pending candidates counted toward the evening slot", status)
 	}
 }

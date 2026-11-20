@@ -9,6 +9,7 @@ import React, {
 import { createRoot } from "react-dom/client";
 import {
   WINDOWS,
+  type CleanupResult,
   type HistoryResult,
   type ListResult,
   type Project,
@@ -1068,6 +1069,7 @@ function App() {
   const failure = failures.find((state) => state?.failed);
   const admission = data?.status.admission as RunState | undefined;
   const discovery = data?.status.discovery as RunState | undefined;
+  const cleanup = data?.status.cleanup as CleanupResult | undefined;
   const problemProjects = data?.items.filter((project) => projectProblems(project).length > 0) ?? [];
   const hasCollectionNotice =
     problemProjects.length > 0 || failure || discovery?.failed || admission?.failed ||
@@ -1224,6 +1226,7 @@ function App() {
           <button type="button" className="icon-button" aria-label="关闭采集消息" onClick={() => messagesDialog.current?.close()}>×</button>
         </div>
         <div aria-live="polite">
+          {data && <p>上轮按热度淘汰 {cleanup ? `${number(cleanup.removed)} 个项目` : "—"}</p>}
           {failure && (
             <p>
               更新异常：{failure.error || "采集尚未恢复"}
@@ -1262,6 +1265,7 @@ function App() {
                       <dt>最近尝试</dt><dd>{source.attemptedAt ? time(source.attemptedAt) : "尚未执行"}</dd>
                       <dt>最近成功</dt><dd>{time(source.succeededAt)}</dd>
                       <dt>解析结果数</dt><dd>{source.attemptedAt ? number(source.succeeded) : "—"}</dd>
+                      <dt>项目入库数</dt><dd>{source.admitted == null ? "—" : number(source.admitted)}</dd>
                       {source.languagesTotal && <><dt>已完成语言</dt><dd>{source.languagesCompleted} / {source.languagesTotal}</dd></>}
                       <dt>{source.retryAfter ? "下次重试" : "下次执行"}</dt>
                       <dd>{!source.nextAt ? "等待调度" : source.nextAt <= data.asOf ? "已到期，等待调度" : time(source.nextAt)}</dd>
