@@ -1,57 +1,154 @@
 import { createPortal } from "react-dom";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 
-// Measure complete tags so partially clipped labels never appear.
-export function AITags({ tags, onTag }: { tags: string[]; onTag: (tag: string) => void }) {
-  const root = useRef<HTMLDivElement>(null);
-  const [tooltip, setTooltip] = useState<{left: number; top: number} | null>(null);
+export function AITags({
+  tags,
+  visibleCount,
+  onTag,
+}: {
+  tags: string[];
+  visibleCount?: number;
+  onTag: (tag: string) => void;
+}) {
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const [tooltipStyle, setTooltipStyle] = useState<CSSProperties | null>(null);
+
   const keepOpen = () => clearTimeout(closeTimer.current);
+  const closeNow = () => {
+    keepOpen();
+    setTooltipStyle(null);
+  };
   const closeSoon = () => {
     keepOpen();
-    closeTimer.current = setTimeout(() => setTooltip(null), 150);
+    closeTimer.current = setTimeout(() => setTooltipStyle(null), 150);
   };
+
+  const openTooltip = (element: HTMLElement) => {
+    keepOpen();
+    const rect = element.getBoundingClientRect();
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - 268));
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const spaceAbove = rect.top;
+    const flip = spaceBelow < 140 && spaceAbove > spaceBelow;
+    setTooltipStyle(
+      flip
+        ? { left, bottom: window.innerHeight - rect.top + 4 }
+        : { left, top: rect.bottom + 4 },
+    );
+  };
+
   useEffect(() => () => clearTimeout(closeTimer.current), []);
-  const [visible, setVisible] = useState(tags.length);
-  useLayoutEffect(() => {
-    const element = root.current;
-    if (!element) return;
-    const measure = () => {
-      if (!element.isConnected) return;
-      const labels = [...element.querySelectorAll<HTMLElement>(".ai-tag-measure .ai-tag:not(.ai-count-measure)")];
-      const counter = element.querySelector<HTMLElement>(".ai-count-measure");
-      const widths = labels.map(label => label.getBoundingClientRect().width);
-      const available = element.getBoundingClientRect().width;
-      let count = widths.length;
-      const width = (n: number) => widths.slice(0, n).reduce((sum, w) => sum + w, 0) + Math.max(0, n - 1) * 4;
-      while (count > 0 && width(count) + (count < widths.length ? (counter?.getBoundingClientRect().width ?? 30) + 4 : 0) > available) count--;
-      setVisible(count);
+
+  useEffect(() => {
+    if (!tooltipStyle) return;
+    const dismiss = () => setTooltipStyle(null);
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (
+        tooltipRef.current?.contains(target) ||
+        triggerRef.current?.contains(target)
+      ) {
+        return;
+      }
+      setTooltipStyle(null);
     };
-    const observer = new ResizeObserver(measure);
-    observer.observe(element);
-    measure();
-    document.fonts.ready.then(measure);
-    return () => observer.disconnect();
-  }, [tags]);
+    window.addEventListener("scroll", dismiss, true);
+    window.addEventListener("resize", dismiss);
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      window.removeEventListener("scroll", dismiss, true);
+      window.removeEventListener("resize", dismiss);
+      document.removeEventListener("pointerdown", onPointerDown);
+    };
+  }, [tooltipStyle]);
+
   if (!tags.length) return null;
-  const hidden = tags.slice(visible);
-  return <div className="ai-tags" ref={root}>
-    <span className="ai-tag-measure" aria-hidden="true">{tags.map(tag => <span className="ai-tag" key={tag}>{tag}</span>)}<span className="ai-tag ai-count-measure">+{tags.length}</span></span>
-    {tags.slice(0, visible).map(tag => <button type="button" className="ai-tag" key={tag} aria-label={`搜索 AI 标签 ${tag}`} onClick={event => { event.stopPropagation(); onTag(tag); }}>{tag}</button>)}
-    {hidden.length > 0 && <button
-      type="button"
-      onMouseEnter={event => { keepOpen(); const rect = event.currentTarget.getBoundingClientRect(); setTooltip({left: Math.max(8, Math.min(rect.left, window.innerWidth - 268)), top: rect.bottom + 4}); }}
-      onMouseLeave={closeSoon}
-      onFocus={event => { keepOpen(); const rect = event.currentTarget.getBoundingClientRect(); setTooltip({left: Math.max(8, Math.min(rect.left, window.innerWidth - 268)), top: rect.bottom + 4}); }}
-      onBlur={closeSoon}
-      className="ai-tag ai-tag-overflow" aria-expanded={!!tooltip} aria-label={`更多 AI 标签：${hidden.join("、")}`} onClick={event => { event.stopPropagation(); keepOpen(); const rect = event.currentTarget.getBoundingClientRect(); setTooltip({left: Math.max(8, Math.min(rect.left, window.innerWidth - 268)), top: rect.bottom + 4}); }}>
-      +{hidden.length}
-    </button>}
-    {tooltip && hidden.length > 0 && createPortal(<div
-      className="ai-tag-tooltip" role="group" aria-label="更多 AI 标签"
-      style={{left: tooltip.left, top: tooltip.top}}
-      onMouseEnter={keepOpen} onMouseLeave={closeSoon} onFocus={keepOpen} onBlur={closeSoon}
-      onKeyDown={event => { if (event.key === "Escape") { event.stopPropagation(); setTooltip(null); } }}
-    >{hidden.map(tag => <button type="button" className="ai-tag" key={tag} aria-label={`搜索 AI 标签 ${tag}`} onClick={event => { event.stopPropagation(); setTooltip(null); onTag(tag); }}>{tag}</button>)}</div>, document.body)}
-  </div>;
+
+  const limit =
+    visibleCount === undefined
+      ? tags.length
+      : Math.max(0, Math.min(tags.length, visibleCount));
+  const visibleTags = tags.slice(0, limit);
+  const hiddenTags = tags.slice(limit);
+  const open = tooltipStyle !== null;
+
+  return (
+    <div className="ai-tags">
+      {visibleTags.map((tag) => (
+        <button
+          type="button"
+          className="ai-tag"
+          key={tag}
+          aria-label={`搜索 AI 标签 ${tag}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            onTag(tag);
+          }}
+        >
+          {tag}
+        </button>
+      ))}
+      {hiddenTags.length > 0 && (
+        <button
+          ref={triggerRef}
+          type="button"
+          className="ai-tag ai-tag-overflow"
+          aria-expanded={open}
+          aria-label={`更多 AI 标签：${hiddenTags.join("、")}`}
+          onMouseEnter={(event) => openTooltip(event.currentTarget)}
+          onMouseLeave={closeSoon}
+          onFocus={(event) => openTooltip(event.currentTarget)}
+          onBlur={closeSoon}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (open) closeNow();
+            else openTooltip(event.currentTarget);
+          }}
+        >
+          +{hiddenTags.length}
+        </button>
+      )}
+      {tooltipStyle &&
+        hiddenTags.length > 0 &&
+        createPortal(
+          <div
+            ref={tooltipRef}
+            className="ai-tag-tooltip"
+            role="group"
+            aria-label="更多 AI 标签"
+            style={tooltipStyle}
+            onMouseEnter={keepOpen}
+            onMouseLeave={closeSoon}
+            onFocus={keepOpen}
+            onBlur={closeSoon}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.stopPropagation();
+                closeNow();
+                triggerRef.current?.focus();
+              }
+            }}
+          >
+            {hiddenTags.map((tag) => (
+              <button
+                type="button"
+                className="ai-tag"
+                key={tag}
+                aria-label={`搜索 AI 标签 ${tag}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  closeNow();
+                  onTag(tag);
+                }}
+              >
+                {tag}
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )}
+    </div>
+  );
 }
