@@ -7,20 +7,18 @@ import {
   useState,
 } from "react";
 import type {
-  CleanupResult,
   ListResult,
   Project,
-  RunState,
 } from "../shared/contracts.ts";
-import { CollectionDialog } from "./CollectionDialog.tsx";
+import { CollectionBoard } from "./CollectionBoard.tsx";
 import { Icon } from "./Icons.tsx";
 import { MobileProjectList } from "./MobileProjectList.tsx";
 import { ProjectInspector } from "./ProjectInspector.tsx";
-import { projectProblems } from "./ProjectProblems.tsx";
 import { ProjectTable } from "./ProjectTable.tsx";
 import { SearchSelect } from "./SearchSelect.tsx";
 import { SubmissionDialog } from "./SubmissionDialog.tsx";
 import { VisitStats } from "./VisitStats.tsx";
+import { deriveCollectionOverview } from "./lib/collection.ts";
 import { formatNumber, formatSigned, formatTime } from "./lib/format.ts";
 import {
   ADMISSION_OPTIONS,
@@ -41,6 +39,14 @@ import {
 import { useTheme } from "./lib/theme.ts";
 import { apiBase, useApi } from "./lib/useApi.ts";
 
+interface RankingScrollSnapshot {
+  tab: QueryState["tab"];
+  search: string;
+  tableTop: number;
+  inspectorTop: number;
+  windowY: number;
+}
+
 export function App() {
   const [query, setQuery] = useState<QueryState>(() =>
     parseLocation(location.search),
@@ -49,13 +55,17 @@ export function App() {
   const [draft, setDraft] = useState(query.q);
   const [refresh, setRefresh] = useState(0);
   const [submissionOpen, setSubmissionOpen] = useState(false);
+  const [collectionOpen, setCollectionOpen] = useState(false);
   const [mobileDetailsOpen, setMobileDetailsOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(
     () => matchMedia("(max-width:760px)").matches,
   );
   const { mode: themeMode, cycleTheme } = useTheme();
 
-  const messagesDialog = useRef<HTMLDialogElement>(null);
+  const bellButton = useRef<HTMLButtonElement>(null);
+  const collectionBoardRef = useRef<HTMLElement>(null);
+  const savedScroll = useRef<RankingScrollSnapshot | null>(null);
+  const wasCollectionOpen = useRef(false);
   const mobileDetails = useRef<HTMLDialogElement>(null);
   const pushNext = useRef(false);
   const listing = useRef<HTMLDivElement>(null);
@@ -160,6 +170,9 @@ export function App() {
     const restore = () => {
       const next = parseLocation(location.search);
       pushNext.current = false;
+      if (savedScroll.current?.search !== location.search) {
+        savedScroll.current = null;
+      }
       setDraft(next.q);
       setQuery(next);
       setMobileDetailsOpen(false);
@@ -196,10 +209,47 @@ export function App() {
     if (previousListPath.current === listPath) return;
     previousListPath.current = listPath;
     if (tableScroll.current) tableScroll.current.scrollTop = 0;
+    if (collectionOpen) {
+      if (collectionBoardRef.current) collectionBoardRef.current.scrollTop = 0;
+      if (matchMedia("(max-width:760px)").matches) {
+        window.scrollTo({ top: 0, behavior: "instant" });
+      }
+      return;
+    }
     if (matchMedia("(max-width:760px)").matches) {
       listing.current?.scrollIntoView({ block: "start", behavior: "instant" });
     }
-  }, [listPath]);
+  }, [listPath, collectionOpen]);
+
+  useLayoutEffect(() => {
+    const previouslyOpen = wasCollectionOpen.current;
+    wasCollectionOpen.current = collectionOpen;
+    if (!previouslyOpen && collectionOpen) {
+      if (collectionBoardRef.current) collectionBoardRef.current.scrollTop = 0;
+      if (isMobile) {
+        window.scrollTo({ top: 0, behavior: "instant" });
+      }
+      collectionBoardRef.current?.focus({ preventScroll: true });
+      return;
+    }
+    if (previouslyOpen && !collectionOpen) {
+      const restore = savedScroll.current;
+      savedScroll.current = null;
+      if (restore?.tab === query.tab) {
+        if (isMobile) {
+          window.scrollTo({ top: restore.windowY, behavior: "instant" });
+        } else {
+          if (tableScroll.current) tableScroll.current.scrollTop = restore.tableTop;
+          if (inspector.current) inspector.current.scrollTop = restore.inspectorTop;
+        }
+      } else if (isMobile) {
+        window.scrollTo({ top: 0, behavior: "instant" });
+      } else if (tableScroll.current) {
+        tableScroll.current.scrollTop = 0;
+      }
+      bellButton.current?.focus({ preventScroll: true });
+    }
+  }, [collectionOpen, isMobile, query.tab]);
 
   useLayoutEffect(() => {
     const header = masthead.current;
@@ -231,7 +281,7 @@ export function App() {
       observer.observe(button);
     }
     return () => observer.disconnect();
-  }, [query.tab]);
+  }, [query.tab, collectionOpen]);
 
   const searchTag = useCallback(
     (tag: string) => {
@@ -289,28 +339,60 @@ export function App() {
     [commit, isMobile],
   );
 
+  const openCollectionBoard = useCallback(() => {
+    savedScroll.current = {
+      tab: query.tab,
+      search: location.search,
+      tableTop: tableScroll.current?.scrollTop ?? 0,
+      inspectorTop: inspector.current?.scrollTop ?? 0,
+      windowY: window.scrollY,
+    };
+    setMobileDetailsOpen(false);
+    setCollectionOpen(true);
+  }, [query.tab]);
+
+  const closeCollectionBoard = useCallback(() => {
+    setCollectionOpen(false);
+  }, []);
+
+  const toggleCollectionBoard = useCallback(() => {
+    if (collectionOpen) closeCollectionBoard();
+    else openCollectionBoard();
+  }, [collectionOpen, closeCollectionBoard, openCollectionBoard]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (event.ctrlKey || event.metaKey || event.altKey || event.defaultPrevented) return;
       const target = event.target as HTMLElement | null;
+      const inDialogOrPopup = target?.closest(
+        '[role="dialog"], dialog[open], .filter-popover, .project-problem-popup',
+      );
+      if (submissionOpen || inDialogOrPopup) return;
+
+      if (collectionOpen) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeCollectionBoard();
+        }
+        return;
+      }
+
       if (
+        isMobile ||
         !target ||
         /input|select|textarea/i.test(target.tagName) ||
-        target.isContentEditable ||
-        target.closest('[role="dialog"], dialog[open], .filter-popover, .project-problem-popup')
+        target.isContentEditable
       ) {
         return;
       }
-      if (submissionOpen || messagesDialog.current?.open) return;
 
-      if (!isMobile && event.key === "/") {
+      if (event.key === "/") {
         event.preventDefault();
         searchInput.current?.focus();
         return;
       }
 
       if (
-        !isMobile &&
         items.length > 0 &&
         (event.key === "ArrowDown" ||
           event.key === "ArrowUp" ||
@@ -338,7 +420,15 @@ export function App() {
     };
     addEventListener("keydown", onKeyDown);
     return () => removeEventListener("keydown", onKeyDown);
-  }, [isMobile, submissionOpen, items, selected?.id, commit]);
+  }, [
+    collectionOpen,
+    closeCollectionBoard,
+    isMobile,
+    submissionOpen,
+    items,
+    selected?.id,
+    commit,
+  ]);
 
   const hasFilters = Boolean(query.q.trim() || query.admitted);
 
@@ -370,26 +460,11 @@ export function App() {
     </>
   );
 
-  const failures = [
-    data?.status.scheduler,
-    data?.status.collection,
-  ] as (RunState | undefined)[];
-  const failure = failures.find((state) => state?.failed);
-  const admission = data?.status.admission as RunState | undefined;
-  const discovery = data?.status.discovery as RunState | undefined;
-  const cleanup = data?.status.cleanup as CleanupResult | undefined;
-  const problemProjects = useMemo(
-    () =>
-      data?.items.filter((project) => projectProblems(project).length > 0) ?? [],
-    [data?.items],
+  const collectionOverview = useMemo(
+    () => deriveCollectionOverview(data),
+    [data],
   );
-  const hasCollectionNotice = Boolean(
-    problemProjects.length > 0 ||
-      failure ||
-      discovery?.failed ||
-      admission?.failed ||
-      (data && data.summary.fresh < data.summary.tracked),
-  );
+  const hasCollectionNotice = collectionOverview.hasNotice;
 
   const themeMeta =
     themeMode === "light"
@@ -425,11 +500,18 @@ export function App() {
 
   return (
     <div className="app-shell">
-      <a className="skip-link" href="#rankings">
-        跳转到项目榜单
+      <a
+        className="skip-link"
+        href={collectionOpen ? "#collection-board" : "#rankings"}
+      >
+        {collectionOpen ? "跳转到采集看板" : "跳转到项目榜单"}
       </a>
 
-      <header className="masthead" id="top" ref={masthead}>
+      <header
+        className={`masthead${collectionOpen ? " is-collection-open" : ""}`}
+        id="top"
+        ref={masthead}
+      >
         <div className="frame masthead-inner">
           <a className="brand" href="/" aria-label="开源观察首页">
             <Icon name="mark" size={24} />
@@ -457,6 +539,8 @@ export function App() {
                   key={tab}
                   aria-pressed={query.tab === tab}
                   onClick={() => {
+                    if (collectionOpen && query.tab === tab) return;
+                    savedScroll.current = null;
                     setDraft("");
                     commit({ tab, q: "", admitted: "", project: "" });
                   }}
@@ -466,7 +550,7 @@ export function App() {
               ))}
             </div>
 
-            {!isMobile && (
+            {!isMobile && !collectionOpen && (
               <div className="filters">
                 <label className="search-field">
                   <Icon name="search" />
@@ -545,13 +629,16 @@ export function App() {
               <Icon name={themeMeta.icon} size={18} />
             </button>
             <button
+              ref={bellButton}
               type="button"
               className={`icon-button collection-messages${hasCollectionNotice ? " has-notice" : ""}`}
-              aria-label={hasCollectionNotice ? "采集消息，有异常提示" : "采集消息"}
-              aria-haspopup="dialog"
-              aria-controls="collection-messages"
-              title="采集消息"
-              onClick={() => messagesDialog.current?.showModal()}
+              aria-label={
+                hasCollectionNotice ? "采集看板（有异常提示）" : "采集看板"
+              }
+              aria-pressed={collectionOpen}
+              aria-controls={collectionOpen ? "collection-board" : undefined}
+              title={collectionOpen ? "返回项目榜单" : "采集看板"}
+              onClick={toggleCollectionBoard}
             >
               <Icon name="bell" size={19} />
             </button>
@@ -577,25 +664,26 @@ export function App() {
         />
       )}
 
-      <CollectionDialog
-        dialogRef={messagesDialog}
-        tab={query.tab}
-        data={data}
-        loading={resource.loading}
-        error={resource.error}
-        hasNotice={hasCollectionNotice}
-        failure={failure}
-        discovery={discovery}
-        admission={admission}
-        cleanup={cleanup}
-        problemProjects={problemProjects}
-      />
-
       <main className="frame app-main">
         <h1 className="visually-hidden">开源趋势追踪</h1>
+        {collectionOpen && (
+          <CollectionBoard
+            tab={query.tab}
+            data={data}
+            overview={collectionOverview}
+            loading={resource.loading}
+            refreshing={resource.refreshing}
+            error={resource.error}
+            isMobile={isMobile}
+            boardRef={collectionBoardRef}
+            onBack={closeCollectionBoard}
+            onRefresh={() => setRefresh((value) => value + 1)}
+          />
+        )}
         <section
           className="workspace"
           id="rankings"
+          hidden={collectionOpen}
           aria-label="趋势探索工作台"
         >
           <div className="listing" ref={listing}>
