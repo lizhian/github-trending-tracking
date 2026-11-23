@@ -3,7 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#f5f5f7" />
+    <script>
+      (() => {
+        try {
+          const mode = localStorage.getItem("theme-mode");
+          if (mode === "light" || mode === "dark") {
+            document.documentElement.dataset.theme = mode;
+          }
+          const dark =
+            mode === "dark" ||
+            (mode !== "light" &&
+              matchMedia("(prefers-color-scheme: dark)").matches);
+          const meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.content = dark ? "#111113" : "#f5f5f7";
+        } catch {}
+      })();
+    </script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>开源观察 / 开源趋势追踪</title>
     <meta

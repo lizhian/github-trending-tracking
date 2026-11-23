@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Submission } from "../shared/contracts";
+import type { Submission } from "../shared/contracts.ts";
+import { isDialogBackdrop } from "./lib/dom.ts";
 
 const storageKey = "repository-submission";
 const terminal = (result: Submission) =>
@@ -34,11 +35,15 @@ function savedSubmission() {
 export function SubmissionDialog({
   apiBase,
   onClose,
+  onSuccess,
 }: {
   apiBase: string;
   onClose: () => void;
+  onSuccess?: () => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
+  const backdropPress = useRef(false);
+  const notifiedIdRef = useRef("");
   const [url, setURL] = useState("");
   const [id, setID] = useState(savedSubmission);
   const [result, setResult] = useState<Submission | null>(null);
@@ -52,10 +57,21 @@ export function SubmissionDialog({
     return () => postController.current?.abort();
   }, []);
 
-  const accept = useCallback((next: Submission) => {
-    setResult(next);
-    setError("");
-  }, []);
+  const accept = useCallback(
+    (next: Submission) => {
+      setResult(next);
+      setError("");
+      if (
+        terminal(next) &&
+        (next.github === "tracked" || next.linuxdo === "tracked") &&
+        notifiedIdRef.current !== next.id
+      ) {
+        notifiedIdRef.current = next.id;
+        onSuccess?.();
+      }
+    },
+    [onSuccess],
+  );
 
   useEffect(() => {
     if (!id) return;
@@ -68,12 +84,18 @@ export function SubmissionDialog({
           signal: controller.signal,
           cache: "no-store",
         });
-        const value = await response.json().catch(() => { throw new Error("服务暂时不可用，请稍后重试"); });
+        const value = await response.json().catch(() => {
+          throw new Error("服务暂时不可用，请稍后重试");
+        });
         if (!response.ok) {
           if (response.status === 404) {
             setID("");
             setResult(null);
-            try { localStorage.removeItem(storageKey); } catch { /* Storage is optional. */ }
+            try {
+              localStorage.removeItem(storageKey);
+            } catch {
+              /* Storage is optional. */
+            }
           }
           throw new Error(value.error || "暂时无法查询投稿状态");
         }
@@ -84,12 +106,19 @@ export function SubmissionDialog({
         delay = next.status === "retrying" ? 30_000 : 5_000;
       } catch (problem) {
         if (controller.signal.aborted) return;
-        setError(problem instanceof Error ? problem.message : "暂时无法查询投稿状态");
+        setError(
+          problem instanceof Error ? problem.message : "暂时无法查询投稿状态",
+        );
       }
-      if (!controller.signal.aborted) timer = setTimeout(() => void poll(), delay);
+      if (!controller.signal.aborted) {
+        timer = setTimeout(() => void poll(), delay);
+      }
     };
     void poll();
-    return () => { controller.abort(); clearTimeout(timer); };
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
   }, [id, apiBase, accept]);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
@@ -108,44 +137,103 @@ export function SubmissionDialog({
         signal: controller.signal,
         cache: "no-store",
       });
-      const value = await response.json().catch(() => { throw new Error("服务暂时不可用，请稍后重试"); });
+      const value = await response.json().catch(() => {
+        throw new Error("服务暂时不可用，请稍后重试");
+      });
       if (!response.ok) throw new Error(value.error || "投稿失败，请稍后重试");
       if (controller.signal.aborted) return;
       const next = value as Submission;
       accept(next);
       setID(next.id);
-      try { localStorage.setItem(storageKey, next.id); } catch { /* Storage is optional. */ }
+      try {
+        localStorage.setItem(storageKey, next.id);
+      } catch {
+        /* Storage is optional. */
+      }
     } catch (problem) {
-      if (!controller.signal.aborted)
-        setError(problem instanceof Error ? problem.message : "投稿失败，请稍后重试");
+      if (!controller.signal.aborted) {
+        setError(
+          problem instanceof Error ? problem.message : "投稿失败，请稍后重试",
+        );
+      }
     } finally {
       if (!controller.signal.aborted) setBusy(false);
     }
   }
 
   return (
-    <dialog className="submission-dialog" ref={dialog} aria-labelledby="submission-title" onCancel={onClose}>
+    <dialog
+      className="submission-dialog"
+      ref={dialog}
+      aria-labelledby="submission-title"
+      onCancel={onClose}
+      onPointerDown={(event) => {
+        backdropPress.current = isDialogBackdrop(event);
+      }}
+      onClick={(event) => {
+        const close = backdropPress.current && isDialogBackdrop(event);
+        backdropPress.current = false;
+        if (close) onClose();
+      }}
+    >
       <div className="submission-heading">
         <h2 id="submission-title">投稿开源项目</h2>
-        <button type="button" className="icon-button" onClick={onClose} aria-label="关闭投稿">×</button>
+        <button
+          type="button"
+          className="icon-button"
+          onClick={onClose}
+          aria-label="关闭投稿"
+        >
+          ×
+        </button>
       </div>
       <p>提交公开的 GitHub 仓库地址，收录后持续观察 Star 变化。</p>
       <form onSubmit={(event) => void submit(event)}>
         <label htmlFor="submission-url">GitHub 仓库地址</label>
-        <input id="submission-url" type="url" required maxLength={2048} autoFocus placeholder="https://github.com/owner/repo" value={url} onChange={(event) => setURL(event.target.value)} />
-        <button className="submission-button" type="submit" disabled={busy}>{busy ? "正在提交…" : "提交仓库"}</button>
+        <input
+          id="submission-url"
+          type="url"
+          required
+          maxLength={2048}
+          autoFocus
+          placeholder="https://github.com/owner/repo"
+          value={url}
+          onChange={(event) => setURL(event.target.value)}
+        />
+        <button className="submission-button" type="submit" disabled={busy}>
+          {busy ? "正在提交…" : "提交仓库"}
+        </button>
       </form>
-      {error && <p className="submission-error" role="alert">{error}</p>}
+      {error && (
+        <p className="submission-error" role="alert">
+          {error}
+        </p>
+      )}
       {result && (
         <section className="submission-result" aria-live="polite">
           <h3>{statusLabels[result.status]}</h3>
-          <a href={result.url} target="_blank" rel="noreferrer">{result.name}</a>
+          <a href={result.url} target="_blank" rel="noreferrer">
+            {result.name}
+          </a>
           <dl>
-            <div><dt>GitHub 趋势</dt><dd>{resultLabels[result.github]}</dd></div>
-            <div><dt>Linux.do 开源项目</dt><dd>{resultLabels[result.linuxdo]}</dd></div>
+            <div>
+              <dt>GitHub 趋势</dt>
+              <dd>{resultLabels[result.github]}</dd>
+            </div>
+            <div>
+              <dt>Linux.do 开源项目</dt>
+              <dd>{resultLabels[result.linuxdo]}</dd>
+            </div>
           </dl>
           {result.message && <p>{result.message}</p>}
-          {result.nextAttemptAt && <p>下次尝试：{new Date(result.nextAttemptAt).toLocaleString("zh-CN", { hour12: false })}</p>}
+          {result.nextAttemptAt && (
+            <p>
+              下次尝试：
+              {new Date(result.nextAttemptAt).toLocaleString("zh-CN", {
+                hour12: false,
+              })}
+            </p>
+          )}
         </section>
       )}
     </dialog>

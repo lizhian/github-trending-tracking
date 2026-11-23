@@ -1,4 +1,4 @@
-import { WINDOWS, type Project } from "../shared/contracts";
+import { WINDOWS, type Project } from "../shared/contracts.ts";
 
 const DAY = 86_400_000;
 const weights = [0.6, 0.25, 0.1, 0.05];
