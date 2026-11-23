@@ -1,15 +1,8 @@
 import { useEffect, useId, useRef, useState, type CSSProperties } from "react";
 import type { Project } from "../shared/contracts";
+import { projectProblems } from "./lib/collection.ts";
 
-export function projectProblems(project: Project): string[] {
-  const problems: string[] = [];
-  if (project.unavailableAt)
-    problems.push("仓库不可访问，按最后已知 Star 总数计算。");
-  if (project.stale)
-    problems.push("数据过期，未在应采时段及 10 分钟宽限内成功更新。");
-  if (project.error) problems.push(`更新异常：${project.error}`);
-  return problems;
-}
+export { projectProblems };
 
 export function ProjectProblemDetails({ project }: { project: Project }) {
   return (
