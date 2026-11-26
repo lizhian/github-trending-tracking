@@ -6,13 +6,13 @@ import {
   type WindowHours,
 } from "../shared/contracts.ts";
 import { Icon } from "./Icons.tsx";
+import { HeatValue } from "./ProjectValues.tsx";
 import {
   ChartPlaceholder,
   TrendChart,
   type ChartMode,
 } from "./TrendChart.tsx";
 import {
-  formatHeat,
   formatNumber,
   formatSigned,
   formatTime,
@@ -34,7 +34,7 @@ export function ProjectInspector({
   onBack,
 }: {
   project: Project;
-  heat: number | null;
+  heat: number;
   windowHours: WindowHours;
   refresh: number;
   asOf: number;
@@ -283,7 +283,9 @@ export function ProjectInspector({
               : "暂不可用"}
         </dd>
         <dt>热度评分</dt>
-        <dd>{heat === null ? "积累中" : formatHeat(heat)}</dd>
+        <dd>
+          <HeatValue project={project} heat={heat} />
+        </dd>
         <dt>保护期</dt>
         <dd>{protectedNow ? "保护中" : "已结束"}</dd>
       </dl>

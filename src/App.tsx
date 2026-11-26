@@ -365,7 +365,7 @@ export function App() {
       if (event.ctrlKey || event.metaKey || event.altKey || event.defaultPrevented) return;
       const target = event.target as HTMLElement | null;
       const inDialogOrPopup = target?.closest(
-        '[role="dialog"], dialog[open], .filter-popover, .project-problem-popup',
+        '[role="dialog"], dialog[open], .filter-popover, .project-problem-popup, .heat-tooltip',
       );
       if (submissionOpen || inDialogOrPopup) return;
 
@@ -475,11 +475,11 @@ export function App() {
 
   const inspectorContent = (
     <aside className="inspector" ref={inspector} aria-label="选中项目详情">
-      {selected && data ? (
+      {selected && selectedItem && data ? (
         <ProjectInspector
           key={selected.id}
           project={selected}
-          heat={selectedItem?.heat ?? null}
+          heat={selectedItem.heat}
           windowHours={query.window}
           refresh={refresh}
           asOf={data.asOf}

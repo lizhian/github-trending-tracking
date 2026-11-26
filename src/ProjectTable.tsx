@@ -15,7 +15,7 @@ import { clearTextWidthCache, computeVisibleTagCount } from "./lib/tagFit.ts";
 
 interface ProjectRowProps {
   project: Project;
-  heat: number | null;
+  heat: number;
   rank: number;
   selected: boolean;
   sort: SortField;

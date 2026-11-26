@@ -137,7 +137,7 @@ export function serializeLocation(
 
 export interface IndexedProject {
   project: Project;
-  heat: number | null;
+  heat: number;
   searchText: string;
   languageLower: string;
 }

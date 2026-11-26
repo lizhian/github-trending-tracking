@@ -21,7 +21,7 @@ import {
 
 interface MobileCardProps {
   project: Project;
-  heat: number | null;
+  heat: number;
   rank: number;
   selected: boolean;
   sort: SortField;
