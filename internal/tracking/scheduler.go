@@ -264,6 +264,8 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 		}
 	}
 	admissionAttempted := map[string]bool{}
+	retiredTypes := map[string]bool{}
+	var retiredRepos []string
 	record := func(kind, typ string, success bool, message string) {
 		if kind == "admission" {
 			admissionAttempted[typ] = true
@@ -627,7 +629,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 					record("admission", entry.Type, true, "")
 				}
 			} else {
-				// 只有未收录候选可以明确结束本次收录；已收录项目保留采样错误及旧历史。
+				// 先处理候选的收录结果，再依据本轮复核决定存量追踪是否到期。
 				index := slices.Index(group, id)
 				for _, entry := range additions {
 					entry.Failure = message
@@ -643,6 +645,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 							continue
 						}
 						if confirmErr == nil {
+							confirmedMissing = false // 候选地址已确认同一仓库可访问。
 							observations = append(observations, observation{repo: recovered, typ: entry.Type, metadataAt: now, origin: entry.Origin})
 							completed[entry] = true
 							record("admission", entry.Type, true, "")
@@ -651,7 +654,19 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 						entry.Failure = safeError(confirmErr)
 					}
 				}
+				// 同一仓库的两个追踪类型一起删除。等待两者的不可访问状态均超过 72 小时，
+				// 避免删除刚恢复收录的周期。
+				retired := confirmedMissing && !slices.ContainsFunc(existing, func(row *ProjectRow) bool {
+					return row.UnavailableAt <= 0 || now-row.UnavailableAt <= 3*Day || row.AttemptedAt > now
+				})
+				if retired {
+					retiredRepos = append(retiredRepos, id)
+				}
 				for _, row := range existing {
+					if retired {
+						retiredTypes[row.Type] = true
+						continue
+					}
 					if _, e = s.store.DB.ExecContext(ctx, "UPDATE projects SET attempted_at=?,error=?,unavailable_at=CASE WHEN ? AND unavailable_at=0 THEN ? ELSE unavailable_at END WHERE id=? AND cycle=? AND attempted_at<=?", now, message, confirmedMissing, now, row.ID, row.Cycle, now); e != nil {
 						return false, e
 					}
@@ -698,7 +713,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			if err != nil {
 				return false, err
 			}
-			changed := results[key].Succeeded > 0 || results[key].Failed > 0
+			changed := results[key].Succeeded > 0 || results[key].Failed > 0 || retiredTypes[typ]
 			if kind == "admission" {
 				changed = admissionAttempted[typ] || previous.Failed != results[key].Failed || jsonText(previous.Error) != jsonText(results[key].Error)
 			}
@@ -707,12 +722,18 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			}
 		}
 	}
-	// 候选结束、不可访问缓存和错误状态在同一事务提交，避免移除候选却留下“后台重试”提示。
+	// 结束追踪与候选收录结果和采集状态同事务提交。快照由外键级联删除。
 	pendingChanged := jsonText(pending) != priorJSON
 	if pendingChanged || len(changes) > 0 || len(unavailable) > 0 {
 		tx, e := s.store.DB.BeginTx(ctx, nil)
 		if e != nil {
 			return false, e
+		}
+		for _, id := range retiredRepos {
+			if _, e = tx.ExecContext(ctx, "DELETE FROM projects WHERE repo_id=?", id); e != nil {
+				tx.Rollback()
+				return false, e
+			}
 		}
 		for key, cached := range unavailable {
 			if e = setTxState(ctx, tx, key, cached); e != nil {
@@ -728,10 +749,12 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 			if kind == "collection" {
 				global.Version = 2
 			}
+			changed := false
 			for _, key := range changes {
 				if !strings.HasPrefix(key, kind+":") {
 					continue
 				}
+				changed = true
 				v := results[key]
 				if e == nil {
 					e = setTxState(ctx, tx, key, v)
@@ -759,7 +782,7 @@ func (s *Scheduler) collect(ctx context.Context, now int64, policy *SamplingPoli
 					}
 				}
 			}
-			if e == nil && ((kind == "collection" && global.Succeeded+global.Failed > 0) || (kind == "admission" && (slices.Contains(changes, "admission:github") || slices.Contains(changes, "admission:linux.do") || global.Failed != prior[kind].Failed))) {
+			if e == nil && (changed || (kind == "admission" && global.Failed != prior[kind].Failed)) {
 				e = setTxState(ctx, tx, kind, global)
 			}
 		}

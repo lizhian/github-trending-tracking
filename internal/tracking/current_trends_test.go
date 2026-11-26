@@ -43,7 +43,9 @@ func TestCurrentWindowsDecayWithoutCreatingObservations(t *testing.T) {
 	if got.Delta == nil || *got.Delta != 50 || len(got.Points) != 1 {
 		t.Fatal("recovery delta lost", got)
 	}
-	got = ProjectTrend(row, []Point{{row.ObservedAt, 350}, {row.ObservedAt + 2*Day, 350}}, 24, row.ObservedAt+2*Day, nil)
+	recoveredAt := row.ObservedAt
+	row.ObservedAt = recoveredAt + 2*Day
+	got = ProjectTrend(row, []Point{{recoveredAt, 350}, {recoveredAt + Day, 350}, {row.ObservedAt, 350}}, 24, row.ObservedAt, nil)
 	if got.Delta == nil || *got.Delta != 0 {
 		t.Fatal("recovery increase did not age out", got)
 	}
@@ -62,6 +64,9 @@ func TestTrackedUnavailableConfirmationAndRecovery(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newSubmissionHarness(t)
 			at := h.clock.Now()
+			if err := h.store.SetState(linuxdoCleanupKey, linuxdoCleanupState{CompletedAt: at}); err != nil {
+				t.Fatal(err)
+			}
 			var repo repository
 			if err := json.Unmarshal([]byte(submissionRepository), &repo); err != nil {
 				t.Fatal(err)
@@ -103,7 +108,8 @@ func TestTrackedUnavailableConfirmationAndRecovery(t *testing.T) {
 			if !tc.confirmed {
 				return
 			}
-			h.clock.advance(at + Hour)
+			recoveredAt := at + 3*Day + Hour
+			h.clock.advance(recoveredAt)
 			h.response = func(r *http.Request) (*http.Response, error) {
 				if r.URL.Path == "/graphql" {
 					return submissionResponse(200, `{"data":{"nodes":[`+submissionRepository+`]}}`), nil
@@ -117,18 +123,114 @@ func TestTrackedUnavailableConfirmationAndRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			rows, err = h.store.ProjectRows("")
-			if err != nil {
-				t.Fatal(err)
+			if err != nil || len(rows) != len(projectTypes) {
+				t.Fatalf("recovered projects: %+v: %v", rows, err)
 			}
 			for _, row := range rows {
 				var periods []carryPeriod
 				if err := json.Unmarshal([]byte(row.CarryPeriods), &periods); err != nil {
 					t.Fatal(err)
 				}
-				if row.UnavailableAt != 0 || row.ObservedAt != at+Hour || len(periods) != 1 {
+				if row.UnavailableAt != 0 || row.ObservedAt != recoveredAt || len(periods) != 1 {
 					t.Fatalf("did not recover: %+v", row)
 				}
 			}
 		})
+	}
+}
+
+func TestTrackedUnavailableExpiresAfterConfirmedRetry(t *testing.T) {
+	ctx := context.Background()
+	h := newSubmissionHarness(t)
+	at := h.clock.Now()
+	h.scheduler.startAt = at
+	if err := h.store.SetState(linuxdoCleanupKey, linuxdoCleanupState{CompletedAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	var repo repository
+	if err := json.Unmarshal([]byte(submissionRepository), &repo); err != nil {
+		t.Fatal(err)
+	}
+	for _, typ := range projectTypes {
+		if err := h.store.saveObservations(ctx, []observation{{repo: &repo, typ: typ}}, at-Day, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := h.store.ProjectRows("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	anonymousStatus := 404
+	samplingRequests := 0
+	h.response = func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/graphql" {
+			samplingRequests++
+			return submissionResponse(200, `{"data":{"nodes":[null]},"errors":[{"type":"NOT_FOUND","path":["nodes",0]}]}`), nil
+		}
+		if r.URL.Host == "api.github.com" {
+			return submissionResponse(anonymousStatus, ""), nil
+		}
+		return submissionResponse(200, `<rss><channel/></rss>`), nil
+	}
+	for _, step := range []struct {
+		name   string
+		offset int64
+		status int
+		want   int
+	}{
+		{"first confirmation", 0, 404, 2},
+		{"exactly 72 hours", 3 * Day, 404, 2},
+		{"temporary failure after 72 hours", 3*Day + retryInterval, 503, 2},
+		{"confirmation after 72 hours", 3*Day + Hour, 404, 0},
+	} {
+		h.clock.advance(at + step.offset)
+		anonymousStatus = step.status
+		if err := h.scheduler.Tick(ctx); err != nil {
+			t.Fatalf("%s: %v", step.name, err)
+		}
+		rows, err := h.store.ProjectRows("")
+		if err != nil || len(rows) != step.want {
+			t.Fatalf("%s: got %d projects, want %d: %v", step.name, len(rows), step.want, err)
+		}
+		for _, row := range rows {
+			if row.UnavailableAt != at {
+				t.Fatalf("%s: first confirmation changed to %d", step.name, row.UnavailableAt)
+			}
+		}
+		var snapshots int
+		err = h.store.DB.QueryRow("SELECT COUNT(*) FROM snapshot_days").Scan(&snapshots)
+		if err != nil || snapshots != step.want {
+			t.Fatalf("%s: got %d snapshot days, want %d: %v", step.name, snapshots, step.want, err)
+		}
+	}
+	for _, key := range []string{"collection", "collection:github", "collection:linux.do"} {
+		var status runState
+		found, err := h.store.State(key, &status)
+		if err != nil || !found || status.Failed != 0 || status.Succeeded != 0 || status.Error != nil {
+			t.Fatalf("%s: retiring a project is neither an error nor a Star observation: %+v: %v", key, status, err)
+		}
+	}
+	requests := samplingRequests
+	h.clock.advance(at + 3*Day + 2*Hour)
+	if err := h.scheduler.Tick(ctx); err != nil || samplingRequests != requests {
+		t.Fatalf("retired repo was sampled again: %d -> %d: %v", requests, samplingRequests, err)
+	}
+	h.response = nil
+	h.enqueue(t, repo.Name)
+	h.step(t)
+	h.step(t)
+	after, err := h.store.ProjectRows("")
+	if err != nil || len(after) != len(before) {
+		t.Fatalf("readmitted projects: %+v: %v", after, err)
+	}
+	for _, row := range after {
+		for _, old := range before {
+			if row.Cycle == old.Cycle {
+				t.Fatalf("readmission reused old cycle: %s", row.Cycle)
+			}
+		}
+		if row.UnavailableAt != 0 {
+			t.Fatalf("readmission inherited unavailable state: %+v", row)
+		}
 	}
 }
